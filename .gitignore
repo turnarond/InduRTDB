@@ -1,19 +1,138 @@
-CMakeLists.txt.user
-CMakeCache.txt
-CMakeFiles
-CMakeScripts
-Testing
-Makefile
-cmake_install.cmake
-install_manifest.txt
-compile_commands.json
-CTestTestfile.cmake
-_deps
-CMakeUserPresets.json
+# InduRTDB Git Ignore File
 
-# CLion
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
-#cmake-build-*
+# Build directories
+build/
+build-*/
+*.cmake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+
+# Generated files
+*.o
+*.so
+*.a
+*.exe
+*.dll
+*.dylib
+*.lib
+*.exp
+*.ilk
+*.pdb
+*.obj
+
+# Test coverage
+*.gcda
+*.gcno
+*.gcov
+lcov/
+coverage/
+
+# Valgrind
+*.memcheck
+valgrind.out*
+
+# Profiling
+*.prof
+*.gmon
+*.perf
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.log
+*.core
+*.pid
+
+# Configuration files
+*.cfg
+*.ini
+*.yaml
+*.yml
+*.json
+*.xml
+*.properties
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+
+# Test executables
+test_basic
+indurtdb_tests
+
+# CMake generated files
+InduRTDBConfig.cmake
+InduRTDBConfigVersion.cmake
+
+# Documentation build
+docs/build/
+docs/html/
+docs/latex/
+docs/man/
+
+# Examples build
+examples/build/
+
+# Cache directories
+.cache/
+.ccls-cache/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/*
+!.idea/codeStyles/
+!.idea/inspectionProfiles/
+
+# Package manager
+node_modules/
+venv/
+.env
+
+# Backup files
+*.backup
+*.old
+*.orig
+
+# Environment variables
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+docker-compose*.yaml
+docker_build/
+docker_cache/
+
+# CI/CD
+.github/workflows/
+.gitlab-ci.yml
+.travis.yml
+
+# Misc
+*.lock
+*.patch
+*.diff
+*.rej
+*~
+
+# Keep these files
+!.gitignore
+!.clang-format
