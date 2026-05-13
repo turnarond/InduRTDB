@@ -230,12 +230,14 @@ Application Layer → InduRTDB Core → OS Abstraction Layer (OSAL)
 ## 9. 附录
 
 ### 9.1 版本路线图
-| 版本 | 目标 |
-|------|------|
-| v0.1 | Linux/SylixOS 共享内存 + read/write |
-| v0.5 | 订阅 + 崩溃恢复 + YAML 配置 |
-| v1.0 | MISRA 合规 + 完整文档 + gtest 覆盖率 ≥90% |
-| v1.1 | OPC UA 桥接插件 |
+
+| 版本 | 日期 | 目标 | 状态 |
+|------|------|------|------|
+| v1.0.0 | 2026-03-27 | 项目脚手架 + 全套文档 + 原型代码 | ✅ 已完成 |
+| v2.0.0 | 2026-05-11 | **架构修正**: 共享内存重写, Seqlock 轻量化, STL 移除 | ✅ 已完成 |
+| v2.1.0 | 2026-05-11 | 多进程集成测试, ConfigLoader, 文档修订, bug 修复 | ✅ 已完成 |
+| v2.2 | TBD | SylixOS 验证 + 性能基准测试 | ⏳ 计划中 |
+| v3.0 | TBD | UDS 跨进程通知 + OPC UA 桥接插件 | 📋 规划中 |
 
 ### 9.2 许可证
 - **MIT License**  

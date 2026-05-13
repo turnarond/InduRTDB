@@ -1,8 +1,8 @@
 # InduRTDB 工程框架架构设计文档
 
-**版本：1.0.0**  
-**日期：2026年3月27日**  
-**作者：高级C++开发工程师**
+**版本：1.1.0**
+**日期：2026年5月11日**
+**修订说明**：Core 层去虚函数、去 STL；PointManager 改为模板接口；Seqlock 回归轻量自由函数
 
 ## 1. 文档概述
 
@@ -147,19 +147,21 @@ indurtdb/
 
 #### 3.2.3 点位管理模块
 - **文件**：`src/core/point_manager.cpp`
-- **职责**：提供点位的读写操作
+- **职责**：提供点位的读写操作（非虚类，编译期绑定）
 - **关键技术**：
-  - Seqlock并发控制
-  - 无锁读取
-  - 原子操作
+  - 全局 Seqlock（Header.write_seq）并发控制
+  - 无锁读取（peek 零拷贝返回共享内存指针）
+  - 模板 write<T> 编译期类型分发
+  - GCC `__atomic_*` 内建函数
 
 #### 3.2.4 订阅管理模块
 - **文件**：`src/core/subscription_manager.cpp`
 - **职责**：管理点位变更订阅
 - **关键技术**：
-  - Unix Domain Socket通知
-  - 心跳机制
-  - 僵尸进程清理
+  - 定长 SubscriberSlot 数组（零堆分配）
+  - C 风格函数指针回调
+  - 共享内存心跳表 + 僵尸进程清理
+  - Unix Domain Socket 通知（跨进程）
 
 #### 3.2.5 OS抽象层模块
 - **文件**：`src/osal/`
@@ -178,43 +180,47 @@ indurtdb/
 │                      InduRTDB (Singleton)                    │
 │  - instance(): InduRTDB&                                    │
 │  - initialize(): bool                                       │
-│  - write(): bool                                            │
+│  - write<T>(): bool                                         │
 │  - read(): bool                                             │
 │  - subscribe(): bool                                        │
 │  - shutdown(): void                                         │
 │                                                             │
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │                    Impl (PIMPL)                     │   │
-│  │  - point_manager_: PointManager*                    │   │
-│  │  - subscriptions_: map<PointId, vector<Callback>>   │   │
-│  │  - mutex_: mutex                                    │   │
+│  │  - segment_: SharedMemorySegment                    │   │
+│  │  - point_mgr_: PointManager                         │   │
+│  │  - sub_mgr_: SubscriptionManager                    │   │
 │  └─────────────────────────────────────────────────────┘   │
 └──────────────────────────────┬──────────────────────────────┘
                                │
 ┌──────────────────────────────▼──────────────────────────────┐
-│                    PointManager (Interface)                  │
-│  - write_bool(): bool                                       │
-│  - write_int32(): bool                                      │
-│  - write_double(): bool                                     │
-│  - write_string(): bool                                     │
-│  - read(): bool                                             │
-│  - peek(): const PointData*                                 │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                 PointManagerImpl (Implementation)            │
-│  - segment_: SharedMemorySegment*                           │
-│  - time_: ITime*                                            │
-│  - threading_: IThreading*                                  │
+│                 PointManager (Concrete, 非虚)               │
+│  - write<T>(id, value): bool                                │
+│  - read(id, out): bool                                      │
+│  - peek(id): const PointData*    ← 零拷贝，返回 &points_[id]│
+│  - validate_id(id): bool                                    │
 │                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │           SharedMemorySegment                       │   │
-│  │  - header_: InduRTDBHeader*                         │   │
-│  │  - points_: PointData*                              │   │
-│  │  - subscribers_: SubscriberEntry*                   │   │
-│  └─────────────────────────────────────────────────────┘   │
+│  - header_: InduRTDBHeader*    ← 共享内存头部                │
+│  - points_: PointData*         ← 共享内存点位数组            │
+│  - time_: ITime*               ← OSAL 时间接口               │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│              SharedMemorySegment (Concrete)                  │
+│  - initialize(): bool    ← shm_open + mmap + init header    │
+│  - shutdown(): void      ← munmap + shm_unlink              │
+│  - base(): void*                                            │
+│  - header(): InduRTDBHeader*                                │
+│  - points(): PointData*                                     │
+│  - subscribers(): SubscriberEntry*                          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+> **Core 层设计原则**：
+> - **非虚类**：PointManager、SharedMemorySegment 不需要多态，编译期绑定
+> - **零 STL**：定长数组替代 vector/map/unordered_map
+> - **零异常**：全部 bool 返回值
+> - **Seqlock 为轻量自由函数**：操作 header_->write_seq，不封装为类层次
 
 ### 4.2 接口设计
 
@@ -246,16 +252,36 @@ class INotification {
 };
 ```
 
-#### 4.2.2 核心接口
+#### 4.2.2 核心接口（非虚，编译期绑定）
+
 ```cpp
+// PointManager —— 直接操作共享内存，无虚函数
 class PointManager {
-    virtual bool write_bool(PointId id, bool value) = 0;
-    virtual bool write_int32(PointId id, int32_t value) = 0;
-    virtual bool write_double(PointId id, double value) = 0;
-    virtual bool write_string(PointId id, const char* value) = 0;
-    virtual bool read(PointId id, PointData& out) const = 0;
-    virtual const PointData* peek(PointId id) const = 0;
+public:
+    PointManager(void* shm_base, uint32_t max_points, osal::ITime* time);
+
+    // 模板写入（满足 SRS：rtdb.write(id, value)）
+    template<typename T>
+    bool write(PointId id, const T& value);
+
+    bool read(PointId id, PointData& out) const;
+    const PointData* peek(PointId id) const;  // 零拷贝
+
+    bool validate_id(PointId id) const;
+    uint64_t get_write_count() const;
+
+private:
+    InduRTDBHeader* header_;
+    PointData*      points_;
+    uint32_t        max_points_;
+    osal::ITime*    time_;
 };
+
+// Seqlock —— 轻量自由函数（非类）
+uint64_t seqlock_write_begin(uint64_t* seq);
+void     seqlock_write_end(uint64_t* seq, uint64_t seq0);
+const PointData* seqlock_read(const uint64_t* seq,
+                               const PointData* points, uint32_t id);
 ```
 
 ## 5. 数据流设计
@@ -534,8 +560,9 @@ InduRTDB工程框架设计严格遵循工业级实时系统的要求，具备以
 ---
 **文档版本历史**
 - v1.0.0 (2026-03-27)：初始版本，完成整体架构设计
+- v1.1.0 (2026-05-11)：Core 层去虚函数/去 STL，PointManager 改为模板接口，Seqlock 回归轻量自由函数
 
 **审核记录**
-- 设计评审：待完成
+- 设计评审：v1.1.0 已修订
 - 代码评审：待完成
 - 测试评审：待完成

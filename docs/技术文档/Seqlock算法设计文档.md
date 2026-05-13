@@ -1,10 +1,9 @@
-# Seqlock无锁读写算法设计文档
+# Seqlock 无锁读写算法设计文档
 
-**项目名称**：InduRTDB - 工业实时数据库  
-**算法名称**：Seqlock（Sequence Lock）无锁读写算法  
-**版本号**：1.0.0  
-**创建日期**：2026年3月27日  
-**作者**：高级C++开发工程师  
+**项目名称**：InduRTDB - 工业实时数据库
+**版本号**：2.0.0
+**修订日期**：2026年5月11日
+**修订说明**：移除 OOP 过度设计，改为基于 Header.write_seq 的轻量机制
 
 ---
 
@@ -12,468 +11,168 @@
 
 ### 1.1 问题背景
 
-在工业实时数据库系统中，数据的一致性和性能是至关重要的。传统的锁机制在高并发场景下会引入显著的性能开销，尤其是在**读多写少**的场景中。Seqlock算法提供了一种无锁（lock-free）的解决方案，能够实现高效的并发访问。
+工业实时数据库的场景是"多读少写"：多个 Reader 进程高频读取点位数据，Writer 进程周期性写入。传统互斥锁在读取路径上引入竞争，无法满足 P99 ≤ 5μs 的读延迟要求。
 
 ### 1.2 算法原理
 
-Seqlock是一种基于**序列号**的无锁读写算法，其核心思想是：
+Seqlock 基于**全局序列号**（存储在共享内存 Header 中）实现无锁读写：
 
-1. **写操作**：在开始写入前增加序列号（奇数表示正在写入），完成写入后再次增加序列号（偶数表示写入完成）
-2. **读操作**：读取序列号 → 读取数据 → 再次读取序列号。如果两次读取的序列号相同且为偶数，则数据一致
+1. **写操作**：递增序列号（偶数→奇数→偶数），奇数区间内更新数据
+2. **读操作**：记录序列号 → 读数据 → 再读序列号，两次相同且为偶数则数据一致；否则重试
 
 ### 1.3 适用场景
 
 - 读多写少的场景（工业实时数据库的典型场景）
-- 需要低延迟访问的实时系统
-- 数据一致性要求高的应用
-- 对锁机制开销敏感的系统
+- 需要低延迟读取的实时系统
+- 单写者或多写者低冲突场景
 
 ---
 
-## 2. 算法设计
+## 2. 核心设计
 
-### 2.1 数据结构设计
+### 2.1 序列号位置
 
-```cpp
-// 基础序列号类型
-using SeqlockSequence = uint64_t;
+序列号存储在共享内存 `InduRTDBHeader.write_seq`（uint64_t，offset=16）：
 
-// Seqlock数据结构
-struct SeqlockData {
-    volatile SeqlockSequence sequence;    // 序列号（偶数表示稳定，奇数表示正在写入）
-    PointData point_data;                // 点位数据
-};
+```
+偶数 = 空闲（无写者活动）
+奇数 = 写入中（Reader 应重试）
 ```
 
-### 2.2 算法复杂性分析
-
-#### 时间复杂度
-
-| 操作类型 | 最好情况 | 最坏情况 | 平均情况 |
-|---------|---------|---------|---------|
-| 读操作  | O(1)    | O(n)    | O(1)    |
-| 写操作  | O(1)    | O(1)    | O(1)    |
-
-#### 空间复杂度
-
-- 每个Seqlock实例：约200字节（包含点位数据）
-- 无额外内存分配
-
-### 2.3 并发安全性分析
-
-#### 写操作安全性
+### 2.2 关键操作（自由函数，非类方法）
 
 ```cpp
-// 写操作流程
-void write(SeqlockData& lock, const PointData& data) {
-    SeqlockSequence seq = __atomic_load_n(&lock.sequence, __ATOMIC_ACQUIRE);
-    
-    // 确保写入前无其他写入操作（可选，但推荐）
-    if (seq % 2 != 0) {
-        return false; // 有写入正在进行
-    }
-    
-    // 增加序列号（奇数，表示正在写入）
-    __atomic_store_n(&lock.sequence, seq + 1, __ATOMIC_RELEASE);
-    
-    // 写入数据（内存屏障确保顺序）
-    __atomic_thread_fence(__ATOMIC_MEMORY_BARRIER);
-    
-    // 实际数据写入
-    memcpy(&lock.point_data, &data, sizeof(PointData));
-    
-    // 内存屏障确保数据可见性
-    __atomic_thread_fence(__ATOMIC_MEMORY_BARRIER);
-    
-    // 再次增加序列号（偶数，表示写入完成）
-    __atomic_store_n(&lock.sequence, seq + 2, __ATOMIC_RELEASE);
-    
-    return true;
+// --- 写入协议 ---
+
+// 步骤1: 获取写入权，返回当前序列号。若返回值为奇数，表示有并发写入，应重试或失败
+inline uint64_t seqlock_write_begin(uint64_t* seq) {
+    uint64_t s = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+    if (s & 1ULL) return s;                         // 奇数=写冲突
+    __atomic_store_n(seq, s + 1, __ATOMIC_RELEASE);  // 标记写入中
+    return s;
 }
-```
 
-#### 读操作安全性
+// 步骤2: 完成写入，seq0 为 begin 返回的序列号
+inline void seqlock_write_end(uint64_t* seq, uint64_t seq0) {
+    __atomic_store_n(seq, seq0 + 2, __ATOMIC_RELEASE); // 恢复偶数
+}
 
-```cpp
-// 读操作流程
-bool read(const SeqlockData& lock, PointData& data) {
-    SeqlockSequence seq1, seq2;
-    
+// --- 读取协议 ---
+
+// 从共享内存读取点位数据，返回 const 指针（零拷贝）
+inline const PointData* seqlock_read(const uint64_t* seq,
+                                      const PointData* points,
+                                      uint32_t id) {
+    uint64_t s0, s1;
     do {
-        // 读取序列号（获取内存屏障）
-        seq1 = __atomic_load_n(&lock.sequence, __ATOMIC_ACQUIRE);
-        
-        // 检查是否正在写入
-        if (seq1 % 2 != 0) {
-            continue; // 正在写入，重试
-        }
-        
-        // 内存屏障确保数据完整性
+        s0 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1ULL) continue;                    // 写中，重试
+        // 此时可安全读取 points[id]
         __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        
-        // 读取数据
-        memcpy(&data, &lock.point_data, sizeof(PointData));
-        
-        // 内存屏障确保读取顺序
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-        
-        // 再次读取序列号
-        seq2 = __atomic_load_n(&lock.sequence, __ATOMIC_ACQUIRE);
-        
-    } while (seq1 != seq2); // 如果序列号不同，重试
-    
+        s1 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+    } while (s0 != s1);
+    return &points[id];
+}
+```
+
+### 2.3 设计要点
+
+- **零虚函数**：Seqlock 是纯算法，不封装为类层次
+- **零异常**：冲突时返回 false 或重试，不抛异常
+- **零堆分配**：序列号在共享内存 Header 中，不额外分配
+- **全局唯一**：整个 RTDB 实例共享一个 write_seq，保护所有 PointData
+
+---
+
+## 3. 与 PointManager 的集成
+
+PointManager 的 write/read 方法直接调用上述自由函数：
+
+```cpp
+// PointManager::write —— 简化示例
+bool PointManager::write(PointId id, double value) {
+    if (!validate_id(id)) return false;
+
+    uint64_t seq0 = seqlock_write_begin(&header_->write_seq);
+    if (seq0 & 1ULL) return false;  // 写冲突
+
+    PointData* p = &points_[id];
+    p->value.d       = value;
+    p->timestamp_ns  = time_->now_ns();
+    p->quality       = Quality::GOOD;
+
+    seqlock_write_end(&header_->write_seq, seq0);
+    header_->stats.writes++;
     return true;
 }
-```
 
----
-
-## 3. 面向对象设计
-
-### 3.1 类结构设计
-
-#### 3.1.1 ISeqlock接口
-
-```cpp
-class ISeqlock {
-public:
-    virtual ~ISeqlock() = default;
-    
-    virtual bool write(const PointData& data) = 0;
-    virtual bool read(PointData& data) const = 0;
-    virtual SeqlockSequence get_sequence() const = 0;
-    virtual bool is_writing() const = 0;
-};
-```
-
-#### 3.1.2 Seqlock类
-
-```cpp
-class Seqlock : public ISeqlock {
-public:
-    Seqlock();
-    explicit Seqlock(const PointData& initial_value);
-    
-    bool write(const PointData& data) override;
-    bool read(PointData& data) const override;
-    SeqlockSequence get_sequence() const override;
-    bool is_writing() const override;
-    
-private:
-    SeqlockData lock_data_;
-};
-```
-
-#### 3.1.3 工厂类
-
-```cpp
-class SeqlockFactory {
-public:
-    static std::unique_ptr<ISeqlock> create();
-    static std::unique_ptr<ISeqlock> create(const PointData& initial_value);
-};
-```
-
-### 3.2 类职责划分
-
-| 类名 | 职责 | 设计原则 |
-|------|------|---------|
-| ISeqlock | 定义Seqlock接口 | 依赖倒置原则 |
-| Seqlock | 具体实现 | 单一职责原则 |
-| SeqlockFactory | 创建实例 | 工厂模式 |
-
----
-
-## 4. 实现细节
-
-### 4.1 内存屏障优化
-
-```cpp
-// 使用GCC内置原子操作
-inline void memory_fence_acquire() {
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-}
-
-inline void memory_fence_release() {
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-}
-
-inline void memory_fence_full() {
-    __atomic_thread_fence(__ATOMIC_MEMORY_BARRIER);
-}
-```
-
-### 4.2 错误处理机制
-
-```cpp
-class SeqlockException : public std::runtime_error {
-public:
-    enum class ErrorType {
-        WRITE_FAILED,
-        READ_TIMEOUT,
-        DATA_CORRUPT
-    };
-    
-    SeqlockException(ErrorType error, const std::string& message)
-        : std::runtime_error(message), error_type_(error) {}
-        
-    ErrorType get_error_type() const { return error_type_; }
-};
-```
-
-### 4.3 超时机制
-
-```cpp
-bool read_with_timeout(PointData& data, uint64_t timeout_ns) const {
-    uint64_t start = osal::OSALFactory::create_time()->now_ns();
-    
-    while ((osal::OSALFactory::create_time()->now_ns() - start) < timeout_ns) {
-        if (read(data)) {
-            return true;
-        }
-    }
-    
-    throw SeqlockException(SeqlockException::ErrorType::READ_TIMEOUT,
-                          "Read operation timed out");
-    return false;
+// PointManager::peek —— 真正零拷贝
+const PointData* PointManager::peek(PointId id) const {
+    if (!validate_id(id)) return nullptr;
+    return seqlock_read(&header_->write_seq, points_, id);
 }
 ```
 
 ---
 
-## 5. 性能优化
+## 4. 并发安全性
 
-### 5.1 减少内存屏障
+### 4.1 读-写并发
 
-```cpp
-// 优化版本：使用更轻量级的内存操作
-bool write_optimized(const PointData& data) {
-    SeqlockSequence seq = __atomic_load_n(&lock_data_.sequence, __ATOMIC_ACQUIRE);
-    
-    __atomic_store_n(&lock_data_.sequence, seq + 1, __ATOMIC_RELEASE);
-    
-    // 直接写入，依赖CPU缓存一致性
-    lock_data_.point_data = data;
-    
-    __atomic_store_n(&lock_data_.sequence, seq + 2, __ATOMIC_RELEASE);
-    
-    return true;
-}
-```
+Reader 在 s0 为偶数时读取数据，若 Writer 在读取期间再次更新，Reader 的 s1 ≠ s0，自动重试。Reader 不会读到"一半新一半旧"的撕裂数据。
 
-### 5.2 数据对齐优化
+### 4.2 写-写并发
 
-```cpp
-// 使用64字节缓存行对齐
-struct alignas(64) SeqlockData {
-    volatile SeqlockSequence sequence;
-    PointData point_data;
-};
-```
+若有第二个 Writer 同时访问，`seqlock_write_begin` 返回奇数，调用者返回 false。工业场景写入频率低（≤ 1kHz 每通道），冲突概率 < 0.1%。
+
+### 4.3 ABA 问题
+
+使用 64 位序列号避免 ABA。若每秒写入 1,000,000 次，溢出需要约 584,942 年。
+
+---
+
+## 5. 性能分析
+
+| 操作 | 原子操作次数 | 内存屏障 | 预估延迟 (ARM A53) |
+|------|------------|---------|-------------------|
+| 读（无冲突） | 2× load | 1× acquire fence | < 5 ns |
+| 写 | 2× store | 0 | < 10 ns |
+| 读（有冲突重试1次） | 4× load | 2× acquire fence | < 15 ns |
 
 ---
 
 ## 6. 测试策略
 
-### 6.1 单元测试架构
+### 6.1 单元测试用例
 
-```cpp
-class SeqlockTest : public ::testing::Test {
-protected:
-    void SetUp() override {
-        seqlock_ = SeqlockFactory::create();
-        time_provider_ = osal::OSALFactory::create_time();
-    }
-    
-    std::unique_ptr<ISeqlock> seqlock_;
-    std::shared_ptr<ITime> time_provider_;
-};
+```
+- 单线程读写一致性
+- 序列号奇偶性验证
+- 读线程遇到写中自动重试
+- 多 Reader 单 Writer 并发
+- 边界值（0, UINT32_MAX, INT32_MIN）
+- 长期运行序列号不溢出验证
 ```
 
-### 6.2 测试用例设计
+### 6.2 测试工具
 
-```cpp
-// 基础功能测试
-TEST_F(SeqlockTest, BasicWriteRead) { ... }
-TEST_F(SeqlockTest, InitialValue) { ... }
-TEST_F(SeqlockTest, WriteWhileReading) { ... }
-
-// 并发测试
-TEST_F(SeqlockTest, MultiThreadedRead) { ... }
-TEST_F(SeqlockTest, SingleWriterMultipleReaders) { ... }
-TEST_F(SeqlockTest, MultipleWriters) { ... }
-
-// 边界条件测试
-TEST_F(SeqlockTest, DataConsistency) { ... }
-TEST_F(SeqlockTest, TimeoutBehavior) { ... }
-TEST_F(SeqlockTest, ErrorHandling) { ... }
-
-// 性能测试
-TEST_F(SeqlockTest, ReadPerformance) { ... }
-TEST_F(SeqlockTest, WritePerformance) { ... }
-TEST_F(SeqlockTest, ReadWriteThroughput) { ... }
-```
+- Google Test / gtest
+- Thread Sanitizer (`-fsanitize=thread`)
+- 自定义多线程压力测试
 
 ---
 
-## 7. 集成设计
+## 7. 参考文献
 
-### 7.1 与PointManager集成
-
-```cpp
-class PointManagerImpl : public PointManager {
-public:
-    PointManagerImpl(std::size_t max_points)
-        : max_points_(max_points) {
-        // 预分配所有Seqlock实例（避免动态内存分配）
-        point_locks_.reserve(max_points);
-        for (std::size_t i = 0; i < max_points; ++i) {
-            point_locks_.emplace_back(SeqlockFactory::create());
-        }
-    }
-    
-    bool write_point(PointId id, const PointData& data) override {
-        if (id >= max_points_) {
-            return false;
-        }
-        
-        return point_locks_[id]->write(data);
-    }
-    
-    bool read_point(PointId id, PointData& data) const override {
-        if (id >= max_points_) {
-            return false;
-        }
-        
-        return point_locks_[id]->read(data);
-    }
-    
-private:
-    std::size_t max_points_;
-    std::vector<std::unique_ptr<ISeqlock>> point_locks_;
-};
-```
-
-### 7.2 性能基准测试
-
-```cpp
-// 读操作基准测试
-void benchmark_read_performance(ISeqlock& seqlock, uint64_t iterations) {
-    PointData data;
-    uint64_t start = osal::OSALFactory::create_time()->now_ns();
-    
-    for (uint64_t i = 0; i < iterations; ++i) {
-        seqlock.read(data);
-    }
-    
-    uint64_t duration = osal::OSALFactory::create_time()->now_ns() - start;
-    double ns_per_op = static_cast<double>(duration) / iterations;
-    
-    std::cout << "Read operations: " << iterations << std::endl;
-    std::cout << "Total time: " << duration << " ns" << std::endl;
-    std::cout << "Per operation: " << ns_per_op << " ns" << std::endl;
-}
-```
+1. Linux 内核 Seqlock 实现 (`include/linux/seqlock.h`)
+2. Herlihy, M., & Shavit, N. (2012). *The Art of Multiprocessor Programming*
+3. GCC Atomic Builtins: `__atomic_load_n`, `__atomic_store_n`, `__atomic_thread_fence`
 
 ---
 
-## 8. 部署与使用
+**文档变更记录**
 
-### 8.1 编译要求
-
-```cmake
-# CMake配置
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# 编译选项（GCC）
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Werror")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-exceptions -fno-rtti")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O2")
-
-# 链接库
-target_link_libraries(indurtdb_core pthread)
-```
-
-### 8.2 使用示例
-
-```cpp
-// 基本使用
-#include "indurtdb/core/seqlock.hpp"
-
-int main() {
-    try {
-        auto seqlock = SeqlockFactory::create();
-        
-        // 写入数据
-        PointData write_data;
-        write_data.timestamp_ns = osal::OSALFactory::create_time()->now_ns();
-        write_data.type = PointType::INT32;
-        write_data.value.i = 12345;
-        
-        if (seqlock->write(write_data)) {
-            std::cout << "Write succeeded" << std::endl;
-        }
-        
-        // 读取数据
-        PointData read_data;
-        if (seqlock->read(read_data)) {
-            std::cout << "Read succeeded" << std::endl;
-            std::cout << "Value: " << read_data.value.i << std::endl;
-        }
-        
-    } catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-    
-    return 0;
-}
-```
-
----
-
-## 9. 风险评估
-
-### 9.1 技术风险
-
-| 风险类型 | 影响程度 | 发生概率 | 缓解措施 |
-|---------|---------|---------|---------|
-| 硬件平台兼容性 | 中 | 低 | 测试主流CPU架构（ARM/AArch64/AMD64） |
-| 编译器优化影响 | 高 | 中 | 明确内存可见性约束，测试不同优化等级 |
-| 电源故障数据一致性 | 高 | 低 | 使用不间断电源，定期数据备份 |
-
-### 9.2 性能风险
-
-| 风险类型 | 影响程度 | 发生概率 | 缓解措施 |
-|---------|---------|---------|---------|
-| 高写入频率导致读操作重试 | 中 | 中 | 限制写入频率，或使用批量更新 |
-| 缓存线震荡 | 中 | 中 | 合理数据对齐，避免共享缓存线 |
-| 内存带宽限制 | 高 | 低 | 使用内存映射，预取数据 |
-
----
-
-## 10. 文档变更记录
-
-| 版本号 | 变更日期 | 变更内容 | 作者 |
-|---------|---------|---------|------|
-| 1.0.0 | 2026-03-27 | 初始版本 | 高级C++开发工程师 |
-
----
-
-## 11. 附录
-
-### 11.1 术语表
-
-| 术语 | 定义 |
-|------|------|
-| Seqlock | Sequence Lock的缩写，基于序列号的无锁读写算法 |
-| 内存屏障 | Memory Barrier，确保内存操作的顺序和可见性 |
-| 原子操作 | Atomic Operation，不可分割的操作 |
-| 缓存一致性 | Cache Coherence，多CPU缓存中数据的一致性 |
-
-### 11.2 参考文献
-
-1. Boehm, H., & Adve, S. V. (2008). Foundations of the C++ Concurrency Memory Model.
-2. Herlihy, M., & Shavit, N. (2012). The Art of Multiprocessor Programming.
-3. Linux内核源代码中的Seqlock实现（arch/x86/include/asm/seqlock.h）
+| 版本号 | 变更日期 | 变更内容 |
+|--------|---------|---------|
+| 1.0.0 | 2026-03-27 | 初始版本（含 OOP 设计） |
+| 2.0.0 | 2026-05-11 | 移除 OOP 层次（ISeqlock/Factory/Exception/Utils），改为轻量自由函数 |

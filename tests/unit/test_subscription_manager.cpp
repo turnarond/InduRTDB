@@ -1,232 +1,144 @@
 /**
  * @file test_subscription_manager.cpp
- * @brief 订阅管理器单元测试
- * @version 1.0.0
- * @date 2026-03-27
- * @copyright MIT License
+ * @brief SubscriptionManager 单元测试（C 风格回调）
+ * @version 2.0.0
  */
 
-#include "gtest/gtest.h"
-#include "indurtdb/core/subscription_manager_interface.hpp"
-#include "indurtdb/osal/factory.hpp"
+#include <gtest/gtest.h>
+#include <indurtdb/core/subscription_manager_interface.hpp>
+#include <indurtdb/osal/factory.hpp>
+#include <indurtdb/types/memory_layout.hpp>
+#include <cstring>
 
 using namespace indurtdb;
 using namespace indurtdb::core;
 
-/**
- * @brief 测试订阅管理器的基本功能
- */
+// 共享状态，供回调使用
+struct TestContext {
+    bool  called = false;
+    int   call_count = 0;
+    PointId last_id = 0;
+    double last_value = 0.0;
+};
+
+static void test_callback(PointId id, const PointData& data, void* user_data) {
+    auto* ctx = static_cast<TestContext*>(user_data);
+    ctx->called = true;
+    ctx->call_count++;
+    ctx->last_id = id;
+    if (data.type == PointType::DOUBLE) {
+        ctx->last_value = data.value.d;
+    }
+}
+
 class SubscriptionManagerTest : public ::testing::Test {
 protected:
     void SetUp() override {
-        time_provider_ = osal::OSALFactory::create_time();
-        subscription_manager_ = create_subscription_manager(time_provider_);
-        ASSERT_NE(subscription_manager_, nullptr);
+        time_ = osal::OSALFactory::create_time();
+        std::memset(&shm_table_, 0, sizeof(shm_table_));
+        mgr_ = new SubscriptionManager(time_.get(), shm_table_, 4);
     }
 
     void TearDown() override {
-        subscription_manager_.reset();
-        time_provider_.reset();
+        delete mgr_;
+        time_.reset();
     }
 
-    std::shared_ptr<ITime> time_provider_;
-    std::unique_ptr<ISubscriptionManager> subscription_manager_;
+    std::unique_ptr<osal::ITime> time_;
+    SubscriberEntry shm_table_[4];
+    SubscriptionManager* mgr_;
 };
 
-/**
- * @brief 测试空指针时间提供者的构造
- */
-TEST_F(SubscriptionManagerTest, ConstructorWithNullTimeProvider) {
-    auto manager = create_subscription_manager(nullptr);
-    ASSERT_NE(manager, nullptr);
-}
-
-/**
- * @brief 测试基本订阅功能
- */
 TEST_F(SubscriptionManagerTest, BasicSubscribe) {
-    PointId id = 100;
-    bool callback_called = false;
-
-    auto callback = [&callback_called](const PointData& data) {
-        callback_called = true;
-    };
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 1);
-    EXPECT_EQ(subscription_manager_->get_subscription_count(id), 1);
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id));
+    TestContext ctx;
+    EXPECT_TRUE(mgr_->subscribe(100, test_callback, &ctx));
+    EXPECT_EQ(mgr_->subscription_count(), 1u);
+    EXPECT_TRUE(mgr_->has_subscriptions(100));
 }
 
-/**
- * @brief 测试重复订阅
- */
-TEST_F(SubscriptionManagerTest, DuplicateSubscribe) {
-    PointId id = 100;
-    int call_count = 0;
-
-    auto callback = [&call_count](const PointData& data) {
-        call_count++;
-    };
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    EXPECT_FALSE(subscription_manager_->subscribe(id, callback));
+TEST_F(SubscriptionManagerTest, NullCallbackRejected) {
+    EXPECT_FALSE(mgr_->subscribe(100, nullptr, nullptr));
 }
 
-/**
- * @brief 测试空回调订阅
- */
-TEST_F(SubscriptionManagerTest, NullCallbackSubscribe) {
-    PointId id = 100;
-    EXPECT_FALSE(subscription_manager_->subscribe(id, nullptr));
-}
-
-/**
- * @brief 测试取消订阅
- */
 TEST_F(SubscriptionManagerTest, Unsubscribe) {
-    PointId id = 100;
-
-    auto callback = [](const PointData& data) {};
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    EXPECT_TRUE(subscription_manager_->unsubscribe(id));
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 0);
-    EXPECT_FALSE(subscription_manager_->has_subscriptions(id));
+    TestContext ctx;
+    EXPECT_TRUE(mgr_->subscribe(100, test_callback, &ctx));
+    EXPECT_TRUE(mgr_->unsubscribe(100));
+    EXPECT_EQ(mgr_->subscription_count(), 0u);
+    EXPECT_FALSE(mgr_->has_subscriptions(100));
 }
 
-/**
- * @brief 测试通知功能
- */
-TEST_F(SubscriptionManagerTest, Notify) {
-    PointId id = 100;
-    bool callback_called = false;
-    PointData received_data;
+TEST_F(SubscriptionManagerTest, NotifyTriggersCallback) {
+    TestContext ctx;
+    EXPECT_TRUE(mgr_->subscribe(200, test_callback, &ctx));
 
-    auto callback = [&callback_called, &received_data](const PointData& data) {
-        callback_called = true;
-        received_data = data;
-    };
+    PointData data;
+    data.value.d = 23.5;
+    data.type = PointType::DOUBLE;
+    data.quality = Quality::GOOD;
 
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-
-    PointData test_data;
-    test_data.timestamp_ns = time_provider_->now_ns();
-    test_data.type = PointType::INT32;
-    test_data.value.i = 12345;
-
-    EXPECT_TRUE(subscription_manager_->notify(id, test_data));
-    EXPECT_TRUE(callback_called);
-    EXPECT_EQ(received_data.timestamp_ns, test_data.timestamp_ns);
-    EXPECT_EQ(received_data.type, test_data.type);
-    EXPECT_EQ(received_data.value.i, test_data.value.i);
+    mgr_->notify(200, data);
+    EXPECT_TRUE(ctx.called);
+    EXPECT_EQ(ctx.last_id, 200u);
+    EXPECT_DOUBLE_EQ(ctx.last_value, 23.5);
 }
 
-/**
- * @brief 测试心跳更新
- */
-TEST_F(SubscriptionManagerTest, UpdateHeartbeat) {
-    PointId id = 100;
+TEST_F(SubscriptionManagerTest, NotifyMultipleCallbacks) {
+    TestContext ctx1, ctx2, ctx3;
+    EXPECT_TRUE(mgr_->subscribe(100, test_callback, &ctx1));
+    EXPECT_TRUE(mgr_->subscribe(100, test_callback, &ctx2));
+    EXPECT_TRUE(mgr_->subscribe(100, test_callback, &ctx3));
+    EXPECT_EQ(mgr_->subscription_count(100), 3u);
 
-    auto callback = [](const PointData& data) {};
+    PointData data;
+    data.value.i = 42;
+    data.type = PointType::INT32;
 
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    EXPECT_TRUE(subscription_manager_->update_heartbeat(id));
+    mgr_->notify(100, data);
+    EXPECT_EQ(ctx1.call_count, 1);
+    EXPECT_EQ(ctx2.call_count, 1);
+    EXPECT_EQ(ctx3.call_count, 1);
 }
 
-/**
- * @brief 测试超时清理
- */
-TEST_F(SubscriptionManagerTest, CleanupTimeoutSubscriptions) {
-    PointId id = 100;
-
-    auto callback = [](const PointData& data) {};
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    
-    // 清理没有超时的订阅
-    EXPECT_EQ(subscription_manager_->cleanup_timeout_subscriptions(1000000000), 0);
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id));
+TEST_F(SubscriptionManagerTest, HeartbeatUpdate) {
+    // 心跳写入共享内存表
+    mgr_->update_heartbeat(1234);
+    EXPECT_EQ(shm_table_[0].pid, 1234);
+    EXPECT_GT(shm_table_[0].last_heartbeat_ns, 0ULL);
 }
 
-/**
- * @brief 测试清空所有订阅
- */
-TEST_F(SubscriptionManagerTest, ClearAllSubscriptions) {
-    PointId id1 = 100;
-    PointId id2 = 200;
+TEST_F(SubscriptionManagerTest, ZombieCleanup) {
+    // 注册一个"旧的"心跳
+    shm_table_[0].pid = 5678;
+    shm_table_[0].last_heartbeat_ns = 1;  // 很久以前
 
-    auto callback = [](const PointData& data) {};
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id1, callback));
-    EXPECT_TRUE(subscription_manager_->subscribe(id2, callback));
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 2);
-
-    EXPECT_TRUE(subscription_manager_->clear_all_subscriptions());
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 0);
-    EXPECT_FALSE(subscription_manager_->has_subscriptions(id1));
-    EXPECT_FALSE(subscription_manager_->has_subscriptions(id2));
+    size_t cleaned = mgr_->cleanup_zombies();
+    EXPECT_GE(cleaned, 1u);
+    EXPECT_EQ(shm_table_[0].pid, 0);  // 应被清理
 }
 
-/**
- * @brief 测试状态验证
- */
+TEST_F(SubscriptionManagerTest, ClearAll) {
+    TestContext ctx;
+    EXPECT_TRUE(mgr_->subscribe(1, test_callback, &ctx));
+    EXPECT_TRUE(mgr_->subscribe(2, test_callback, &ctx));
+    EXPECT_EQ(mgr_->subscription_count(), 2u);
+
+    mgr_->clear_all();
+    EXPECT_EQ(mgr_->subscription_count(), 0u);
+}
+
+TEST_F(SubscriptionManagerTest, MaxCallbacksEnforced) {
+    TestContext ctx;
+    // 填满所有槽位
+    for (size_t i = 0; i < SubscriptionManager::MAX_CALLBACKS; ++i) {
+        EXPECT_TRUE(mgr_->subscribe(static_cast<PointId>(i), test_callback, &ctx));
+    }
+    // 第 257 个注册应失败
+    EXPECT_FALSE(mgr_->subscribe(9999, test_callback, &ctx));
+}
+
 TEST_F(SubscriptionManagerTest, Validate) {
-    EXPECT_TRUE(subscription_manager_->validate());
-
-    PointId id = 100;
-    auto callback = [](const PointData& data) {};
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-    EXPECT_TRUE(subscription_manager_->validate());
+    EXPECT_TRUE(mgr_->validate());
 }
 
-/**
- * @brief 测试多个点位的订阅管理
- */
-TEST_F(SubscriptionManagerTest, MultiplePoints) {
-    PointId id1 = 100;
-    PointId id2 = 200;
-    PointId id3 = 300;
-
-    auto callback = [](const PointData& data) {};
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id1, callback));
-    EXPECT_TRUE(subscription_manager_->subscribe(id2, callback));
-    EXPECT_TRUE(subscription_manager_->subscribe(id3, callback));
-
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 3);
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id1));
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id2));
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id3));
-
-    EXPECT_TRUE(subscription_manager_->unsubscribe(id2));
-    EXPECT_EQ(subscription_manager_->get_subscription_count(), 2);
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id1));
-    EXPECT_FALSE(subscription_manager_->has_subscriptions(id2));
-    EXPECT_TRUE(subscription_manager_->has_subscriptions(id3));
-}
-
-/**
- * @brief 测试通知时的异常处理
- */
-TEST_F(SubscriptionManagerTest, NotifyWithException) {
-    PointId id = 100;
-
-    auto callback = [](const PointData& data) {
-        throw std::runtime_error("Test exception");
-    };
-
-    EXPECT_TRUE(subscription_manager_->subscribe(id, callback));
-
-    PointData test_data;
-    test_data.timestamp_ns = time_provider_->now_ns();
-    test_data.type = PointType::BOOL;
-    test_data.value.b = true;
-
-    EXPECT_TRUE(subscription_manager_->notify(id, test_data));
-}
-
-int main(int argc, char **argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}
+// main() provided by GTest::gtest_main

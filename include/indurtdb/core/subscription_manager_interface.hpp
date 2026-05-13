@@ -1,144 +1,79 @@
 /**
  * @file subscription_manager_interface.hpp
- * @brief 订阅管理接口定义
- * @version 1.0.0
- * @date 2026-03-27
+ * @brief SubscriptionManager —— 定长数组，零 STL，零堆分配
+ * @version 2.0.0
+ * @date 2026-05-11
  * @copyright MIT License
  */
 
 #pragma once
 
-#include "point_manager_interface.hpp"
-#include <indurtdb/osal/interface.hpp>
-#include <functional>
-#include <memory>
+#include "../types/basic_types.hpp"
+#include "../types/memory_layout.hpp"
+#include "../osal/interface.hpp"
 
 namespace indurtdb {
 namespace core {
 
-/**
- * @brief 订阅回调类型定义
- * 
- * 当点位数据发生变化时，将调用该回调函数
- * 
- * @param point 变化后的点位数据
- */
-using SubscriptionCallback = std::function<void(const PointData&)>;
+// C 风格回调 —— 替代 std::function，避免堆分配
+using SubscriptionCallback = void (*)(PointId id, const PointData& data,
+                                       void* user_data);
 
-/**
- * @brief 订阅信息结构
- */
-struct SubscriptionInfo {
-    PointId id;                          ///< 点位ID
-    SubscriptionCallback callback;       ///< 回调函数
-    TimestampNs last_heartbeat_ns;       ///< 最后心跳时间（纳秒）
-    bool active;                         ///< 是否活跃
+// 定长订阅槽位
+struct SubscriberSlot {
+    PointId             point_id;
+    SubscriptionCallback callback;
+    void*               user_data;
+    uint64_t            last_heartbeat_ns;
+    bool                active;
 };
 
-/**
- * @brief 订阅管理器接口
- * 
- * 负责管理点位数据变化的订阅和通知
- * 支持并发安全的订阅管理和通知发送
- */
-class ISubscriptionManager {
+class SubscriptionManager {
 public:
-    virtual ~ISubscriptionManager() = default;
+    static constexpr size_t MAX_CALLBACKS = 256;
 
     /**
-     * @brief 订阅点位数据变化
-     * 
-     * @param id 点位ID
-     * @param callback 回调函数
-     * @return true 订阅成功
-     * @return false 订阅失败（ID无效或回调为空）
+     * @brief 构造函数
+     * @param time           OSAL 时间接口
+     * @param shm_sub_table  共享内存中的 SubscriberEntry 表
+     * @param max_subscribers 最大订阅者进程数
      */
-    virtual bool subscribe(PointId id, SubscriptionCallback callback) = 0;
+    SubscriptionManager(osal::ITime* time,
+                        SubscriberEntry* shm_sub_table,
+                        uint32_t max_subscribers);
 
-    /**
-     * @brief 取消订阅点位数据变化
-     * 
-     * @param id 点位ID
-     * @return true 取消成功
-     * @return false 取消失败（未找到该点位的订阅）
-     */
-    virtual bool unsubscribe(PointId id) = 0;
+    // ---- 订阅管理 ----
 
-    /**
-     * @brief 通知所有订阅者点位数据变化
-     * 
-     * @param id 点位ID
-     * @param data 变化后的点位数据
-     * @return true 通知成功
-     * @return false 通知失败（无订阅者或ID无效）
-     */
-    virtual bool notify(PointId id, const PointData& data) = 0;
+    bool subscribe(PointId id, SubscriptionCallback cb, void* user_data);
+    bool unsubscribe(PointId id);
 
-    /**
-     * @brief 更新订阅者的心跳时间
-     * 
-     * @param id 点位ID
-     * @return true 更新成功
-     * @return false 更新失败（未找到该点位的订阅）
-     */
-    virtual bool update_heartbeat(PointId id) = 0;
+    // ---- 通知 ----
 
-    /**
-     * @brief 清理超时的订阅
-     * 
-     * @param timeout_ns 超时时间（纳秒）
-     * @return std::size_t 清理的超时订阅数量
-     */
-    virtual std::size_t cleanup_timeout_subscriptions(TimestampNs timeout_ns) = 0;
+    void notify(PointId id, const PointData& data);
 
-    /**
-     * @brief 获取订阅数量
-     * 
-     * @return std::size_t 总订阅数量
-     */
-    virtual std::size_t get_subscription_count() const = 0;
+    // ---- 心跳与清理 ----
 
-    /**
-     * @brief 获取特定点位的订阅数量
-     * 
-     * @param id 点位ID
-     * @return std::size_t 该点位的订阅数量
-     */
-    virtual std::size_t get_subscription_count(PointId id) const = 0;
+    void update_heartbeat(Pid pid);
+    size_t cleanup_zombies();
 
-    /**
-     * @brief 检查点位是否有订阅
-     * 
-     * @param id 点位ID
-     * @return true 有点位有订阅
-     * @return false 点位无订阅
-     */
-    virtual bool has_subscriptions(PointId id) const = 0;
+    // ---- 查询 ----
 
-    /**
-     * @brief 清理所有订阅
-     * 
-     * @return true 清理成功
-     * @return false 清理失败（无订阅可清理）
-     */
-    virtual bool clear_all_subscriptions() = 0;
+    size_t subscription_count() const;
+    size_t subscription_count(PointId id) const;
+    bool   has_subscriptions(PointId id) const;
+    void   clear_all();
+    bool   validate() const;
 
-    /**
-     * @brief 验证订阅管理器的状态
-     * 
-     * @return true 状态正常
-     * @return false 状态异常
-     */
-    virtual bool validate() const = 0;
+private:
+    SubscriberSlot  slots_[MAX_CALLBACKS];
+    size_t          slot_count_;
+
+    osal::ITime*    time_;
+
+    // 指向共享内存中的心跳表
+    SubscriberEntry* shm_sub_table_;
+    uint32_t         max_subscribers_;
 };
-
-/**
- * @brief 订阅管理器工厂函数
- * 
- * @return std::unique_ptr<ISubscriptionManager> 订阅管理器实例
- */
-std::unique_ptr<ISubscriptionManager> create_subscription_manager(
-    const std::shared_ptr<osal::ITime>& time_provider);
 
 } // namespace core
 } // namespace indurtdb

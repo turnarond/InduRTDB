@@ -3,8 +3,9 @@
 ---
 
 # **InduRTDB 概要设计文档（High-Level Design, HLD）**  
-**版本：1.0**  
-**日期：2026年3月26日**
+**版本：1.1.0**
+**日期：2026年5月11日**
+**修订说明**：架构统一为 4 层，PointManager 对齐 SRS 模板接口
 
 ---
 
@@ -22,7 +23,7 @@
 
 ## 2. 整体架构
 
-InduRTDB 采用 **三层分层架构**，严格隔离平台相关与平台无关逻辑：
+InduRTDB 采用 **四层分层架构**，严格隔离平台相关与平台无关逻辑：
 
 ```plaintext
 +───────────────────────────────────────────────────────+
@@ -36,27 +37,38 @@ InduRTDB 采用 **三层分层架构**，严格隔离平台相关与平台无关
 +───────────────────────────┬───────────────────────────+
                             │
 +───────────────────────────▼───────────────────────────+
+│                   API Layer                            │
+│  ┌─────────────────┐    ┌─────────────────────────┐   │
+│  │   C++ API       │    │    C ABI                │   │
+│  │   InduRTDB 类   │    │  (兼容 C/Python/Rust)    │   │
+│  └─────────┬───────┘    └───────────────┬─────────┘   │
++────────────┼────────────────────────────┼─────────────+
+             │                            │
++────────────▼────────────────────────────▼─────────────+
 │               InduRTDB Core Layer (Platform Agnostic) │
 │  ┌─────────────────┐    ┌─────────────────────────┐   │
 │  │ PointManager    │    │ SubscriptionManager     │   │
-│  │ • write(id,val) │    │ • subscribe(id, cb)     │   │
+│  │ • write<T>()    │    │ • subscribe(id, cb)     │   │
 │  │ • read(id)      │    │ • Heartbeat cleanup     │   │
+│  │ • peek(id)      │    │                         │   │
 │  └─────────┬───────┘    └───────────────┬─────────┘   │
 │            │                            │             │
 │  ┌─────────▼────────────────────────────▼─────────┐   │
 │  │           SharedMemorySegment                 │   │
-│  │  • Header (magic, seq, stats)                 │   │
+│  │  • Header (magic, write_seq, stats)           │   │
 │  │  • PointData[MAX_POINTS] (aligned array)      │   │
 │  │  • SubscriberTable[MAX_SUBS]                  │   │
 │  └───────────────────────────────────────────────┘   │
+│                                                       │
+│  Seqlock: 轻量自由函数（操作 header_->write_seq）      │
 +───────────────────────────┬───────────────────────────+
                             │
 +───────────────────────────▼───────────────────────────+
 │          OS Abstraction Layer (OSAL)                  │
 │  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐  │
 │  │ SharedMem   │  │ Threading    │  │ Time        │  │
-│  │ • shm_open  │  │ • Seqlock    │  │ • clock_gettime││
-│  │ • mmap      │  │ • CPU Affinity│ │ • monotonic │  │
+│  │ • shm_open  │  │ • CPU Affinity│ │ • clock_gettime││
+│  │ • mmap      │  │              │  │ • monotonic │  │
 │  └─────────────┘  └──────────────┘  └─────────────┘  │
 │  ┌─────────────┐                                     │
 │  │ Notification│ ← Unix Domain Socket (UDS)          │
@@ -110,27 +122,38 @@ struct SubscriberEntry {
 ### 3.2 `PointManager`（点位管理器）
 
 #### 职责：
-- 管理 `PointData` 数组生命周期
-- 提供 `write()` / `read()` 接口
+- 管理 `PointData` 数组生命周期（直接操作共享内存）
+- 提供模板 `write<T>()` / `read()` 接口
+- 全局 Seqlock（header_->write_seq）保护写入
 - 自动更新时间戳、质量标记
 
-#### 写入流程（Seqlock）：
+#### 写入流程（模板 + 全局 Seqlock）：
 ```cpp
-bool write(PointId id, double val) {
+template<typename T>
+bool write(PointId id, const T& value) {
     auto* p = &points_[id];
-    uint64_t seq0 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
-    if (seq0 & 1) return false; // 写冲突（极罕见）
 
-    // 更新数据
-    p->value.d = val;
-    p->timestamp_ns = osal_->time()->now_ns();
+    // Seqlock write begin
+    uint64_t seq0 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
+    if (seq0 & 1) return false; // 写冲突
+
+    __atomic_store_n(&header_->write_seq, seq0 + 1, __ATOMIC_RELEASE);
+
+    // if constexpr 编译期类型分发
+    if constexpr (std::is_same_v<T, double>) {
+        p->value.d = value; p->type = PointType::DOUBLE;
+    } else if constexpr (std::is_same_v<T, int32_t>) {
+        p->value.i = value; p->type = PointType::INT32;
+    } else if constexpr (std::is_same_v<T, bool>) {
+        p->value.b = value; p->type = PointType::BOOL;
+    }
+
+    p->timestamp_ns = time_->now_ns();
     p->quality = Quality::GOOD;
 
-    // 提交：seq+1（奇）→ seq+2（偶）
-    __atomic_store_n(&header_->write_seq, seq0 + 1, __ATOMIC_RELEASE);
+    // Seqlock write end
     __atomic_store_n(&header_->write_seq, seq0 + 2, __ATOMIC_RELEASE);
-
-    subscription_mgr_.notify(id); // 触发订阅
+    header_->stats.writes++;
     return true;
 }
 ```
@@ -209,9 +232,10 @@ sequenceDiagram
 | **测试框架** | Google Test | 主流、支持 Mock |
 
 ### 约束：
-- **禁止动态内存分配**（`new`/`malloc`）；
-- **禁止 STL 容器**（`vector`, `map`）；
-- **禁止异常**（`-fno-exceptions`）；
+- **禁止动态内存分配**（`new`/`malloc`）—— Core 层零堆分配；
+- **禁止 STL 容器**（`vector`, `map`）—— 定长数组替代；
+- **禁止异常**（`-fno-exceptions`）—— 全部 bool 返回值；
+- **Core 层禁止虚函数** —— 编译期绑定；
 - **C++17 only**，无第三方依赖（YAML 解析可选）。
 
 ---
