@@ -1,19 +1,18 @@
 /**
  * @file indurtdb.hpp
- * @brief Main include file for InduRTDB library
- * @version 1.0.0
- * @date 2026-03-27
- * 
+ * @brief InduRTDB 主包含文件
+ * @version 2.0.0
+ * @date 2026-05-11
  * @copyright MIT License
  */
 
 #pragma once
 
 // Version information
-#define INDURTDB_VERSION_MAJOR 1
+#define INDURTDB_VERSION_MAJOR 2
 #define INDURTDB_VERSION_MINOR 0
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "1.0.0"
+#define INDURTDB_VERSION_STRING "2.0.0"
 
 // Basic types
 #include "indurtdb/types/basic_types.hpp"
@@ -24,10 +23,13 @@
 // OSAL interfaces
 #include "indurtdb/osal/interface.hpp"
 
-// Core interfaces
+// Core
+#include "indurtdb/core/seqlock.hpp"
 #include "indurtdb/core/point_manager_interface.hpp"
+#include "indurtdb/core/subscription_manager_interface.hpp"
+#include "indurtdb/core/config_loader.hpp"
 
-// Main API
+// Main C++ API
 #include "indurtdb/api/indurtdb.hpp"
 
 // C ABI

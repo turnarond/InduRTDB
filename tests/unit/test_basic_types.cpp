@@ -85,7 +85,3 @@ TEST(BasicTypesTest, EnumConversion) {
     EXPECT_EQ(static_cast<uint16_t>(unit), 1);
 }
 
-int main(int argc, char** argv) {
-    ::testing::InitGoogleTest(&argc, argv);
-    return RUN_ALL_TESTS();
-}

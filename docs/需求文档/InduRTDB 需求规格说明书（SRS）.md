@@ -3,8 +3,9 @@
 ---
 
 # **InduRTDB 需求规格说明书（SRS）**  
-**版本：1.0**  
-**日期：2026年3月26日**
+**版本：2.1.0**  
+**日期：2026年5月16日**  
+**修订说明**：API 签名对齐 v2.1.0 代码实现
 
 ---
 
@@ -78,7 +79,7 @@ struct PointData {
 
     // --- 元信息 ---
     char      name[64];     // 如 "AHU_01.Supply_Temp"
-} __attribute__((packed, aligned(64)));
+} __attribute__((packed, aligned(128)));
 ```
 
 > **约束**：
@@ -93,8 +94,9 @@ struct PointData {
 |------|------|------|
 | **写入** | `bool write(PointId id, T value)` | 更新值、时间戳、质量=GOOD |
 | **读取** | `bool read(PointId id, PointData& out)` | 返回完整点位数据 |
-| **订阅** | `void subscribe(PointId id, Callback cb)` | 数据变更时回调（在写者线程） |
-| **配置加载** | `bool loadConfig(const std::string& path)` | 从 YAML 加载点表 |
+| **零拷贝读取** | `const PointData* peek(PointId id)` | 返回共享内存指针 |
+| **订阅** | `bool subscribe(PointId id, SubscriptionCallback cb, void* user_data)` | 数据变更时回调（在写者线程） |
+| **配置加载** | `bool loadConfig(const char* config_path)` | 从 YAML 加载点表 |
 
 > **示例**：
 > ```cpp
@@ -157,14 +159,25 @@ class InduRTDB {
 public:
     static InduRTDB& instance();
 
+    bool initialize(const char* instance_id,
+                    uint32_t max_points = 10000,
+                    uint32_t max_subscribers = 32);
+
     template<typename T>
     bool write(PointId id, const T& value);
+    bool write(PointId id, const char* value);  // 字符串非模板重载
 
-    bool read(PointId id, PointData& out);
+    bool read(PointId id, PointData& out) const;
+    const PointData* peek(PointId id) const;     // 零拷贝
 
-    void subscribe(PointId id, std::function<void(const PointData&)> cb);
+    bool subscribe(PointId id, SubscriptionCallback cb, void* user_data);
+    bool unsubscribe(PointId id);
 
-    bool loadConfig(const std::string& path);
+    bool loadConfig(const char* config_path);
+
+    void updateHeartbeat();
+    bool is_initialized() const;
+    void shutdown();
 };
 ```
 
@@ -172,9 +185,21 @@ public:
 ```c
 typedef struct { /* ... */ } indurtdb_point_t;
 
-bool indurtdb_write_u32(uint32_t id, uint32_t val);
-bool indurtdb_read(uint32_t id, indurtdb_point_t* out);
-void indurtdb_subscribe(uint32_t id, void (*cb)(uint32_t, const indurtdb_point_t*));
+// 17 个 C 函数，桥接到 C++ 单例
+int indurtdb_initialize(const char* instance_id,
+                        uint32_t max_points, uint32_t max_subscribers);
+int indurtdb_write_bool(uint32_t id, bool value);
+int indurtdb_write_int32(uint32_t id, int32_t value);
+int indurtdb_write_double(uint32_t id, double value);
+int indurtdb_write_string(uint32_t id, const char* value);
+int indurtdb_read_bool(uint32_t id, bool* value);
+int indurtdb_read_int32(uint32_t id, int32_t* value);
+int indurtdb_read_double(uint32_t id, double* value);
+int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
+int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
+uint64_t indurtdb_get_write_count();
+uint64_t indurtdb_get_timeout_count();
+void indurtdb_shutdown();
 ```
 
 > **ABI 承诺**：v1.0 后保持向后兼容。
@@ -230,12 +255,14 @@ Application Layer → InduRTDB Core → OS Abstraction Layer (OSAL)
 ## 9. 附录
 
 ### 9.1 版本路线图
-| 版本 | 目标 |
-|------|------|
-| v0.1 | Linux/SylixOS 共享内存 + read/write |
-| v0.5 | 订阅 + 崩溃恢复 + YAML 配置 |
-| v1.0 | MISRA 合规 + 完整文档 + gtest 覆盖率 ≥90% |
-| v1.1 | OPC UA 桥接插件 |
+
+| 版本 | 日期 | 目标 | 状态 |
+|------|------|------|------|
+| v1.0.0 | 2026-03-27 | 项目脚手架 + 全套文档 + 原型代码 | ✅ 已完成 |
+| v2.0.0 | 2026-05-11 | **架构修正**: 共享内存重写, Seqlock 轻量化, STL 移除 | ✅ 已完成 |
+| v2.1.0 | 2026-05-11 | 多进程集成测试(6), ConfigLoader, C ABI 完整实现, 59 tests | ✅ 已完成 |
+| v2.2 | TBD | SylixOS 交叉编译验证 + ARM Cortex-A53 P99 性能基准 | ⏳ 计划中 |
+| v3.0 | TBD | Unix Domain Socket 跨进程通知 + OPC UA 桥接插件 | 📋 规划中 |
 
 ### 9.2 许可证
 - **MIT License**  

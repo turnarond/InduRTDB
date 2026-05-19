@@ -2,7 +2,7 @@
 # CMake Configuration File
 
 cmake_minimum_required(VERSION 3.15)
-project(InduRTDB VERSION 1.0.0 LANGUAGES CXX)
+project(InduRTDB VERSION 2.1.0 LANGUAGES CXX)
 
 # 设置C++标准
 set(CMAKE_CXX_STANDARD 17)

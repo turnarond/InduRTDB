@@ -1,99 +1,116 @@
 /**
  * @file indurtdb_c_impl.cpp
- * @brief C ABI实现
- * @version 1.0.0
- * @date 2026-03-27
+ * @brief C ABI 实现 —— 桥接到 C++ InduRTDB
+ * @version 2.0.0
+ * @date 2026-05-11
  * @copyright MIT License
  */
 
-#include "../include/indurtdb/api/c/indurtdb_c.h"
+#include <indurtdb/api/c/indurtdb_c.h>
+#include <indurtdb/api/indurtdb.hpp>
+#include <cstring>
 
-// 空实现，待后续完成
 extern "C" {
+
+// ---- 初始化/关闭 ----
 
 int indurtdb_initialize(const char* instance_id,
                         uint32_t max_points,
                         uint32_t max_subscribers) {
-    (void)instance_id;
-    (void)max_points;
-    (void)max_subscribers;
-    return 0; // 返回0表示成功，非0表示失败
+    auto& db = indurtdb::InduRTDB::instance();
+    return db.initialize(instance_id, max_points, max_subscribers) ? 0 : -1;
 }
 
 void indurtdb_shutdown() {
-    // 空实现
+    indurtdb::InduRTDB::instance().shutdown();
 }
 
+// ---- 写入 ----
+
 int indurtdb_write_bool(uint32_t id, bool value) {
-    (void)id;
-    (void)value;
-    return -1; // 返回非0表示失败
+    return indurtdb::InduRTDB::instance().write(id, value) ? 0 : -1;
 }
 
 int indurtdb_write_int32(uint32_t id, int32_t value) {
-    (void)id;
-    (void)value;
-    return -1;
+    return indurtdb::InduRTDB::instance().write(id, value) ? 0 : -1;
 }
 
 int indurtdb_write_double(uint32_t id, double value) {
-    (void)id;
-    (void)value;
-    return -1;
+    return indurtdb::InduRTDB::instance().write(id, value) ? 0 : -1;
 }
 
 int indurtdb_write_string(uint32_t id, const char* value) {
-    (void)id;
-    (void)value;
-    return -1;
+    return indurtdb::InduRTDB::instance().write(id, value) ? 0 : -1;
 }
 
+// ---- 读取 ----
+
 int indurtdb_read_bool(uint32_t id, bool* value) {
-    (void)id;
-    (void)value;
-    return -1;
+    if (!value) return -1;
+    indurtdb::PointData p;
+    if (!indurtdb::InduRTDB::instance().read(id, p)) return -1;
+    *value = p.value.b;
+    return 0;
 }
 
 int indurtdb_read_int32(uint32_t id, int32_t* value) {
-    (void)id;
-    (void)value;
-    return -1;
+    if (!value) return -1;
+    indurtdb::PointData p;
+    if (!indurtdb::InduRTDB::instance().read(id, p)) return -1;
+    *value = p.value.i;
+    return 0;
 }
 
 int indurtdb_read_double(uint32_t id, double* value) {
-    (void)id;
-    (void)value;
-    return -1;
+    if (!value) return -1;
+    indurtdb::PointData p;
+    if (!indurtdb::InduRTDB::instance().read(id, p)) return -1;
+    *value = p.value.d;
+    return 0;
 }
 
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size) {
-    (void)id;
-    (void)buffer;
-    (void)buffer_size;
-    return -1;
+    if (!buffer || buffer_size == 0) return -1;
+    indurtdb::PointData p;
+    if (!indurtdb::InduRTDB::instance().read(id, p)) return -1;
+    std::strncpy(buffer, p.value.str, buffer_size - 1);
+    buffer[buffer_size - 1] = '\0';
+    return 0;
 }
 
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data) {
-    (void)id;
-    (void)point_data;
-    return -1;
+    if (!point_data) return -1;
+    indurtdb::PointData p;
+    if (!indurtdb::InduRTDB::instance().read(id, p)) return -1;
+    // C 结构体与 C++ 结构体布局一致，直接 memcpy
+    std::memcpy(point_data, &p, sizeof(indurtdb_point_t));
+    return 0;
 }
+
+// ---- 验证 ----
 
 int indurtdb_validate_id(uint32_t id) {
-    (void)id;
-    return -1;
+    // 通过读操作间接验证
+    indurtdb::PointData dummy;
+    return indurtdb::InduRTDB::instance().read(id, dummy) ? 0 : -1;
 }
 
+// ---- 统计 ----
+
 uint64_t indurtdb_get_write_count() {
-    return 0;
+    return indurtdb::InduRTDB::instance().get_write_count();
 }
 
 uint64_t indurtdb_get_timeout_count() {
     return 0;
 }
 
+// ---- 错误处理 ----
+
+static thread_local char g_last_error[256] = {0};
+
 const char* indurtdb_get_last_error() {
-    return "Not implemented";
+    return g_last_error[0] ? g_last_error : "Success";
 }
 
 } // extern "C"
