@@ -169,6 +169,10 @@ public:
 
     bool is_initialized() const { return initialized_; }
 
+    uint64_t get_write_count() const {
+        return pm_ ? pm_->get_write_count() : 0;
+    }
+
     void shutdown() {
         if (!initialized_) return;
 
@@ -245,6 +249,9 @@ void InduRTDB::update_heartbeat()
 
 bool InduRTDB::is_initialized() const
     { return impl_->is_initialized(); }
+
+uint64_t InduRTDB::get_write_count() const
+    { return impl_->get_write_count(); }
 
 void InduRTDB::shutdown()
     { impl_->shutdown(); }

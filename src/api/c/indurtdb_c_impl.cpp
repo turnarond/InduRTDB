@@ -98,10 +98,7 @@ int indurtdb_validate_id(uint32_t id) {
 // ---- 统计 ----
 
 uint64_t indurtdb_get_write_count() {
-    const indurtdb::PointData* p =
-        indurtdb::InduRTDB::instance().peek(0);
-    (void)p; // 统计信息通过 Header 暴露，未来可扩展
-    return 0;
+    return indurtdb::InduRTDB::instance().get_write_count();
 }
 
 uint64_t indurtdb_get_timeout_count() {

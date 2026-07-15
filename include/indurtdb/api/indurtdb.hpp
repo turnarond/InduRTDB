@@ -50,6 +50,7 @@ public:
 
     // 状态
     bool is_initialized() const;
+    uint64_t get_write_count() const;
     void shutdown();
 
 private:

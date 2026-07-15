@@ -1,8 +1,8 @@
 # InduRTDB 详细设计文档（LLD）
 
-**版本：2.0.0**
-**日期：2026年5月11日**
-**修订说明**：移除 STL 依赖，Seqlock 回归 Header.write_seq 全局机制，PointManager 直接操作共享内存
+**版本：2.1.0**
+**日期：2026年5月16日**
+**修订说明**：对齐 v2.1.0 代码实现，修正文件名引用和成员变量名
 
 ---
 
@@ -254,12 +254,24 @@ public:
     PointData* points() const;
     SubscriberEntry* subscribers() const;
 
+    uint32_t max_points() const;
+    uint32_t max_subscribers() const;
+    size_t   total_size() const;
+
 private:
     char        name_[64];   // "/indurtdb_<id>"
-    int         fd_;         // shm fd
     void*       base_;       // mmap 基址
     size_t      total_size_;
     bool        is_owner_;
+
+    InduRTDBHeader*  header_;
+    PointData*       points_;
+    SubscriberEntry* subscribers_;
+
+    uint32_t max_points_;
+    uint32_t max_subscribers_;
+
+    std::unique_ptr<osal::ISharedMemory> shm_;  // 保持 OSAL 对象生命周期
 };
 ```
 
@@ -286,25 +298,36 @@ indurtdb/
 ├── include/indurtdb/
 │   ├── types/basic_types.hpp
 │   ├── types/memory_layout.hpp
-│   ├── core/point_manager.hpp            # PointManager 类声明
-│   ├── core/subscription_manager.hpp     # SubscriptionManager 类声明
-│   ├── core/seqlock_ops.hpp              # Seqlock 自由函数
-│   ├── osal/interface.hpp
-│   ├── osal/factory.hpp
-│   └── api/indurtdb.hpp                  # InduRTDB 主 API
+│   ├── core/point_manager_interface.hpp        # PointManager 类（非虚）
+│   ├── core/subscription_manager_interface.hpp # SubscriptionManager 类
+│   ├── core/seqlock.hpp                        # Seqlock 自由函数
+│   ├── core/shared_memory_segment.hpp          # SharedMemorySegment
+│   ├── core/config_loader.hpp                  # 配置加载器
+│   ├── osal/interface.hpp                      # OSAL 接口
+│   ├── osal/factory.hpp                        # OSAL 工厂
+│   └── api/indurtdb.hpp                        # InduRTDB 主 API
 ├── src/
+│   ├── api/cpp/indurtdb_impl.cpp
+│   ├── api/c/indurtdb_c_impl.cpp
 │   ├── core/point_manager.cpp
 │   ├── core/shared_memory_segment.cpp
 │   ├── core/subscription_manager.cpp
 │   ├── core/config_loader.cpp
+│   ├── core/seqlock.cpp
 │   └── osal/
-│       ├── linux/
+│       ├── posix/
 │       └── sylixos/
 ├── tests/
-│   ├── unit/test_point_manager.cpp
-│   ├── unit/test_seqlock.cpp
-│   ├── unit/test_subscription_manager.cpp
-│   └── integration/test_multi_process.cpp
+│   ├── unit/
+│   │   ├── test_seqlock.cpp
+│   │   ├── test_subscription_manager.cpp
+│   │   ├── test_memory_layout.cpp
+│   │   ├── test_basic_types.cpp
+│   │   ├── test_alignment.cpp
+│   │   ├── test_error.cpp
+│   │   └── test_logging.cpp
+│   └── integration/
+│       └── test_multi_process.cpp
 └── CMakeLists.txt
 ```
 

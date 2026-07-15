@@ -3,9 +3,9 @@
 ---
 
 # **InduRTDB 概要设计文档（High-Level Design, HLD）**  
-**版本：1.1.0**
-**日期：2026年5月11日**
-**修订说明**：架构统一为 4 层，PointManager 对齐 SRS 模板接口
+**版本：2.1.0**
+**日期：2026年5月16日**
+**修订说明**：合并工程框架架构设计内容，消除冗余，对齐 v2.1.0 代码实现
 
 ---
 
@@ -16,7 +16,7 @@
 - ✅ **确定性性能**：P99 读写延迟 ≤ 10 μs  
 - ✅ **工业语义**：每个点位携带质量、单位、权限、时间戳  
 - ✅ **多进程安全**：支持驱动、逻辑引擎、HMI 并发访问  
-- ✅ **轻量可靠**：静态库 ≤ 50 KB，7×24 运行无故障  
+- ✅ **轻量可靠**：零第三方依赖，7×24 运行无故障  
 - ✅ **易集成**：提供 C++/C API，可作为 OPC UA Server 后端  
 
 ---
@@ -90,7 +90,7 @@ InduRTDB 采用 **四层分层架构**，严格隔离平台相关与平台无关
 ```cpp
 // 共享内存起始地址 = mmap() 返回值
 struct InduRTDBHeader {
-    uint32_t magic;         // 0x1DBA
+    uint32_t magic;         // 0x1DBA1DBA
     uint32_t version;
     uint32_t max_points;
     uint32_t max_subscribers;
@@ -101,12 +101,12 @@ struct InduRTDBHeader {
     } stats;
 } __attribute__((aligned(64)));
 
-struct PointData { /* 见 SRS 文档 */ } __attribute__((aligned(64)));
+struct PointData { /* 见 SRS 文档 */ } __attribute__((packed, aligned(128)));
 
 struct SubscriberEntry {
-    pid_t pid;
-    uint64_t last_heartbeat_ns;
-} __attribute__((aligned(8)));
+    Pid pid;
+    TimestampNs last_heartbeat_ns;
+} __attribute__((packed, aligned(16)));
 ```
 
 - **总大小** = `sizeof(Header) + MAX_POINTS * sizeof(PointData) + MAX_SUBS * sizeof(SubscriberEntry)`
@@ -168,8 +168,8 @@ bool write(PointId id, const T& value) {
 - 定期清理僵尸进程（心跳超时 >1s）
 
 #### 心跳机制：
-- 每个 Reader 进程每 100ms 调用 `update_heartbeat(pid)`
-- 后台线程每 500ms 扫描 `SubscriberTable`，`kill(pid, 0)` 验活
+- 每个订阅者进程定期调用 `update_heartbeat(pid)` 更新时间戳
+- `cleanup_zombies()` 扫描心跳表，清理超时（>1s）的僵尸进程条目
 
 #### 通知协议：
 - UDS 消息格式：`{ uint32_t point_id }`
@@ -187,6 +187,108 @@ bool write(PointId id, const T& value) {
 | **Notification** | Unix Domain Socket | 同左 |
 
 > **编译时选择**：通过 `#ifdef SYLIXOS` 切换实现
+
+---
+
+### 3.5 类关系设计
+
+#### 核心类图
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      InduRTDB (Singleton)                    │
+│  - instance(): InduRTDB&                                    │
+│  - initialize(): bool                                       │
+│  - write<T>(): bool                                         │
+│  - read(): bool                                             │
+│  - peek(): const PointData*                                 │
+│  - subscribe(): bool                                        │
+│  - shutdown(): void                                         │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────┐   │
+│  │                    Impl (PIMPL)                     │   │
+│  │  - seg_: SharedMemorySegment*                       │   │
+│  │  - pm_: PointManager*                               │   │
+│  │  - sm_: SubscriptionManager*                        │   │
+│  │  - time_: unique_ptr<ITime>                         │   │
+│  └─────────────────────────────────────────────────────┘   │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+┌──────────────────────────────▼──────────────────────────────┐
+│                 PointManager (Concrete, 非虚)               │
+│  - write<T>(id, value): bool                                │
+│  - read(id, out): bool                                      │
+│  - peek(id): const PointData*    ← 零拷贝，返回 &points_[id]│
+│  - validate_id(id): bool                                    │
+│                                                             │
+│  - header_: InduRTDBHeader*    ← 共享内存头部                │
+│  - points_: PointData*         ← 共享内存点位数组            │
+│  - time_: ITime*               ← OSAL 时间接口               │
+└──────────────────────────┬──────────────────────────────────┘
+                           │
+┌──────────────────────────▼──────────────────────────────────┐
+│              SharedMemorySegment (Concrete)                  │
+│  - initialize(): bool    ← shm_open + mmap + init header    │
+│  - shutdown(): void      ← munmap + shm_unlink              │
+│  - base(): void*                                            │
+│  - header(): InduRTDBHeader*                                │
+│  - points(): PointData*                                     │
+│  - subscribers(): SubscriberEntry*                          │
+│  - is_owner(): bool                                         │
+└─────────────────────────────────────────────────────────────┘
+```
+
+> **Core 层设计原则**：
+> - **非虚类**：PointManager、SharedMemorySegment 不需要多态，编译期绑定
+> - **零 STL**：定长数组替代 vector/map/unordered_map
+> - **零异常**：全部 bool 返回值
+> - **Seqlock 为轻量自由函数**：操作 header_->write_seq，不封装为类层次
+
+#### 接口设计
+
+**OSAL 接口（仅此处允许虚函数）：**
+```cpp
+class ISharedMemory {
+    virtual void* map(size_t size) = 0;
+    virtual void unmap() = 0;
+    virtual bool is_owner() const = 0;
+};
+class ITime {
+    virtual TimestampNs now_ns() const = 0;
+    virtual void sleep_ns(TimestampNs duration) const = 0;
+};
+class IThreading {
+    virtual void set_affinity(int cpu_core) = 0;
+    virtual void yield() = 0;
+};
+class INotification {
+    virtual bool send(const void* data, size_t size) = 0;
+    virtual bool receive(void* data, size_t size, TimestampNs timeout_ns) = 0;
+};
+```
+
+**Core 层接口（非虚，编译期绑定）：**
+```cpp
+// PointManager —— 直接操作共享内存，无虚函数
+class PointManager {
+public:
+    PointManager(void* shm_base, uint32_t max_points, osal::ITime* time);
+    template<typename T> bool write(PointId id, const T& value);
+    bool read(PointId id, PointData& out) const;
+    const PointData* peek(PointId id) const;
+private:
+    InduRTDBHeader* header_;
+    PointData*      points_;
+    uint32_t        max_points_;
+    osal::ITime*    time_;
+};
+
+// Seqlock —— 轻量自由函数（非类）
+uint64_t seqlock_write_begin(uint64_t* seq);
+void     seqlock_write_end(uint64_t* seq, uint64_t seq0);
+const PointData* seqlock_read(const uint64_t* seq,
+                               const PointData* points, uint32_t id);
+```
 
 ---
 
@@ -248,7 +350,23 @@ sequenceDiagram
 
 ---
 
-## 7. 与外部系统集成
+## 7. 扩展性设计
+
+### 7.1 可扩展点
+1. **新数据类型**：在 `PointType` 枚举中添加新类型
+2. **新质量标记**：在 `Quality` 枚举中添加新标记
+3. **新单位**：在 `Unit` 枚举中添加新单位
+4. **新平台支持**：实现新的 OSAL 平台适配（仅需 ≤300 行/平台）
+5. **新通知机制**：实现新的 `INotification` 接口
+
+### 7.2 插件架构
+- **配置插件**：ConfigLoader 可扩展支持 JSON/XML 格式
+- **监控插件**：预留 Prometheus 指标导出接口（基于 Header.stats）
+- **桥接插件**：OPC UA/MQTT/Modbus 桥接（独立进程，通过 API 交互）
+
+---
+
+## 8. 与外部系统集成
 
 | 外部系统 | 集成方式 |
 |----------|--------|
@@ -260,7 +378,7 @@ sequenceDiagram
 
 ---
 
-## 8. 风险与缓解
+## 9. 风险与缓解
 
 | 风险 | 缓解措施 |
 |------|--------|
@@ -271,7 +389,7 @@ sequenceDiagram
 
 ---
 
-## 9. 下一步计划
+## 10. 下一步计划
 
 1. **Week 1**：实现 `SharedMemorySegment` + `PointManager`（Linux）
 2. **Week 2**：添加 `SubscriptionManager` + 心跳机制
@@ -282,5 +400,12 @@ sequenceDiagram
 
 > **InduRTDB 的成功，不在于它有多复杂，而在于它让复杂的工业控制变得简单、确定、可靠**。
 
-此概要设计已覆盖系统核心，可作为详细设计（LLD）和编码的依据。  
-如需 **类图（UML）**、**共享内存布局计算表** 或 **CMakeLists.txt 模板**，请随时告知。
+---
+
+**文档变更记录**
+
+| 版本号 | 变更日期 | 变更内容 |
+|--------|---------|---------|
+| 1.0.0 | 2026-03-27 | 初始版本 |
+| 1.1.0 | 2026-05-11 | 架构统一为 4 层，PointManager 对齐 SRS 模板接口 |
+| 2.1.0 | 2026-05-16 | 合并工程框架架构设计文档内容，修正 magic 值/对齐，更新 API 签名 |
