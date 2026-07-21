@@ -13,6 +13,7 @@
 #include "core/irt_config.h"
 #include <string.h>
 #include <stdio.h>
+#include <unistd.h>
 
 /* ---- 全局单例 ---- */
 static struct {
@@ -190,7 +191,7 @@ int indurtdb_load_config(const char* config_path) {
 void indurtdb_update_heartbeat(void) {
     /* 使用当前进程 PID */
     if (!g_rtdb.initialized) return;
-    irt_sub_update_heartbeat(&g_rtdb.sub, (int32_t)0 /* placeholder */);
+    irt_sub_update_heartbeat(&g_rtdb.sub, (int32_t)getpid());
 }
 
 /* ---- 校验/统计/错误 ---- */

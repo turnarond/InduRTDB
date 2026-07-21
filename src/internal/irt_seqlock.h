@@ -12,10 +12,15 @@
 #include "irt_types.h"
 
 static inline uint64_t irt_seqlock_write_begin(uint64_t* seq) {
-    uint64_t s = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
-    if (s & 1ULL) return s;                          /* 奇数 = 写冲突 */
-    __atomic_store_n(seq, s + 1, __ATOMIC_RELEASE);  /* 标记写入中 */
-    return s;
+    uint64_t expected = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+    while (1) {
+        if (expected & 1ULL) return expected;  /* 奇数 = 写冲突 */
+        if (__atomic_compare_exchange_n(seq, &expected, expected + 1,
+                /*weak=*/false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return expected;  /* 成功获取写锁, 返回进入前的偶数seq */
+        }
+        /* CAS 失败: expected 已被更新为当前seq值, 重试 */
+    }
 }
 
 static inline void irt_seqlock_write_end(uint64_t* seq, uint64_t seq0) {

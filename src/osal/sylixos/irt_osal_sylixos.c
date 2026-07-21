@@ -65,6 +65,7 @@ void* irt_shm_os_map(irt_shm_os_t* s, const char* name, size_t size) {
 
     if (s->owner && ftruncate(s->fd, (off_t)size) < 0) {
         close(s->fd); s->fd = -1;
+        shm_unlink(s->name);
         return NULL;
     }
 
@@ -72,6 +73,7 @@ void* irt_shm_os_map(irt_shm_os_t* s, const char* name, size_t size) {
     if (s->mapped == MAP_FAILED) {
         close(s->fd); s->fd = -1;
         s->mapped = NULL;
+        if (s->owner) shm_unlink(s->name);
         return NULL;
     }
     return s->mapped;
