@@ -1,6 +1,6 @@
 # InduRTDB — Industrial Real-Time Database
 
-**版本 2.1.0** | 2026-05-11
+**版本 3.0.0** | 2026-07-21 | **更新**: 纯 C 重写, 零 C++ 依赖
 
 ## 项目概述
 
@@ -16,10 +16,9 @@ InduRTDB 是面向工业边缘控制场景（BAS、DDC、PLC）的**超低延迟
 | **工业语义** | ✅ 已实现 | 每个点位携带 quality/unit/access/timestamp |
 | **多进程共享** | ✅ 已实现 | POSIX shm_open + mmap(MAP_SHARED) |
 | **多进程读写** | ✅ 已验证 | 59 单元/集成测试通过, 含 6 个 fork 多进程测试 |
-| **C++ API** | ✅ 已实现 | `write<T>()` / `read()` / `peek()` / `subscribe()` / `loadConfig()` |
-| **C ABI** | ✅ 已实现 | `indurtdb_write_*` / `indurtdb_read_*` 等 17 个函数 |
-| **YAML 配置** | ✅ 已实现 | 轻量解析器, 零第三方依赖 |
-| **零 STL / 零异常** | ✅ 严格遵循 | Core 层: 定长数组, 非虚, `-fno-exceptions -fno-rtti` |
+| **C API** | ✅ 已实现 | 纯 C11, 单头文件 `<indurtdb/indurtdb.h>`, 24 个函数 |
+| **C++ 兼容** | ✅ 已实现 | `extern "C"` 包裹, 可直接在 C++ 中调用 |
+| **零 STL / 零虚表** | ✅ 严格遵循 | Core 层: 定长数组, 非虚, 零堆分配 |
 | **SylixOS 支持** | ⚠️ OSAL 就绪 | 接口存在, 待平台验证 |
 | **性能验证** | ⏳ 待完成 | ARM Cortex-A53 目标硬件 P99 测量 |
 
@@ -31,20 +30,20 @@ InduRTDB 是面向工业边缘控制场景（BAS、DDC、PLC）的**超低延迟
 │  • BAS 驱动 / 控制逻辑 / HMI / OPC UA Bridge           │
 ├───────────────────────────────────────────────────────┤
 │                   API Layer                            │
-│  • InduRTDB C++ 类 (单例, PIMPL, write<T>)            │
-│  • C ABI (17 函数, 兼容 C/Python/Rust)                 │
+│  • 纯 C API (indurtdb.h, 24 函数, 单例)               │
+│  • C++ 可直接通过 extern "C" 调用                      │
+│  • 单头文件, 零 C++ 依赖, 兼容 C/Python/Rust          │
 ├───────────────────────────────────────────────────────┤
-│                   Core Layer (平台无关)                 │
-│  • PointManager      — 直操共享内存, Seqlock 保护写    │
-│  • SubscriptionMgr   — 定长 SubscriberSlot[256]        │
-│  • SharedMemorySegment — shm/mmap/Header 初始化         │
-│  • ConfigLoader      — 轻量 YAML 解析器                │
-│  • Seqlock (自由函数) — seqlock_write_begin/end/read   │
+│                   Core Layer (平台无关, 纯 C11)         │
+│  • irt_point_manager   — 直操共享内存, Seqlock 保护写  │
+│  • irt_subscription    — 定长 Slot 数组, C 函数指针回调 │
+│  • irt_shm             — shm_open/mmap, Header 初始化   │
+│  • irt_config          — 轻量 key=value 解析器          │
+│  • irt_seqlock         — 无锁读写, __atomic builtins   │
 ├───────────────────────────────────────────────────────┤
-│                OS Abstraction Layer (OSAL)             │
-│  • ISharedMemory / ITime / IThreading / INotification  │
-│  • POSIX 实现 (Linux)                                  │
-│  • SylixOS 实现 (待移植)                                │
+│                OS Abstraction Layer (OSAL, 纯 C11)     │
+│  • irt_shm_os_map/unmap/is_owner (POSIX + SylixOS)    │
+│  • irt_time_now_ns (clock_gettime)                    │
 └───────────────────────────────────────────────────────┘
 ```
 
@@ -57,40 +56,37 @@ InduRTDB 是面向工业边缘控制场景（BAS、DDC、PLC）的**超低延迟
 
 ## 编码规范约束
 
-- **禁止异常**: `-fno-exceptions -fno-rtti`
-- **禁止 STL 容器**: Core 层定长数组替代 `vector`/`map`
-- **Core 层禁止虚函数**: 编译期绑定
+- **纯 C11**: 库代码使用 C11 标准, `-Wall -Wextra -Werror`
 - **共享内存 POD only**: 禁止指针、虚表、引用
-- **返回码而非异常**: 全部使用 `bool`
+- **返回码而非异常**: 全部使用 `int` 返回码 (0 = 成功)
+- **定长数组**: 替代 STL vector/map, 编译期确定边界
+- **__atomic builtins**: C11 原子操作, 保证多进程可见性
 
 ## 项目结构
 
 ```
 InduRTDB/
 ├── include/indurtdb/
-│   ├── api/         # InduRTDB C++ API + C ABI 头
-│   ├── core/        # PointManager, SubscriptionManager,
-│   │                #   Seqlock, SharedMemorySegment,
-│   │                #   ConfigLoader
-│   ├── osal/        # ISharedMemory, ITime, IThreading,
-│   │                #   INotification 接口 + Factory
-│   ├── types/       # PointData, InduRTDBHeader, 枚举
-│   └── utils/       # alignment, error, logging
+│   └── indurtdb.h          # 唯一公共头文件 (纯 C API, 24 函数)
 ├── src/
-│   ├── api/cpp/     # indurtdb_impl.cpp
-│   ├── api/c/       # C ABI 桥接
-│   ├── core/        # point_manager, shared_memory_segment,
-│   │                #   subscription_manager, config_loader,
-│   │                #   seqlock
-│   ├── osal/posix/  # POSIX 实现 (Linux)
-│   ├── osal/sylixos/# SylixOS 实现
-│   └── utils/       # alignment, error, logging
+│   ├── api/
+│   │   └── indurtdb.c      # 公共 API 实现 (单例串联所有模块)
+│   ├── core/
+│   │   ├── irt_shm.c/h     # 共享内存段管理
+│   │   ├── irt_point_manager.c/h  # 点位读写 (Seqlock 保护)
+│   │   ├── irt_subscription.c/h   # 订阅/通知/心跳
+│   │   └── irt_config.c/h  # key=value 配置解析器
+│   ├── internal/
+│   │   ├── irt_types.h     # 共享内存布局 (Header/Point/Subscriber)
+│   │   └── irt_seqlock.h   # Seqlock 无锁读写 (inline 自由函数)
+│   └── osal/
+│       ├── irt_osal.h      # OS 抽象接口
+│       ├── posix/           # Linux POSIX 实现
+│       └── sylixos/         # SylixOS 实现
 ├── tests/
-│   ├── unit/        # 53 单元测试 (7 test suites)
-│   └── integration/ # 6 多进程集成测试
-├── docs/            # 需求/设计/技术 文档
-├── examples/        # 使用示例
-├── VERSION          # 2.1.0
+│   ├── unit/               # 7 单元测试 (C API/config/layout/osl/pm/shm/sub)
+│   └── integration/        # 1 集成测试 (多进程 + 布局回归, 3 用例)
+├── docs/                   # 需求/设计/技术 文档
 ├── CHANGELOG.md
 ├── CMakeLists.txt
 ├── LICENSE (MIT)
@@ -101,79 +97,68 @@ InduRTDB/
 
 ### 构建要求
 
-- 编译器：GCC ≥7.5 (C++17)
-- 构建系统：CMake ≥3.15
-- 目标平台：Linux (glibc), SylixOS
-- 目标硬件：ARM Cortex-A53/A72, ≥64MB RAM
+- 编译器: GCC >= 7.5 (C11 编译库, C++17 编译测试)
+- 构建系统: CMake >= 3.15
+- 目标平台: Linux (glibc), SylixOS
+- 目标硬件: ARM Cortex-A53/A72, >=64MB RAM
 
 ### 构建命令
 
 ```bash
 mkdir build && cd build
-cmake .. -DBUILD_TESTS=ON
+cmake ..
 make -j$(nproc)
+```
+
+### 测试
+
+```bash
+cd build && ctest --output-on-failure
 ```
 
 ### 测试结果
 
 ```
-[==========] 59 tests from 8 test suites ran.
-[  PASSED  ] 59 tests.
+100% tests passed, 0 tests failed out of 8
 ```
 
-| 测试套件 | 用例数 | 说明 |
-|---------|--------|------|
-| MultiProcessTest | 6 | 多进程共享内存集成测试 |
-| SeqlockTest | 7 | Seqlock 无锁读写算法 |
-| SubscriptionManagerTest | 10 | 订阅管理器 (定长数组) |
-| MemoryLayoutTest | 11 | 共享内存布局 |
-| BasicTypesTest | 8 | 基础类型 |
-| AlignmentTest | 11 | 内存对齐工具 |
-| ErrorTest | 3 | 错误处理 |
-| LoggingTest | 3 | 日志系统 |
-
-## C++ API 快速开始
-
-```cpp
-#include <indurtdb.hpp>
-
-int main() {
-    auto& rtdb = indurtdb::InduRTDB::instance();
-    rtdb.initialize("hvac_system", 10000, 32);
-
-    // 写入
-    rtdb.write(1001, 23.5);          // double  (温度)
-    rtdb.write(2001, (int32_t)42);   // int32   (计数器)
-    rtdb.write(3001, true);          // bool    (开关)
-    rtdb.write(4001, "Pump_01");     // string  (设备名)
-
-    // 读取
-    indurtdb::PointData p;
-    if (rtdb.read(1001, p)) {
-        printf("温度: %.1f, 质量: %d\n", p.value.d, p.quality);
-    }
-
-    // 零拷贝 peek
-    const auto* pp = rtdb.peek(1001);
-
-    rtdb.shutdown();
-}
-```
+| 测试 | 类型 | 说明 |
+|------|------|------|
+| test_c_api | 单元 | 公共 API 全功能验证 (初始化/读写/范围/订阅) |
+| test_c_config | 单元 | 配置加载器 (key=value 解析, 默认值) |
+| test_c_layout_seqlock | 单元 | 共享内存布局 + Seqlock 算法 |
+| test_c_osal | 单元 | OS 抽象层 (共享内存映射, 时间) |
+| test_c_pm | 单元 | 点位管理器 (类型化写入, Seqlock 读, peek) |
+| test_c_shm | 单元 | 共享内存段 (owner 检测, magic/version 校验) |
+| test_c_sub | 单元 | 订阅管理器 (注册/通知/心跳/僵尸清理) |
+| test_c_multi_process | 集成 | 多进程 fork + 布局回归 (3 用例) |
 
 ## C API 快速开始
 
 ```c
-#include <indurtdb/api/c/indurtdb_c.h>
+#include <indurtdb/indurtdb.h>
 
 int main() {
-    indurtdb_initialize("hvac_system", 10000, 32);
-    indurtdb_write_double(1001, 23.5);
+    if (indurtdb_initialize("hvac_system", 10000, 32) != 0)
+        return 1;
 
-    indurtdb_point_t p;
-    indurtdb_read_point(1001, &p);
-    printf("温度: %f\n", p.value.d);
+    // 写入
+    indurtdb_write_double(1001, 23.5);      // double  (温度)
+    indurtdb_write_int32(2001, 42);         // int32   (计数器)
+    indurtdb_write_bool(3001, true);        // bool    (开关)
+    indurtdb_write_string(4001, "Pump_01"); // string  (设备名)
+
+    // 读取
+    double temp;
+    if (indurtdb_read_double(1001, &temp) == 0) {
+        printf("温度: %.1f\n", temp);
+    }
+
+    // 零拷贝 peek
+    const indurtdb_point_t* p = indurtdb_peek(1001);
 
     indurtdb_shutdown();
+    return 0;
 }
 ```
 
@@ -193,10 +178,12 @@ int main() {
 |------|------|------|
 | 需求规格说明书 (SRS) | `docs/需求文档/` | v2.1.0 |
 | 编码规范 | `docs/需求文档/编码规范.md` | v2.1.0 |
-| 概要设计 (HLD) | `docs/设计文档/` | v2.1.0 |
-| 详细设计 (LLD) | `docs/设计文档/` | v2.1.0 |
-| Seqlock 算法设计 | `docs/技术文档/` | v2.1.0 |
-| 项目开发总结 | `docs/开发规划/` | v2.1.0 |
+| 概要设计 (HLD) | `docs/设计文档/` | v3.0.0 |
+| 详细设计 (LLD) | `docs/设计文档/` | v3.0.0 |
+| Seqlock 算法设计 | `docs/技术文档/` | v3.0.0 |
+| C API 参考手册 | `docs/sdk/C API 参考手册.md` | v3.0.0 |
+| 快速入门指南 | `docs/sdk/快速入门指南.md` | v3.0.0 |
+| 开发者指南 | `docs/sdk/开发者指南.md` | v3.0.0 |
 | 变更日志 | `CHANGELOG.md` | — |
 
 ## 许可证
@@ -207,3 +194,7 @@ MIT License — 详见 `LICENSE` 文件。
 
 **InduRTDB 不是"另一个数据库"，而是工业边缘控制系统的"神经系统"。**
 它的存在，是为了让确定性、可靠性和简洁性回归工业软件的本质。
+
+v3.0.0 是 InduRTDB 的里程碑版本——从 C++ 到 C11 的完全重写。
+仅保留一个公共头文件 (`indurtdb.h`)，零 C++ 依赖。
+所有内部模块以 `irt_` 前缀命名，编译时 `-Wall -Wextra -Werror` 保证代码质量。

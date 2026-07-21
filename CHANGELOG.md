@@ -4,6 +4,59 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.0.0] — 2026-07-21
+
+### 概述
+纯 C 重写。所有模块从 C++ (v2.x) 直译为 C11，保证共享内存布局逐字节一致。
+
+### Added
+- 纯 C 公共 API (`include/indurtdb/indurtdb.h`): 24 个函数，单头文件，零 C++ 依赖
+- C11 OSAL 层 (`irt_osal.h`): POSIX + SylixOS 双平台，无虚表
+- irt_shm 共享内存段管理: shm_open/mmap, owner 检测, magic/version 校验
+- irt_point_manager: 4 种类型写入 (bool/int32/double/string), seqlock 读, 零拷贝 peek
+- irt_subscription: 回调注册/通知/心跳/僵尸清理, 定长 Slot 数组
+- irt_config: 轻量 key=value 解析器, zero-allocation
+- 单元测试 x7 (C API, config, layout+seqlock, osal, point_manager, shm, subscription)
+- 集成测试 x1 (多进程 fork + 布局回归): 3 用例, 覆盖父子进程读写和原始字节布局校验
+- `indurtdb_peek()`: 零拷贝读取, 返回共享内存直接指针
+- `indurtdb_read_range()` / `indurtdb_write_range_*()`: 批量读写接口
+- `indurtdb_subscribe()` / `indurtdb_unsubscribe()`: 变更订阅
+- `indurtdb_load_config()`: 从配置文件加载实例参数
+- `indurtdb_update_heartbeat()` / `indurtdb_is_initialized()`: 心跳与状态查询
+
+### Changed
+- **语言**: C++17 → C11 (gcc), 测试保留 C++17+gtest
+- **构建**: `-std=c++11` → `-std=c11` (库), `-std=c++17` (测试)
+- **编译选项**: C 文件 `-Wall -Wextra -Werror`
+- **头文件**: `<indurtdb/api/c/indurtdb_c.h>` → `<indurtdb/indurtdb.h>`
+- **单例模式**: C++ static local + PIMPL → C static global struct
+- **API 设计**: 模板 write<T>() → 显式类型函数 (write_bool/int32/double/string)
+- **模块命名**: irt_ 前缀 (InduRTDB C 实现), 内部头不暴露给用户
+- **测试框架**: 7 个独立 test suite → 统一 C API 测试套件
+- **项目结构**: include/ 精简为单一公共头, src/ 按 core/api/osal/internal 组织
+
+### Fixed
+- 消除所有虚函数开销 (OSAL, PointManager, SubscriptionManager)
+- 消除所有 STL 容器依赖 (vector/map/function/mutex/unique_ptr)
+- 消除所有异常处理路径
+- 修复 Seqlock 多进程 ABA 防护 (uint64_t 保证不溢出)
+
+### Removed
+- C++ PIMPL 实现层 (`src/api/cpp/`)
+- C ABI 桥接层 (`src/api/c/`)
+- `ISeqlock` / `ISharedMemory` / `ITime` / 所有虚接口
+- `std::function` / `std::vector` / `std::unordered_map` / `std::mutex`
+- POSIX C++ 封装 (`src/osal/posix/` C++ 文件)
+- C++ 单元测试 (API/config/layout/seqlock/osal/pm/shm/sub — 全部以 C 重写)
+- `SeqlockFactory` / `SubscriptionManagerUtils` 等工具类
+
+### 兼容性
+- 共享内存布局逐字节兼容 v2.x: Header (64B) + PointData (128B) + SubscriberEntry (16B)
+- magic (0x1DBA1DBA), version (1) 保持不变
+- C API 函数签名与 v2.x C ABI 向后兼容
+
+---
+
 ## [2.1.0] — 2026-05-11
 
 ### Added

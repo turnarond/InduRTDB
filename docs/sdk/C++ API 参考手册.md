@@ -1,6 +1,26 @@
 # InduRTDB C++ API 参考手册
 
-**版本**：2.1.0
+**版本**: 3.0.0 | **更新日期**: 2026-07-21
+
+> **重要声明**: v3.0.0 起, InduRTDB 已完全重写为纯 C11 实现。C++ API (v2.x `InduRTDB` 类) 已移除。
+> 本手册保留作为 v2.x 用户迁移参考。
+>
+> **推荐使用 C API**: 请查阅 [C API 参考手册](./C%20API%20%E5%8F%82%E8%80%83%E6%89%8B%E5%86%8C.md) (v3.0.0)。
+> C++ 项目可通过 `extern "C" { #include <indurtdb/indurtdb.h> }` 直接调用。
+>
+> **迁移要点**:
+> | v2.x (C++) | v3.0.0 (C) |
+> |---|---|
+> | `InduRTDB::instance()` | 隐式单例 (全局 static) |
+> | `rtdb.write(id, 23.5)` | `indurtdb_write_double(id, 23.5)` |
+> | `rtdb.write(id, (int32_t)42)` | `indurtdb_write_int32(id, 42)` |
+> | `rtdb.read(id, p)` | `indurtdb_read_point(id, &p)` |
+> | `rtdb.peek(id)` | `indurtdb_peek(id)` |
+> | `<indurtdb.hpp>` | `<indurtdb/indurtdb.h>` |
+
+---
+
+以下为 v2.x C++ API 原始文档 (仅作参考):
 
 ---
 
