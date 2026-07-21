@@ -40,13 +40,15 @@ round 5: child raw read value.i=12345         -- 共享内存数据始终正确
 ```
 
 关键事实:
-- 父进程 `indurtdb_initialize` 的 ASSERT 通过 (init 成功)
-- 父进程 `indurtdb_write_int32` 的 ASSERT 通过 (写成功)
+- 复现平台: ARM (SylixOS), 使用 `make -f Makefile` 交叉编译
+- 开发机: x86-64 Linux, CMake 构建 —— **无法复现**
+- 父进程 init / write 的 ASSERT 通过
 - `fork()` 返回成功
-- 子进程本地 `g_rtdb` 结构体 (~16KB BSS) 某些字段读到零值, 但共享内存 (MAP_SHARED) 中的数据完好
-- 现象间歇性出现, 无法在开发机上复现
+- `sizeof(irt_sub_t)=16448`, `sizeof(g_rtdb)=16840` (ARM ABI, 正常)
+- 子进程本地 `g_rtdb` 的 `initialized` / `pm->max_points` 间歇性读到 0, 但共享内存 (MAP_SHARED) 中的数据完好
+- 现象间歇性, **仅在 ARM 目标上出现**
 
-**关于根因**: 无法通过本地复现来确认。fork 是内核基本机制, 不应该有数据一致性 bug。理论上 `g_rtdb` 的所有字段都应该正确继承。但诊断数据明确显示本地缓存值有时读到 0, 而共享内存不受影响。
+**关于根因**: 无法在 x86-64 上复现, 无法在 ARM 上做内核级调试。fork 是内核基本机制, 理论上 `g_rtdb` (~16KB BSS) 的所有字段都应该正确继承。但诊断数据确凿: 本地值有时为 0, SHM 数据始终正确。
 
 ### 修复 (3 处变更, 不依赖根因确认)
 
