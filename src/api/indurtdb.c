@@ -57,7 +57,7 @@ void indurtdb_shutdown(void) {
 }
 
 bool indurtdb_is_initialized(void) {
-    return g_rtdb.initialized;
+    return __atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE);
 }
 
 /* ---- 写入 ---- */

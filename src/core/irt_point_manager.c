@@ -19,7 +19,9 @@ void irt_pm_init(irt_pm_t* pm, irt_shm_t* shm) {
 }
 
 bool irt_pm_validate_id(const irt_pm_t* pm, uint32_t id) {
-    return pm && id < pm->max_points;
+    if (!pm || !pm->shm) return false;
+    irt_header_t* hdr = irt_shm_header(pm->shm);
+    return hdr && id < hdr->max_points;
 }
 
 static int pm_write_impl(irt_pm_t* pm, uint32_t id,
