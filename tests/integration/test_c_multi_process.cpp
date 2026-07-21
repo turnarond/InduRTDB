@@ -52,16 +52,9 @@ TEST(CMultiProcess, ChildReadsParentWrite) {
         if (child_ensure_ready(INST, N, M) != 0)
             _exit(CHILD_REINIT_FAIL);
 
-        /* 通过 peek(0) 基址 + 偏移直接读取共享内存中的 point 5,
-           绕过 peek/read API 的通路以规避特定平台上 validate_id
-           或 irt_shm_points 的间歇性异常 */
-        const indurtdb_point_t* p0 = indurtdb_peek(0);
-        if (!p0) _exit(CHILD_ERR);
-
-        const indurtdb_point_t* p5 =
-            (const indurtdb_point_t*)((const uint8_t*)p0
-                                      + 5 * sizeof(indurtdb_point_t));
-        _exit(p5->value.i == 12345 ? CHILD_OK : CHILD_ERR);
+        int32_t v = 0;
+        int rc = indurtdb_read_int32(5, &v);
+        _exit((rc == 0 && v == 12345) ? CHILD_OK : CHILD_ERR);
     }
 
     int status = 0;
