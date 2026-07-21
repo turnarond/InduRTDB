@@ -84,8 +84,8 @@ TEST(CMultiProcess, RawLayoutRegression) {
     int32_t vi;
     std::memcpy(&vi, raw + 0, sizeof(vi));
     EXPECT_EQ(vi, 0x11223344);
-    EXPECT_EQ(raw[40], INDURTDB_TYPE_INT32);
-    EXPECT_EQ(raw[41], INDURTDB_QUALITY_GOOD);
+    EXPECT_EQ((int)raw[40], INDURTDB_TYPE_INT32);
+    EXPECT_EQ((int)raw[41], INDURTDB_QUALITY_GOOD);
 
     /* Header 就在 points[0] 前 64 字节处: magic 校验 */
     const uint8_t* base = reinterpret_cast<const uint8_t*>(indurtdb_peek(0)) - 64;
