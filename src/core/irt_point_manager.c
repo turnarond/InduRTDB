@@ -72,17 +72,11 @@ int irt_pm_read(irt_pm_t* pm, uint32_t id, indurtdb_point_t* out) {
     indurtdb_point_t* pts = irt_shm_points(pm->shm);
     if (!pts) return -1;
 
-    indurtdb_point_t* src = &pts[id];
-    uint64_t s0, s1;
-    s0 = 0; s1 = 1;
-    do {
-        s0 = __atomic_load_n(&irt_shm_header(pm->shm)->write_seq, __ATOMIC_ACQUIRE);
-        if (s0 & 1ULL) continue;
-        /* 拷贝全量 128B — seqlock 保证一致性 */
-        memcpy(out, src, sizeof(indurtdb_point_t));
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        s1 = __atomic_load_n(&irt_shm_header(pm->shm)->write_seq, __ATOMIC_ACQUIRE);
-    } while (s0 != s1);
+    /* 使用统一的 irt_seqlock_read 获取安全指针, 再拷贝 */
+    const indurtdb_point_t* src = irt_seqlock_read(
+        &irt_shm_header(pm->shm)->write_seq, pts, id);
+    if (!src) return -1;
+    memcpy(out, src, sizeof(indurtdb_point_t));
     return 0;
 }
 
