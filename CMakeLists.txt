@@ -32,24 +32,7 @@ set(IRT_CORE_SRC
     ${IRT_OSAL_SRC}
 )
 
-# 过渡期: 文件尚未全部创建时允许列表中缺失项被过滤
-set(IRT_EXISTING_SRC "")
-foreach(f ${IRT_CORE_SRC})
-    if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/${f})
-        list(APPEND IRT_EXISTING_SRC ${f})
-    endif()
-endforeach()
-
-# 过渡期: 源文件尚不存在时用占位编译单元避免 "No SOURCES given to target"
-# (Task 2 创建首个 .c 后本分支自动失效, 随 EXISTS 过滤一并在 Task 9 移除)
-if(NOT IRT_EXISTING_SRC)
-    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/irt_placeholder.c
-        "/* transitional placeholder; unused once real .c sources exist */\n"
-        "typedef int irt_placeholder_t;\n")
-    list(APPEND IRT_EXISTING_SRC ${CMAKE_CURRENT_BINARY_DIR}/irt_placeholder.c)
-endif()
-
-add_library(indurtdb STATIC ${IRT_EXISTING_SRC})
+add_library(indurtdb STATIC ${IRT_CORE_SRC})
 target_include_directories(indurtdb PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src)
@@ -59,3 +42,4 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+add_subdirectory(examples)

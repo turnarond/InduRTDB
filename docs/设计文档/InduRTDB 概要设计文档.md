@@ -3,9 +3,9 @@
 ---
 
 # **InduRTDB 概要设计文档（High-Level Design, HLD）**  
-**版本：2.1.0**
-**日期：2026年5月16日**
-**修订说明**：合并工程框架架构设计内容，消除冗余，对齐 v2.1.0 代码实现
+**版本：3.0.0**
+**日期：2026年7月21日**
+**修订说明**：纯 C11 重写，移除 C++ 类层次，所有模块改为 C 结构体 + 自由函数；API 层从 C++/C ABI 双轨改为纯 C 单头文件
 
 ---
 
@@ -33,46 +33,46 @@ InduRTDB 采用 **四层分层架构**，严格隔离平台相关与平台无关
 │  • HMI / Web UI                                       │
 │  • OPC UA Server (Bridge)                             │
 │                                                       │
-│  ← 使用 InduRTDB C++/C API 进行读写/订阅              │
+│  ← 使用 indurtdb.h C API 进行读写/订阅                │
 +───────────────────────────┬───────────────────────────+
                             │
 +───────────────────────────▼───────────────────────────+
-│                   API Layer                            │
-│  ┌─────────────────┐    ┌─────────────────────────┐   │
-│  │   C++ API       │    │    C ABI                │   │
-│  │   InduRTDB 类   │    │  (兼容 C/Python/Rust)    │   │
-│  └─────────┬───────┘    └───────────────┬─────────┘   │
-+────────────┼────────────────────────────┼─────────────+
-             │                            │
-+────────────▼────────────────────────────▼─────────────+
-│               InduRTDB Core Layer (Platform Agnostic) │
-│  ┌─────────────────┐    ┌─────────────────────────┐   │
-│  │ PointManager    │    │ SubscriptionManager     │   │
-│  │ • write<T>()    │    │ • subscribe(id, cb)     │   │
-│  │ • read(id)      │    │ • Heartbeat cleanup     │   │
-│  │ • peek(id)      │    │                         │   │
-│  └─────────┬───────┘    └───────────────┬─────────┘   │
-│            │                            │             │
-│  ┌─────────▼────────────────────────────▼─────────┐   │
-│  │           SharedMemorySegment                 │   │
-│  │  • Header (magic, write_seq, stats)           │   │
-│  │  • PointData[MAX_POINTS] (aligned array)      │   │
-│  │  • SubscriberTable[MAX_SUBS]                  │   │
-│  └───────────────────────────────────────────────┘   │
+│                   API Layer (纯 C11)                   │
+│  ┌─────────────────────────────────────────────────┐  │
+│  │      indurtdb.h — 单头文件，24 个 C 函数        │  │
+│  │      indurtdb.c — 单例实现，串联所有模块        │  │
+│  │      extern "C" 包裹，兼容 C/Python/Rust        │  │
+│  └─────────────────────────────────────────────────┘  │
++───────────────────────────┬───────────────────────────+
+                            │
++───────────────────────────▼───────────────────────────+
+│               InduRTDB Core Layer (纯 C11)             │
+│  ┌───────────────┐  ┌──────────────┐  ┌───────────┐  │
+│  │ irt_point_    │  │ irt_subscrip-│  │ irt_config │  │
+│  │ manager.c/h   │  │ tion.c/h     │  │ .c/h       │  │
+│  │ • irt_pm_write│  │ • irt_sub_reg│  │ • irt_     │  │
+│  │ • irt_pm_read │  │ • irt_sub_not│  │   config_  │  │
+│  │ • irt_pm_peek │  │ • heartbeat  │  │   parse    │  │
+│  └───────┬───────┘  └──────┬───────┘  └──────┬────┘  │
+│          │                 │                  │       │
+│  ┌───────▼─────────────────▼──────────────────▼─────┐ │
+│  │           irt_shm.c/h — 共享内存段              │ │
+│  │  • Header (magic/version/write_seq/stats)       │ │
+│  │  • PointData[MAX_POINTS] (128B aligned)         │ │
+│  │  • SubscriberEntry[MAX_SUBS] (16B aligned)      │ │
+│  └─────────────────────────────────────────────────┘ │
 │                                                       │
-│  Seqlock: 轻量自由函数（操作 header_->write_seq）      │
+│  irt_seqlock.h: 轻量 inline 自由函数（__atomic 操作） │
 +───────────────────────────┬───────────────────────────+
                             │
 +───────────────────────────▼───────────────────────────+
-│          OS Abstraction Layer (OSAL)                  │
-│  ┌─────────────┐  ┌──────────────┐  ┌─────────────┐  │
-│  │ SharedMem   │  │ Threading    │  │ Time        │  │
-│  │ • shm_open  │  │ • CPU Affinity│ │ • clock_gettime││
-│  │ • mmap      │  │              │  │ • monotonic │  │
-│  └─────────────┘  └──────────────┘  └─────────────┘  │
-│  ┌─────────────┐                                     │
-│  │ Notification│ ← Unix Domain Socket (UDS)          │
-│  └─────────────┘                                     │
+│          OS Abstraction Layer (OSAL, 纯 C11)           │
+│  irt_osal.h: 两个导出函数                              │
+│  ┌───────────────────────┐  ┌──────────────────────┐   │
+│  │ irt_shm_os_map/       │  │ irt_time_now_ns()    │   │
+│  │ unmap/is_owner        │  │ clock_gettime(MONO)  │   │
+│  └───────────────────────┘  └──────────────────────┘   │
+│  posix/irt_osal_posix.c | sylixos/irt_osal_sylixos.c   │
 +───────────────────────────────────────────────────────+
 ```
 
@@ -190,104 +190,104 @@ bool write(PointId id, const T& value) {
 
 ---
 
-### 3.5 类关系设计
-
-#### 核心类图
+### 3.5 模块关系设计（C 模块依赖图）
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                      InduRTDB (Singleton)                    │
-│  - instance(): InduRTDB&                                    │
-│  - initialize(): bool                                       │
-│  - write<T>(): bool                                         │
-│  - read(): bool                                             │
-│  - peek(): const PointData*                                 │
-│  - subscribe(): bool                                        │
-│  - shutdown(): void                                         │
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │                    Impl (PIMPL)                     │   │
-│  │  - seg_: SharedMemorySegment*                       │   │
-│  │  - pm_: PointManager*                               │   │
-│  │  - sm_: SubscriptionManager*                        │   │
-│  │  - time_: unique_ptr<ITime>                         │   │
-│  └─────────────────────────────────────────────────────┘   │
-└──────────────────────────────┬──────────────────────────────┘
-                               │
-┌──────────────────────────────▼──────────────────────────────┐
-│                 PointManager (Concrete, 非虚)               │
-│  - write<T>(id, value): bool                                │
-│  - read(id, out): bool                                      │
-│  - peek(id): const PointData*    ← 零拷贝，返回 &points_[id]│
-│  - validate_id(id): bool                                    │
-│                                                             │
-│  - header_: InduRTDBHeader*    ← 共享内存头部                │
-│  - points_: PointData*         ← 共享内存点位数组            │
-│  - time_: ITime*               ← OSAL 时间接口               │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│              SharedMemorySegment (Concrete)                  │
-│  - initialize(): bool    ← shm_open + mmap + init header    │
-│  - shutdown(): void      ← munmap + shm_unlink              │
-│  - base(): void*                                            │
-│  - header(): InduRTDBHeader*                                │
-│  - points(): PointData*                                     │
-│  - subscribers(): SubscriberEntry*                          │
-│  - is_owner(): bool                                         │
-└─────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│               indurtdb.c (公共 API 单例)                    │
+│  持有全局状态: g_shm, g_pm, g_sub, g_config                │
+│  导出 24 个 indurtdb_* 函数                                 │
+│  串联: init → irt_shm_init → irt_pm_init → irt_sub_init   │
+└───────────┬──────────────┬──────────────┬──────────────────┘
+            │              │              │
+┌───────────▼──┐  ┌────────▼───────┐  ┌──▼──────────────────┐
+│ irt_point_   │  │ irt_subscrip-  │  │ irt_config.c        │
+│ manager.c    │  │ tion.c         │  │ • irt_config_parse()│
+│ • irt_pm_    │  │ • irt_sub_reg  │  │ • irt_config_get_*()│
+│   write_bool │  │ • irt_sub_unreg│  │ key=value 解析器     │
+│   /int32     │  │ • irt_sub_not  │  └─────────────────────┘
+│   /double    │  │ • irt_sub_hb   │
+│   /string    │  │ • irt_sub_zomb │
+│ • irt_pm_    │  │ 定长 Slot[256] │
+│   read_*     │  └───────┬────────┘
+│ • irt_pm_    │          │
+│   peek       │          │
+│ • irt_pm_    │          │
+│   read_range │          │
+│ • irt_pm_    │          │
+│   write_     │          │
+│   range_*    │          │
+└──────┬───────┘          │
+       │                  │
+┌──────▼──────────────────▼──────────────┐
+│         irt_shm.c — 共享内存段          │
+│  • irt_shm_init(name, max_pts, max_sub)│
+│  • irt_shm_shutdown()                  │
+│  • irt_shm_header/points/subscribers   │
+│  → 调用 OSAL: irt_shm_os_map/unmap     │
+└──────────────┬─────────────────────────┘
+               │
+┌──────────────▼─────────────────────────┐
+│       irt_osal.h (OSAL 接口, 纯 C)      │
+│  irt_shm_os_map(name, sz, &owner)      │
+│  irt_shm_os_unmap(addr, sz, owner)     │
+│  irt_shm_os_is_owner()                 │
+│  irt_time_now_ns()                     │
+│                                        │
+│  posix/irt_osal_posix.c                │
+│  sylixos/irt_osal_sylixos.c            │
+└────────────────────────────────────────┘
 ```
 
 > **Core 层设计原则**：
-> - **非虚类**：PointManager、SharedMemorySegment 不需要多态，编译期绑定
-> - **零 STL**：定长数组替代 vector/map/unordered_map
-> - **零异常**：全部 bool 返回值
-> - **Seqlock 为轻量自由函数**：操作 header_->write_seq，不封装为类层次
+> - **零虚函数**：所有 C 结构体 + 自由函数，编译期绑定
+> - **零 STL**：定长数组替代所有动态容器
+> - **零异常**：全部 `int` 返回码 (0=成功, <0=错误)
+> - **Seqlock 为 `irt_seqlock.h` 头文件中的 inline 函数**：操作 `header->write_seq`
 
-#### 接口设计
+#### 接口设计（C 风格）
 
-**OSAL 接口（仅此处允许虚函数）：**
-```cpp
-class ISharedMemory {
-    virtual void* map(size_t size) = 0;
-    virtual void unmap() = 0;
-    virtual bool is_owner() const = 0;
-};
-class ITime {
-    virtual TimestampNs now_ns() const = 0;
-    virtual void sleep_ns(TimestampNs duration) const = 0;
-};
-class IThreading {
-    virtual void set_affinity(int cpu_core) = 0;
-    virtual void yield() = 0;
-};
-class INotification {
-    virtual bool send(const void* data, size_t size) = 0;
-    virtual bool receive(void* data, size_t size, TimestampNs timeout_ns) = 0;
-};
+**OSAL 接口（纯 C，无虚函数）：**
+```c
+// irt_osal.h — 4 个导出函数
+void* irt_shm_os_map(const char* name, size_t size, bool* is_owner);
+void  irt_shm_os_unmap(void* addr, size_t size, bool is_owner);
+bool  irt_shm_os_is_owner(void);
+uint64_t irt_time_now_ns(void);
 ```
 
-**Core 层接口（非虚，编译期绑定）：**
-```cpp
-// PointManager —— 直接操作共享内存，无虚函数
-class PointManager {
-public:
-    PointManager(void* shm_base, uint32_t max_points, osal::ITime* time);
-    template<typename T> bool write(PointId id, const T& value);
-    bool read(PointId id, PointData& out) const;
-    const PointData* peek(PointId id) const;
-private:
-    InduRTDBHeader* header_;
-    PointData*      points_;
-    uint32_t        max_points_;
-    osal::ITime*    time_;
-};
+**Core 层接口（C 模块 + 结构体）：**
+```c
+// irt_point_manager.h
+typedef struct {
+    irt_header_t*  header;
+    irt_point_t*   points;
+    uint32_t       max_points;
+} irt_pm_t;
 
-// Seqlock —— 轻量自由函数（非类）
-uint64_t seqlock_write_begin(uint64_t* seq);
-void     seqlock_write_end(uint64_t* seq, uint64_t seq0);
-const PointData* seqlock_read(const uint64_t* seq,
-                               const PointData* points, uint32_t id);
+int  irt_pm_init(irt_pm_t* pm, void* shm_base, uint32_t max_points);
+int  irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value);
+int  irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value);
+int  irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value);
+int  irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value);
+int  irt_pm_read_bool(const irt_pm_t* pm, uint32_t id, bool* out);
+int  irt_pm_read_int32(const irt_pm_t* pm, uint32_t id, int32_t* out);
+int  irt_pm_read_double(const irt_pm_t* pm, uint32_t id, double* out);
+int  irt_pm_read_string(const irt_pm_t* pm, uint32_t id, char* buf, size_t sz);
+const irt_point_t* irt_pm_peek(const irt_pm_t* pm, uint32_t id);
+int  irt_pm_read_range(const irt_pm_t* pm, uint32_t start, uint16_t cnt,
+                       irt_point_t* out, uint16_t out_cap);
+int  irt_pm_write_range_bool(irt_pm_t* pm, uint32_t start,
+                             const bool* vals, uint16_t cnt);
+int  irt_pm_write_range_int32(irt_pm_t* pm, uint32_t start,
+                              const int32_t* vals, uint16_t cnt);
+int  irt_pm_write_range_double(irt_pm_t* pm, uint32_t start,
+                               const double* vals, uint16_t cnt);
+
+// irt_seqlock.h — inline 自由函数
+static inline uint64_t irt_seqlock_write_begin(uint64_t* seq);
+static inline void     irt_seqlock_write_end(uint64_t* seq, uint64_t s0);
+static inline bool     irt_seqlock_read_begin(const uint64_t* seq, uint64_t* out);
 ```
 
 ---
@@ -409,3 +409,4 @@ sequenceDiagram
 | 1.0.0 | 2026-03-27 | 初始版本 |
 | 1.1.0 | 2026-05-11 | 架构统一为 4 层，PointManager 对齐 SRS 模板接口 |
 | 2.1.0 | 2026-05-16 | 合并工程框架架构设计文档内容，修正 magic 值/对齐，更新 API 签名 |
+| 3.0.0 | 2026-07-21 | 纯 C11 重写：移除 C++ 类层次/虚函数/PIMPL，替换为 C 模块 (irt_shm/irt_pm/irt_sub/irt_config/irt_osal) + 自由函数；API 层从 C++/C ABI 双轨统一为纯 C 单头文件 indurtdb.h |

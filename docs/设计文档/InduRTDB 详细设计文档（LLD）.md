@@ -1,8 +1,8 @@
 # InduRTDB 详细设计文档（LLD）
 
-**版本：2.1.0**
-**日期：2026年5月16日**
-**修订说明**：对齐 v2.1.0 代码实现，修正文件名引用和成员变量名
+**版本：3.0.0**
+**日期：2026年7月21日**
+**修订说明**：纯 C11 重写——所有组件从 C++ 类改为 C 结构体 + 自由函数；使用实际实现中的真实函数签名和文件名 (irt_*.c/h)
 
 ---
 
@@ -79,200 +79,151 @@ total_size = sizeof(InduRTDBHeader)                     // 64
 
 ---
 
-## 2. 核心类设计
+## 2. 核心模块设计（纯 C11 实现）
 
-### 2.1 PointManager（非虚，直接操作共享内存）
+所有模块使用 C 结构体 + 自由函数，无虚函数，无 STL，零堆分配。
 
-```cpp
-// point_manager.hpp
-class PointManager {
-public:
-    PointManager(void* shm_base, uint32_t max_points,
-                 osal::ITime* time);
+### 2.1 点位管理器 (`irt_point_manager.c/h`)
 
-    // 模板写入（满足 SRS）
-    template<typename T>
-    bool write(PointId id, const T& value);
+```c
+// irt_point_manager.h
+typedef struct {
+    irt_header_t*  header;       // → 共享内存头部 (write_seq, stats)
+    irt_point_t*   points;       // → 共享内存点位数组
+    uint32_t       max_points;
+} irt_pm_t;
 
-    // 零拷贝读取
-    bool read(PointId id, PointData& out) const;
-    const PointData* peek(PointId id) const;   // 直接返回 &points_[id]
+// 初始化: 从共享内存基址计算 header/points 偏移
+void irt_pm_init(irt_pm_t* pm, void* shm_base, uint32_t max_points);
 
-    bool validate_id(PointId id) const;
-    uint64_t get_write_count() const;
-    uint64_t get_timeout_count() const;
+// 4 个显式类型写入函数（替代 C++ template<T>）
+int irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value);
+int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value);
+int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value);
+int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value);
 
-private:
-    InduRTDBHeader* header_;    // → 共享内存头部
-    PointData*      points_;    // → 共享内存点位数组
-    uint32_t        max_points_;
-    osal::ITime*    time_;
-};
+// 4 个显式类型读取函数
+int irt_pm_read_bool(const irt_pm_t* pm, uint32_t id, bool* out);
+int irt_pm_read_int32(const irt_pm_t* pm, uint32_t id, int32_t* out);
+int irt_pm_read_double(const irt_pm_t* pm, uint32_t id, double* out);
+int irt_pm_read_string(const irt_pm_t* pm, uint32_t id, char* buf, size_t sz);
+int irt_pm_read_point(const irt_pm_t* pm, uint32_t id, irt_point_t* out);
+
+// 零拷贝 peek，内部使用 Seqlock 重试保护
+const irt_point_t* irt_pm_peek(const irt_pm_t* pm, uint32_t id);
+
+// 批量读写
+int irt_pm_read_range(const irt_pm_t* pm, uint32_t start, uint16_t count,
+                      irt_point_t* out, uint16_t out_cap);
+int irt_pm_write_range_bool(irt_pm_t* pm, uint32_t start,
+                            const bool* values, uint16_t count);
+int irt_pm_write_range_int32(irt_pm_t* pm, uint32_t start,
+                             const int32_t* values, uint16_t count);
+int irt_pm_write_range_double(irt_pm_t* pm, uint32_t start,
+                              const double* values, uint16_t count);
+
+// 统计查询
+uint64_t irt_pm_get_write_count(const irt_pm_t* pm);
+uint64_t irt_pm_get_timeout_count(const irt_pm_t* pm);
 ```
 
 **关键设计决策**：
-- **非虚类**：不需要多态，直接编译期绑定
-- **构造时接收 `void* shm_base`**：由 SharedMemorySegment 传入 mmap 地址
-- **模板 `write<T>`**：编译期类型分发，替代 4 个 type-specific 方法
-- **`peek()` 直接返回 `&points_[id]`**：真正的零拷贝，前提是调用方在 Seqlock 保护下使用
+- **显式类型函数**：C 无模板，用 4 个类型化函数替代 `write<T>()`
+- **Seqlock 写入流程**：`irt_seqlock_write_begin()` → 写数据 → `irt_seqlock_write_end()`，冲突返回 `IRT_ERR_BUSY`
+- **`peek()` 在 Seqlock 重试循环内直接返回 `&points[id]`**：真正零拷贝
 
-### 2.2 PointManager::write 实现
+### 2.2 Seqlock (`irt_seqlock.h`, inline 实现)
 
-```cpp
-template<typename T>
-bool PointManager::write(PointId id, const T& value) {
-    if (!validate_id(id)) return false;
+```c
+// irt_seqlock.h — 全部 inline 自由函数，操作 header->write_seq
+#define IRT_SEQLOCK_RETRY_MAX 3
 
-    // Seqlock write begin
-    uint64_t seq0 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
-    if (seq0 & 1ULL) return false;  // 写冲突
-    __atomic_store_n(&header_->write_seq, seq0 + 1, __ATOMIC_RELEASE);
+static inline uint64_t irt_seqlock_write_begin(uint64_t* seq) {
+    uint64_t s0 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+    if (s0 & 1ULL) return 0;  // 写冲突
+    __atomic_store_n(seq, s0 + 1, __ATOMIC_RELEASE);
+    return s0;
+}
 
-    // 更新数据
-    PointData* p = &points_[id];
-    if constexpr (std::is_same_v<T, bool>) {
-        p->value.b = value; p->type = PointType::BOOL;
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-        p->value.i = value; p->type = PointType::INT32;
-    } else if constexpr (std::is_same_v<T, double>) {
-        p->value.d = value; p->type = PointType::DOUBLE;
-    } else if constexpr (std::is_same_v<T, const char*>) {
-        std::strncpy(p->value.str, value, 31);
-        p->value.str[31] = '\0';
-        p->type = PointType::STRING;
-    }
-    p->timestamp_ns = time_->now_ns();
-    p->quality = Quality::GOOD;
+static inline void irt_seqlock_write_end(uint64_t* seq, uint64_t s0) {
+    __atomic_store_n(seq, s0 + 2, __ATOMIC_RELEASE);
+}
 
-    // Seqlock write end
-    __atomic_store_n(&header_->write_seq, seq0 + 2, __ATOMIC_RELEASE);
-    __atomic_fetch_add(&header_->stats.writes, 1, __ATOMIC_RELAXED);
-    return true;
+static inline int irt_seqlock_read_begin(const uint64_t* seq, uint64_t* out) {
+    uint64_t s = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+    if (s & 1ULL) return 0;  // 正在写
+    *out = s;
+    return 1;
+}
+
+static inline int irt_seqlock_read_retry(const uint64_t* seq, uint64_t s0) {
+    return __atomic_load_n(seq, __ATOMIC_ACQUIRE) == s0;
 }
 ```
 
-### 2.3 PointManager::peek 实现
+### 2.3 订阅管理器 (`irt_subscription.c/h`)
 
-```cpp
-const PointData* PointManager::peek(PointId id) const {
-    if (!validate_id(id)) return nullptr;
+```c
+// irt_subscription.h
+#define IRT_SUB_MAX_CALLBACKS 256
 
-    uint64_t s0, s1;
-    do {
-        s0 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
-        if (s0 & 1ULL) continue;
-        // 可以安全读取 points_[id]——数据在共享内存中
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        s1 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
-    } while (s0 != s1);
+typedef void (*irt_sub_callback_t)(uint32_t id,
+    const irt_point_t* data, void* user_data);
 
-    return &points_[id];  // 真正的零拷贝
-}
+typedef struct {
+    uint32_t           point_id;
+    irt_sub_callback_t callback;
+    void*              user_data;
+    uint64_t           last_heartbeat_ns;
+    bool               active;
+} irt_sub_slot_t;
+
+typedef struct {
+    irt_sub_slot_t     slots[IRT_SUB_MAX_CALLBACKS];  // 定长数组
+    uint32_t           slot_count;
+    irt_subscriber_t*  shm_table;     // → 共享内存心跳表
+    uint32_t           max_subscribers;
+} irt_sub_t;
+
+void irt_sub_init(irt_sub_t* sub, irt_subscriber_t* shm_table,
+                  uint32_t max_subscribers);
+int  irt_sub_register(irt_sub_t* sub, uint32_t id,
+                      irt_sub_callback_t cb, void* user_data);
+int  irt_sub_unregister(irt_sub_t* sub, uint32_t id);
+void irt_sub_notify(irt_sub_t* sub, uint32_t id, const irt_point_t* data);
+void irt_sub_update_heartbeat(irt_sub_t* sub, pid_t pid);
+void irt_sub_cleanup_zombies(irt_sub_t* sub, uint64_t timeout_ns);
 ```
 
----
+### 2.4 共享内存段 (`irt_shm.c/h`)
 
-### 2.4 SubscriptionManager（定长数组替代 STL）
+```c
+// irt_shm.h
+typedef struct {
+    char              name[64];      // "/indurtdb_<instance_id>"
+    void*             base;          // mmap 返回基址
+    size_t            total_size;
+    bool              is_owner;
+    irt_header_t*     header;         // 偏移 0
+    irt_point_t*      points;         // 偏移 sizeof(irt_header_t)
+    irt_subscriber_t* subscribers;    // 偏移 points 之后
+    uint32_t          max_points;
+    uint32_t          max_subscribers;
+} irt_shm_t;
 
-```cpp
-// 订阅回调——进程本地存储，不放入共享内存
-using SubscriptionCallback = void (*)(PointId id, const PointData& data, void* user_data);
-
-// 定长订阅条目
-struct SubscriberSlot {
-    PointId             point_id;
-    SubscriptionCallback callback;
-    void*               user_data;
-    uint64_t            last_heartbeat_ns;
-    bool                active;
-};
-
-class SubscriptionManager {
-public:
-    static constexpr size_t MAX_CALLBACKS = 256;
-
-    SubscriptionManager(osal::ITime* time,
-                        SubscriberEntry* shm_table,
-                        uint32_t max_subscribers);
-
-    bool subscribe(PointId id, SubscriptionCallback cb, void* user_data);
-    bool unsubscribe(PointId id);
-
-    void notify(PointId id, const PointData& data);
-    void update_heartbeat(pid_t pid);
-    void cleanup_zombies();
-
-    size_t subscription_count() const;
-
-private:
-    SubscriberSlot  slots_[MAX_CALLBACKS];  // 定长数组，零堆分配
-    size_t          slot_count_;
-    osal::ITime*    time_;
-
-    SubscriberEntry* shm_table_;   // → 共享内存中的心跳表
-    uint32_t        max_subscribers_;
-};
+int  irt_shm_init(irt_shm_t* shm, const char* instance_id,
+                  uint32_t max_points, uint32_t max_subscribers);
+void irt_shm_shutdown(irt_shm_t* shm);
 ```
 
-**关键设计决策**：
-- **定长 `SubscriberSlot slots_[256]`**：替代 `std::unordered_map<PointId, std::vector<SubscriptionInfo>>`
-- **C 风格函数指针**：替代 `std::function`，避免堆分配
-- **`shm_table_` 指向共享内存**：心跳信息多进程可见，回调函数本地私有
-- **无 `std::mutex`**：使用原子操作保护 slot 分配
+### 2.5 配置加载器 (`irt_config.c/h`)
 
-### 2.5 SubscriptionManager::notify 实现要点
-
-```cpp
-void SubscriptionManager::notify(PointId id, const PointData& data) {
-    for (size_t i = 0; i < slot_count_; ++i) {
-        if (slots_[i].active && slots_[i].point_id == id) {
-            if (slots_[i].callback) {
-                slots_[i].callback(id, data, slots_[i].user_data);
-            }
-        }
-    }
-}
-```
-
----
-
-### 2.6 SharedMemorySegment（完整实现设计）
-
-```cpp
-class SharedMemorySegment {
-public:
-    SharedMemorySegment(const char* instance_id,
-                        uint32_t max_points,
-                        uint32_t max_subscribers);
-
-    bool initialize();       // shm_open + mmap + 初始化 header
-    void shutdown();         // munmap + shm_unlink (if owner)
-    bool is_owner() const;
-
-    void* base() const;
-    InduRTDBHeader* header() const;
-    PointData* points() const;
-    SubscriberEntry* subscribers() const;
-
-    uint32_t max_points() const;
-    uint32_t max_subscribers() const;
-    size_t   total_size() const;
-
-private:
-    char        name_[64];   // "/indurtdb_<id>"
-    void*       base_;       // mmap 基址
-    size_t      total_size_;
-    bool        is_owner_;
-
-    InduRTDBHeader*  header_;
-    PointData*       points_;
-    SubscriberEntry* subscribers_;
-
-    uint32_t max_points_;
-    uint32_t max_subscribers_;
-
-    std::unique_ptr<osal::ISharedMemory> shm_;  // 保持 OSAL 对象生命周期
-};
+```c
+// irt_config.h — 轻量 key=value 解析器，零 malloc
+int  irt_config_load(const char* path,
+                     uint32_t* max_points, uint32_t* max_subscribers);
+int  irt_config_parse_line(const char* line, char* key, size_t key_sz,
+                           char* value, size_t val_sz);
 ```
 
 ---
@@ -291,60 +242,64 @@ private:
 
 ---
 
-## 4. 文件组织
+## 4. 文件组织（v3.0.0 纯 C11）
 
 ```
 indurtdb/
 ├── include/indurtdb/
-│   ├── types/basic_types.hpp
-│   ├── types/memory_layout.hpp
-│   ├── core/point_manager_interface.hpp        # PointManager 类（非虚）
-│   ├── core/subscription_manager_interface.hpp # SubscriptionManager 类
-│   ├── core/seqlock.hpp                        # Seqlock 自由函数
-│   ├── core/shared_memory_segment.hpp          # SharedMemorySegment
-│   ├── core/config_loader.hpp                  # 配置加载器
-│   ├── osal/interface.hpp                      # OSAL 接口
-│   ├── osal/factory.hpp                        # OSAL 工厂
-│   └── api/indurtdb.hpp                        # InduRTDB 主 API
+│   └── indurtdb.h              # 唯一公共头文件 (纯 C API, 24 函数)
 ├── src/
-│   ├── api/cpp/indurtdb_impl.cpp
-│   ├── api/c/indurtdb_c_impl.cpp
-│   ├── core/point_manager.cpp
-│   ├── core/shared_memory_segment.cpp
-│   ├── core/subscription_manager.cpp
-│   ├── core/config_loader.cpp
-│   ├── core/seqlock.cpp
+│   ├── api/
+│   │   └── indurtdb.c           # 公共 API 单例实现
+│   ├── core/
+│   │   ├── irt_shm.c/h          # 共享内存段管理
+│   │   ├── irt_point_manager.c/h # 点位读写 (Seqlock 保护)
+│   │   ├── irt_subscription.c/h  # 订阅/通知/心跳
+│   │   └── irt_config.c/h        # key=value 配置解析
+│   ├── internal/
+│   │   ├── irt_types.h           # 共享内存布局定义
+│   │   └── irt_seqlock.h         # Seqlock inline 函数
 │   └── osal/
-│       ├── posix/
-│       └── sylixos/
+│       ├── irt_osal.h            # OS 抽象接口 (纯 C)
+│       ├── posix/irt_osal_posix.c
+│       └── sylixos/irt_osal_sylixos.c
 ├── tests/
 │   ├── unit/
-│   │   ├── test_seqlock.cpp
-│   │   ├── test_subscription_manager.cpp
-│   │   ├── test_memory_layout.cpp
-│   │   ├── test_basic_types.cpp
-│   │   ├── test_alignment.cpp
-│   │   ├── test_error.cpp
-│   │   └── test_logging.cpp
+│   │   ├── test_c_api.cpp        # 公共 API 全功能验证
+│   │   ├── test_c_config.cpp     # 配置加载器
+│   │   ├── test_c_layout_seqlock.cpp # 布局 + Seqlock
+│   │   ├── test_c_osal.cpp       # OSAL 层
+│   │   ├── test_c_pm.cpp         # 点位管理器
+│   │   ├── test_c_shm.cpp        # 共享内存段
+│   │   └── test_c_sub.cpp        # 订阅管理器
 │   └── integration/
-│       └── test_multi_process.cpp
-└── CMakeLists.txt
+│       └── test_c_multi_process.cpp # 多进程 fork + 布局回归
+├── examples/
+│   ├── basic_example.c           # C11 使用示例
+│   └── CMakeLists.txt
+├── CMakeLists.txt
+└── VERSION
 ```
 
 ---
 
-## 5. 与原设计的关键变更
+## 5. 版本演变关键变更
 
-| 项目 | 原设计 (v1.0) | 新设计 (v2.0) |
-|------|-------------|-------------|
-| Seqlock | 独立类层次（ISeqlock + Seqlock + Factory） | 3 个自由函数，操作 header_->write_seq |
-| PointManager | 虚接口 + `vector<unique_ptr<ISeqlock>>` | 非虚类 + 直接操作共享内存数组 |
-| peek() | 复制到 static 临时变量 | 直接返回 `&points_[id]`（零拷贝） |
-| SubscriptionManager | `std::unordered_map` + `std::vector` + `std::function` | 定长 `SubscriberSlot[256]` + C 函数指针 |
-| 编码规范 | 全面违反（STL/异常/虚函数） | 严格遵守 |
+| 项目 | v1.0 (C++) | v2.0 (C+重构) | v3.0 (纯 C11) |
+|------|-----------|--------------|---------------|
+| 语言 | C++17 | C++17 | **C11 (gnu11)** |
+| Seqlock | ISeqlock 类层次 | 3 个自由函数 | `irt_seqlock.h` 4 个 inline 函数 |
+| PointManager | 虚接口 + `vector<unique_ptr<ISeqlock>>` | 非虚类 + 直接操作共享内存 | `irt_pm_t` 结构体 + 自由函数 |
+| SubscriptionManager | `unordered_map` + `vector` + `function` | 定长 `SubscriberSlot[256]` + 函数指针 | `irt_sub_t` + `irt_sub_callback_t` |
+| OSAL | 虚接口 (ISharedMemory 等) | 同左 | `irt_osal.h` 纯 C 函数 (4 个导出) |
+| API | C++ 类 + C ABI 桥接 | C++ 单例 + C ABI 17 函数 | `indurtdb.h` 单一头文件 24 个 C 函数 |
+| 公共头 | `indurtdb.hpp` + `c/indurtdb_c.h` | 同左 | **仅** `indurtdb/indurtdb.h` |
+| 编译选项 | `-std=c++11` | `-std=c++11` | `-std=gnu11 -Wall -Wextra -Werror` |
+| 测试 | C++ gtest | C++ gtest | C++17 gtest (仅测试)，8 suites |
 
 ---
 
 **文档变更记录**
 - v1.0.0 (2026-03-26)：初始版本
 - v2.0.0 (2026-05-11)：移除 STL 依赖，Seqlock 回归全局机制，PointManager 非虚化
+- v3.0.0 (2026-07-21)：纯 C11 重写——全部 C++ 类替换为 C 结构体+自由函数；使用实际 `irt_*.c/h` 文件名和函数签名；单一公共头 `indurtdb.h` (24 函数)

@@ -3,9 +3,9 @@
 ---
 
 # **InduRTDB 需求规格说明书（SRS）**  
-**版本：2.1.0**  
-**日期：2026年5月16日**  
-**修订说明**：API 签名对齐 v2.1.0 代码实现
+**版本：3.0.0**  
+**日期：2026年7月21日**  
+**修订说明**：纯 C11 重写，C++ API 已移除，全部 API 以 C 语言实现；编译器标准从 C++17 改为 C11
 
 ---
 
@@ -50,7 +50,7 @@ InduRTDB 作为边缘控制器内部的**数据中枢**，支撑驱动层、控�
 ### 2.3 运行环境
 - **硬件**：ARM Cortex-A53/A72，≥64MB RAM
 - **操作系统**：Linux（glibc）、SylixOS（主支持），VxWorks（未来）
-- **编译器**：GCC ≥7.5，C++17 标准
+- **编译器**：GCC ≥7.5，C11 标准 (-std=gnu11)
 
 ---
 
@@ -59,27 +59,28 @@ InduRTDB 作为边缘控制器内部的**数据中枢**，支撑驱动层、控�
 ### 3.1 数据模型
 每个点位必须包含以下字段：
 
-```cpp
-struct PointData {
-    // --- 核心值 ---
-    union Value {
-        bool      b;
-        int32_t   i;
-        double    d;
-        char      str[32];  // 仅状态文本，非控制点
+```c
+// C11 纯 C 结构体，与 v2.x 布局逐字节一致
+typedef struct {
+    union {
+        bool    b;
+        int32_t i;
+        double  d;
+        char    str[32];  // 仅状态文本，非控制点
     } value;
 
-    uint8_t   type;         // 0=bool, 1=int, 2=double, 3=str
+    uint8_t   type;         // INDURTDB_TYPE_BOOL/INT32/DOUBLE/STRING
     uint64_t  timestamp_ns; // 单调纳秒时钟（CLOCK_MONOTONIC_RAW）
 
     // --- 工业语义 ---
-    uint8_t   quality;      // 0=GOOD, 1=BAD, 2=TIMEOUT, 3=SUBSTITUTED
-    uint16_t  unit;         // 0=NO_UNIT, 1=°C, 2=Pa, 3=%, ...
-    uint8_t   access;       // 1=READ_ONLY, 3=READ_WRITE
+    uint8_t   quality;      // INDURTDB_QUALITY_GOOD/BAD/TIMEOUT/SUBSTITUTED
+    uint16_t  unit;         // 工程单位
+    uint8_t   access;       // INDURTDB_ACCESS_READ_ONLY=1, READ_WRITE=3
 
     // --- 元信息 ---
     char      name[64];     // 如 "AHU_01.Supply_Temp"
-} __attribute__((packed, aligned(128)));
+    uint8_t   padding[19];  // 对齐到 128 字节
+} __attribute__((packed, aligned(128))) indurtdb_point_t;
 ```
 
 > **约束**：
@@ -92,18 +93,21 @@ struct PointData {
 
 | 操作 | 接口 | 描述 |
 |------|------|------|
-| **写入** | `bool write(PointId id, T value)` | 更新值、时间戳、质量=GOOD |
-| **读取** | `bool read(PointId id, PointData& out)` | 返回完整点位数据 |
-| **零拷贝读取** | `const PointData* peek(PointId id)` | 返回共享内存指针 |
-| **订阅** | `bool subscribe(PointId id, SubscriptionCallback cb, void* user_data)` | 数据变更时回调（在写者线程） |
-| **配置加载** | `bool loadConfig(const char* config_path)` | 从 YAML 加载点表 |
+| **写入** | `int indurtdb_write_bool/int32/double/string(uint32_t id, T value)` | 显式类型函数，更新值、时间戳、质量=GOOD |
+| **读取** | `int indurtdb_read_bool/int32/double/string(uint32_t id, T* out)` | 返回 0=成功 |
+| **完整点读取** | `int indurtdb_read_point(uint32_t id, indurtdb_point_t* out)` | 返回完整点位数据 |
+| **零拷贝读取** | `const indurtdb_point_t* indurtdb_peek(uint32_t id)` | 返回共享内存直接指针 |
+| **批量读写** | `int indurtdb_read_range/write_range_*(...)` | 范围读写 |
+| **订阅** | `int indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data)` | 数据变更时回调 |
+| **取消订阅** | `int indurtdb_unsubscribe(uint32_t id)` | 注销回调 |
+| **配置加载** | `int indurtdb_load_config(const char* config_path)` | 从配置文件加载参数 |
+| **心跳** | `void indurtdb_update_heartbeat(void)` | 更新心跳时间戳 |
+| **状态查询** | `bool indurtdb_is_initialized(void)` | 查询初始化状态 |
 
 > **示例**：
-> ```cpp
-> rtdb.write(1001, 23.5); // 写入温度
-> rtdb.subscribe(2001, [](const PointData& p) {
->     if (p.value.b) startCooling();
-> });
+> ```c
+> indurtdb_write_double(1001, 23.5); // 写入温度
+> indurtdb_subscribe(2001, on_change, NULL); // 订阅变更
 > ```
 
 ---
@@ -153,56 +157,58 @@ points:
 
 ## 5. 接口需求
 
-### 5.1 C++ API（主推）
-```cpp
-class InduRTDB {
-public:
-    static InduRTDB& instance();
+### 5.1 C API（主推，纯 C11，24 个函数）
 
-    bool initialize(const char* instance_id,
-                    uint32_t max_points = 10000,
-                    uint32_t max_subscribers = 32);
-
-    template<typename T>
-    bool write(PointId id, const T& value);
-    bool write(PointId id, const char* value);  // 字符串非模板重载
-
-    bool read(PointId id, PointData& out) const;
-    const PointData* peek(PointId id) const;     // 零拷贝
-
-    bool subscribe(PointId id, SubscriptionCallback cb, void* user_data);
-    bool unsubscribe(PointId id);
-
-    bool loadConfig(const char* config_path);
-
-    void updateHeartbeat();
-    bool is_initialized() const;
-    void shutdown();
-};
-```
-
-### 5.2 C ABI（兼容 C/Python/Rust）
 ```c
-typedef struct { /* ... */ } indurtdb_point_t;
+#include <indurtdb/indurtdb.h>
 
-// 17 个 C 函数，桥接到 C++ 单例
-int indurtdb_initialize(const char* instance_id,
-                        uint32_t max_points, uint32_t max_subscribers);
+/* 生命周期 */
+int  indurtdb_initialize(const char* instance_id,
+                         uint32_t max_points, uint32_t max_subscribers);
+void indurtdb_shutdown(void);
+bool indurtdb_is_initialized(void);
+
+/* 单点写 */
 int indurtdb_write_bool(uint32_t id, bool value);
 int indurtdb_write_int32(uint32_t id, int32_t value);
 int indurtdb_write_double(uint32_t id, double value);
 int indurtdb_write_string(uint32_t id, const char* value);
+
+/* 单点读 */
 int indurtdb_read_bool(uint32_t id, bool* value);
 int indurtdb_read_int32(uint32_t id, int32_t* value);
 int indurtdb_read_double(uint32_t id, double* value);
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
-uint64_t indurtdb_get_write_count();
-uint64_t indurtdb_get_timeout_count();
-void indurtdb_shutdown();
+const indurtdb_point_t* indurtdb_peek(uint32_t id);   /* 零拷贝 */
+
+/* 批量读写 */
+int indurtdb_read_range(uint32_t start_id, uint16_t count,
+                        indurtdb_point_t* out_buf, uint16_t out_cap);
+int indurtdb_write_range_bool(uint32_t start_id, const bool* values, uint16_t count);
+int indurtdb_write_range_int32(uint32_t start_id, const int32_t* values, uint16_t count);
+int indurtdb_write_range_double(uint32_t start_id, const double* values, uint16_t count);
+
+/* 订阅 */
+typedef void (*indurtdb_callback_t)(uint32_t id,
+    const indurtdb_point_t* data, void* user_data);
+int indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data);
+int indurtdb_unsubscribe(uint32_t id);
+
+/* 配置 / 心跳 / 统计 */
+int  indurtdb_load_config(const char* config_path);
+void indurtdb_update_heartbeat(void);
+int  indurtdb_validate_id(uint32_t id);
+uint64_t indurtdb_get_write_count(void);
+uint64_t indurtdb_get_timeout_count(void);
+const char* indurtdb_get_last_error(void);
 ```
 
-> **ABI 承诺**：v1.0 后保持向后兼容。
+> **ABI 承诺**：v3.0 起纯 C 实现，无 C++ 依赖；`extern "C"` 包裹可被 C++/Python/Rust 通过 FFI 调用。
+
+### 5.2 兼容性说明
+
+v3.0.0 移除了 C++ API（`InduRTDB` 类、模板 `write<T>()` 等）和旧 C ABI 桥接层（`indurtdb_c.h`）。所有功能统一由 5.1 节的纯 C API 提供。共享内存布局（Header 64B + PointData 128B + SubscriberEntry 16B）与 v2.x 逐字节兼容。
 
 ---
 
@@ -261,8 +267,9 @@ Application Layer → InduRTDB Core → OS Abstraction Layer (OSAL)
 | v1.0.0 | 2026-03-27 | 项目脚手架 + 全套文档 + 原型代码 | ✅ 已完成 |
 | v2.0.0 | 2026-05-11 | **架构修正**: 共享内存重写, Seqlock 轻量化, STL 移除 | ✅ 已完成 |
 | v2.1.0 | 2026-05-11 | 多进程集成测试(6), ConfigLoader, C ABI 完整实现, 59 tests | ✅ 已完成 |
-| v2.2 | TBD | SylixOS 交叉编译验证 + ARM Cortex-A53 P99 性能基准 | ⏳ 计划中 |
-| v3.0 | TBD | Unix Domain Socket 跨进程通知 + OPC UA 桥接插件 | 📋 规划中 |
+| v3.0.0 | 2026-07-21 | **纯 C11 重写**，C++ API 移除，24 个 C 函数，8 tests | ✅ 已完成 |
+| v3.1 | TBD | SylixOS 交叉编译验证 + ARM Cortex-A53 P99 性能基准 | ⏳ 计划中 |
+| v3.2 | TBD | Unix Domain Socket 跨进程通知 + OPC UA 桥接插件 | 📋 规划中 |
 
 ### 9.2 许可证
 - **MIT License**  
