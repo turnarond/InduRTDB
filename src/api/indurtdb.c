@@ -71,59 +71,68 @@ static int write_and_notify(int rc, uint32_t id) {
     return rc;
 }
 
+#define ENSURE_INIT() do { \
+    if (!g_rtdb.initialized) { set_error("not initialized"); return -1; } \
+} while (0)
+
 int indurtdb_write_bool(uint32_t id, bool value) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return write_and_notify(irt_pm_write_bool(&g_rtdb.pm, id, value), id);
 }
 int indurtdb_write_int32(uint32_t id, int32_t value) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return write_and_notify(irt_pm_write_int32(&g_rtdb.pm, id, value), id);
 }
 int indurtdb_write_double(uint32_t id, double value) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return write_and_notify(irt_pm_write_double(&g_rtdb.pm, id, value), id);
 }
 int indurtdb_write_string(uint32_t id, const char* value) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return write_and_notify(irt_pm_write_string(&g_rtdb.pm, id, value), id);
 }
 
 /* ---- 读取 ---- */
 
 int indurtdb_read_bool(uint32_t id, bool* value) {
-    if (!g_rtdb.initialized || !value) return -1;
+    ENSURE_INIT();
+    if (!value) { set_error("null output pointer"); return -1; }
     indurtdb_point_t pt;
-    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) return -1;
+    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) { set_error("read failed"); return -1; }
     *value = pt.value.b;
     return 0;
 }
 int indurtdb_read_int32(uint32_t id, int32_t* value) {
-    if (!g_rtdb.initialized || !value) return -1;
+    ENSURE_INIT();
+    if (!value) { set_error("null output pointer"); return -1; }
     indurtdb_point_t pt;
-    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) return -1;
+    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) { set_error("read failed"); return -1; }
     *value = pt.value.i;
     return 0;
 }
 int indurtdb_read_double(uint32_t id, double* value) {
-    if (!g_rtdb.initialized || !value) return -1;
+    ENSURE_INIT();
+    if (!value) { set_error("null output pointer"); return -1; }
     indurtdb_point_t pt;
-    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) return -1;
+    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) { set_error("read failed"); return -1; }
     *value = pt.value.d;
     return 0;
 }
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size) {
-    if (!g_rtdb.initialized || !buffer || buffer_size == 0) return -1;
+    ENSURE_INIT();
+    if (!buffer || buffer_size == 0) { set_error("null or zero-size buffer"); return -1; }
     indurtdb_point_t pt;
-    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) return -1;
+    if (irt_pm_read(&g_rtdb.pm, id, &pt) != 0) { set_error("read failed"); return -1; }
     snprintf(buffer, buffer_size, "%s", pt.value.str);
     return 0;
 }
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data) {
-    if (!g_rtdb.initialized || !point_data) return -1;
+    ENSURE_INIT();
+    if (!point_data) { set_error("null output pointer"); return -1; }
     return irt_pm_read(&g_rtdb.pm, id, point_data);
 }
 const indurtdb_point_t* indurtdb_peek(uint32_t id) {
-    if (!g_rtdb.initialized) return NULL;
+    if (!g_rtdb.initialized) { set_error("not initialized"); return NULL; }
     return irt_pm_peek(&g_rtdb.pm, id);
 }
 
@@ -131,17 +140,19 @@ const indurtdb_point_t* indurtdb_peek(uint32_t id) {
 
 int indurtdb_read_range(uint32_t start_id, uint16_t count,
                         indurtdb_point_t* out_buf, uint16_t out_cap) {
-    if (!g_rtdb.initialized || !out_buf || count == 0) return -1;
+    ENSURE_INIT();
+    if (!out_buf || count == 0) { set_error("invalid argument"); return -1; }
     uint16_t n = (count < out_cap) ? count : out_cap;
     for (uint16_t i = 0; i < n; i++) {
         if (irt_pm_read(&g_rtdb.pm, start_id + i, &out_buf[i]) != 0)
-            return -1;
+            { set_error("read failed"); return -1; }
     }
     return n;
 }
 int indurtdb_write_range_bool(uint32_t start_id, const bool* values,
                               uint16_t count) {
-    if (!g_rtdb.initialized || !values) return -1;
+    ENSURE_INIT();
+    if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
         if (irt_pm_write_bool(&g_rtdb.pm, start_id + i, values[i]) != 0)
             return i;
@@ -150,7 +161,8 @@ int indurtdb_write_range_bool(uint32_t start_id, const bool* values,
 }
 int indurtdb_write_range_int32(uint32_t start_id, const int32_t* values,
                                 uint16_t count) {
-    if (!g_rtdb.initialized || !values) return -1;
+    ENSURE_INIT();
+    if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
         if (irt_pm_write_int32(&g_rtdb.pm, start_id+i, values[i]) != 0)
             return i;
@@ -159,7 +171,8 @@ int indurtdb_write_range_int32(uint32_t start_id, const int32_t* values,
 }
 int indurtdb_write_range_double(uint32_t start_id, const double* values,
                                  uint16_t count) {
-    if (!g_rtdb.initialized || !values) return -1;
+    ENSURE_INIT();
+    if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
         if (irt_pm_write_double(&g_rtdb.pm, start_id+i, values[i]) != 0)
             return i;
@@ -170,26 +183,29 @@ int indurtdb_write_range_double(uint32_t start_id, const double* values,
 /* ---- 订阅 ---- */
 
 int indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return irt_sub_subscribe(&g_rtdb.sub, id, cb, user_data);
 }
 int indurtdb_unsubscribe(uint32_t id) {
-    if (!g_rtdb.initialized) return -1;
+    ENSURE_INIT();
     return irt_sub_unsubscribe(&g_rtdb.sub, id);
 }
 
 /* ---- 配置/心跳 ---- */
 
 int indurtdb_load_config(const char* config_path) {
+    if (g_rtdb.initialized) { set_error("already initialized"); return -1; }
     irt_config_t cfg;
     irt_config_init_defaults(&cfg);
-    if (irt_config_load_file(&cfg, config_path) != 0) return -1;
+    if (irt_config_load_file(&cfg, config_path) != 0) {
+        set_error("config file read failed");
+        return -1;
+    }
     return indurtdb_initialize(cfg.instance_id, cfg.max_points,
                                cfg.max_subscribers);
 }
 
 void indurtdb_update_heartbeat(void) {
-    /* 使用当前进程 PID */
     if (!g_rtdb.initialized) return;
     irt_sub_update_heartbeat(&g_rtdb.sub, (int32_t)getpid());
 }

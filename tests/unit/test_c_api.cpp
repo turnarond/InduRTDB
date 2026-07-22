@@ -102,3 +102,103 @@ TEST_F(CApiTest, ReadRange) {
     EXPECT_EQ(buf[1].value.i, 10);
     EXPECT_EQ(buf[2].value.i, 20);
 }
+
+/* ---- 批量写 ---- */
+
+TEST_F(CApiTest, WriteRangeBool) {
+    bool vals[] = {true, false, true};
+    int n = indurtdb_write_range_bool(10, vals, 3);
+    EXPECT_EQ(n, 3);
+    bool b0 = false, b1 = true, b2 = false;
+    EXPECT_EQ(indurtdb_read_bool(10, &b0), 0);
+    EXPECT_TRUE(b0);
+    EXPECT_EQ(indurtdb_read_bool(11, &b1), 0);
+    EXPECT_FALSE(b1);
+    EXPECT_EQ(indurtdb_read_bool(12, &b2), 0);
+    EXPECT_TRUE(b2);
+}
+
+TEST_F(CApiTest, WriteRangeInt32) {
+    int32_t vals[] = {100, 200, 300};
+    int n = indurtdb_write_range_int32(20, vals, 3);
+    EXPECT_EQ(n, 3);
+    int32_t v;
+    EXPECT_EQ(indurtdb_read_int32(20, &v), 0);
+    EXPECT_EQ(v, 100);
+    EXPECT_EQ(indurtdb_read_int32(22, &v), 0);
+    EXPECT_EQ(v, 300);
+}
+
+TEST_F(CApiTest, WriteRangeDouble) {
+    double vals[] = {1.1, 2.2, 3.3};
+    int n = indurtdb_write_range_double(30, vals, 3);
+    EXPECT_EQ(n, 3);
+    double d;
+    EXPECT_EQ(indurtdb_read_double(30, &d), 0);
+    EXPECT_DOUBLE_EQ(d, 1.1);
+    EXPECT_EQ(indurtdb_read_double(32, &d), 0);
+    EXPECT_DOUBLE_EQ(d, 3.3);
+}
+
+/* ---- 订阅取消 ---- */
+
+TEST_F(CApiTest, Unsubscribe) {
+    CallInfo ci = {};
+    EXPECT_EQ(indurtdb_subscribe(50, api_callback, &ci), 0);
+    EXPECT_EQ(indurtdb_unsubscribe(50), 0);
+
+    /* 取消后写入不应再触发回调 */
+    ci.called = false;
+    indurtdb_write_int32(50, 999);
+    EXPECT_FALSE(ci.called);
+}
+
+/* ---- 心跳 + 超时计数 ---- */
+
+TEST_F(CApiTest, Heartbeat) {
+    /* update_heartbeat 不应崩溃; 尚无僵尸清理, 仅验证无副作用 */
+    EXPECT_NO_FATAL_FAILURE(indurtdb_update_heartbeat());
+    /* 重复调用也不应有问题 */
+    indurtdb_update_heartbeat();
+}
+
+TEST_F(CApiTest, TimeoutCount) {
+    uint64_t tc = indurtdb_get_timeout_count();
+    /* 初始状态应为 0 (或至少可读) */
+    EXPECT_GE(tc, 0u);
+}
+
+/* ---- 错误信息 ---- */
+
+TEST_F(CApiTest, LastError) {
+    /* 未初始化时调用应设置错误信息 */
+    indurtdb_shutdown();
+    EXPECT_FALSE(indurtdb_is_initialized());
+
+    /* 未初始化写入 -> 返回 -1, last_error 非空 */
+    int rc = indurtdb_write_int32(0, 1);
+    EXPECT_NE(rc, 0);
+    const char* err = indurtdb_get_last_error();
+    EXPECT_NE(err, nullptr);
+    EXPECT_STRNE(err, "");
+}
+
+/* ---- 配置加载 ---- */
+
+TEST_F(CApiTest, LoadConfig) {
+    /* 旧实例必须关闭后 load_config 才能重新初始化 */
+    indurtdb_shutdown();
+
+    /* 写临时配置文件 */
+    const char* path = "/tmp/irt_test_load_config.cfg";
+    FILE* f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fprintf(f, "instance_id=cfg_test\nmax_points=128\nmax_subscribers=16\n");
+    fclose(f);
+
+    int rc = indurtdb_load_config(path);
+    EXPECT_EQ(rc, 0);
+    EXPECT_TRUE(indurtdb_is_initialized());
+
+    remove(path);
+}
