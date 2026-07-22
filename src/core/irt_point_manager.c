@@ -51,6 +51,11 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     p->timestamp_ns = irt_time_now_ns();
     p->quality      = INDURTDB_QUALITY_GOOD;
 
+    /*
+     * ARM weak memory ordering: 保证所有数据写入 (type/value/timestamp/
+     * quality) 在 seqlock 释放前对其它 CPU 可见. x86 TSO 下是 no-op.
+     */
+    __atomic_thread_fence(__ATOMIC_RELEASE);
     irt_seqlock_write_end(&hdr->write_seq, seq0);
     __atomic_fetch_add(&hdr->stats.writes, 1, __ATOMIC_RELAXED);
     return 0;
