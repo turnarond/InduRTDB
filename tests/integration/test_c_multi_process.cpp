@@ -86,6 +86,62 @@ TEST(CMultiProcess, InstanceIsolation) {
     indurtdb_shutdown();
 }
 
+/* 全类型数据: 父进程写入 4 种类型, fork 后子进程跨进程读取全部 */
+TEST(CMultiProcess, AllDataTypes) {
+    ASSERT_EQ(indurtdb_initialize("mp_all_types", 64, 8), 0);
+
+    ASSERT_EQ(indurtdb_write_bool(1, true), 0);
+    ASSERT_EQ(indurtdb_write_int32(2, -98765), 0);
+    ASSERT_EQ(indurtdb_write_double(3, 3.14159), 0);
+    ASSERT_EQ(indurtdb_write_string(4, "hello_shm"), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        bool   b = false;
+        int32_t i = 0;
+        double d = 0.0;
+        char   s[64] = "";
+        int rc = indurtdb_read_bool(1, &b)
+               | indurtdb_read_int32(2, &i)
+               | indurtdb_read_double(3, &d)
+               | indurtdb_read_string(4, s, sizeof(s));
+        bool ok = (rc == 0) && b && (i == -98765)
+                  && (d > 3.14 && d < 3.15)
+                  && (std::strcmp(s, "hello_shm") == 0);
+        _exit(ok ? 0 : 1);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+    indurtdb_shutdown();
+}
+
+/* 零拷贝 peek: 子进程通过 peek 直接访问父进程写入的共享内存 */
+TEST(CMultiProcess, ZeroCopyPeek) {
+    ASSERT_EQ(indurtdb_initialize("mp_peek", 64, 8), 0);
+    ASSERT_EQ(indurtdb_write_double(7, 42.0), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        const indurtdb_point_t* p = indurtdb_peek(7);
+        bool ok = (p != NULL) && (p->value.d == 42.0)
+                  && (p->type == INDURTDB_TYPE_DOUBLE);
+        _exit(ok ? 0 : 1);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    EXPECT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+    indurtdb_shutdown();
+}
+
 /* 布局回归: 写入后从原始共享内存字节直接校验 v2.x 布局 */
 TEST(CMultiProcess, RawLayoutRegression) {
     ASSERT_EQ(indurtdb_initialize("mp_test_3", 4, 2), 0);
