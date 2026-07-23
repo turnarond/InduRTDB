@@ -123,38 +123,31 @@ struct SubscriberEntry {
 
 #### 职责：
 - 管理 `PointData` 数组生命周期（直接操作共享内存）
-- 提供模板 `write<T>()` / `read()` 接口
-- 全局 Seqlock（header_->write_seq）保护写入
+- 提供类型化 `irt_pm_write_*()` 自由函数接口
+- 全局 Seqlock（header->write_seq）保护写入
 - 自动更新时间戳、质量标记
 
-#### 写入流程（模板 + 全局 Seqlock）：
-```cpp
-template<typename T>
-bool write(PointId id, const T& value) {
-    auto* p = &points_[id];
+#### 写入流程（C 自由函数 + 全局 Seqlock）：
+```c
+int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value) {
+    if (id >= pm->max_points) return IRT_ERR_INVALID_ID;
+    irt_point_t* p = &pm->points[id];
 
     // Seqlock write begin
-    uint64_t seq0 = __atomic_load_n(&header_->write_seq, __ATOMIC_ACQUIRE);
-    if (seq0 & 1) return false; // 写冲突
+    uint64_t seq0 = __atomic_load_n(&pm->header->write_seq, __ATOMIC_ACQUIRE);
+    if (seq0 & 1ULL) return IRT_ERR_BUSY;
+    __atomic_store_n(&pm->header->write_seq, seq0 + 1, __ATOMIC_RELEASE);
 
-    __atomic_store_n(&header_->write_seq, seq0 + 1, __ATOMIC_RELEASE);
+    /* 写入点位数据 */
+    p->value.d = value;
+    p->type = INDURTDB_TYPE_DOUBLE;
+    p->timestamp_ns = irt_time_now_ns();
+    p->quality = INDURTDB_QUALITY_GOOD;
 
-    // if constexpr 编译期类型分发
-    if constexpr (std::is_same_v<T, double>) {
-        p->value.d = value; p->type = PointType::DOUBLE;
-    } else if constexpr (std::is_same_v<T, int32_t>) {
-        p->value.i = value; p->type = PointType::INT32;
-    } else if constexpr (std::is_same_v<T, bool>) {
-        p->value.b = value; p->type = PointType::BOOL;
-    }
-
-    p->timestamp_ns = time_->now_ns();
-    p->quality = Quality::GOOD;
-
-    // Seqlock write end
-    __atomic_store_n(&header_->write_seq, seq0 + 2, __ATOMIC_RELEASE);
-    header_->stats.writes++;
-    return true;
+    /* Seqlock write end */
+    __atomic_store_n(&pm->header->write_seq, seq0 + 2, __ATOMIC_RELEASE);
+    pm->header->stats.writes++;
+    return 0;
 }
 ```
 
@@ -338,7 +331,7 @@ sequenceDiagram
 - **禁止 STL 容器**（`vector`, `map`）—— 定长数组替代；
 - **禁止异常**（`-fno-exceptions`）—— 全部 bool 返回值；
 - **Core 层禁止虚函数** —— 编译期绑定；
-- **C++17 only**，无第三方依赖（YAML 解析可选）。
+- **C11 (-std=gnu11)**，零第三方运行时依赖。
 
 ---
 
