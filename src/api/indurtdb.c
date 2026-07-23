@@ -21,11 +21,13 @@ static struct {
     irt_pm_t  pm;
     irt_sub_t sub;
     bool      initialized;
-    char      last_error[256];
 } g_rtdb;
 
+/* 每个线程独立的错误信息，无需锁保护 */
+static _Thread_local char g_last_error[256];
+
 static void set_error(const char* msg) {
-    snprintf(g_rtdb.last_error, sizeof(g_rtdb.last_error), "%s", msg);
+    snprintf(g_last_error, sizeof(g_last_error), "%s", msg);
 }
 
 /* ---- 生命周期 ---- */
@@ -226,5 +228,5 @@ uint64_t indurtdb_get_timeout_count(void) {
     return hdr ? __atomic_load_n(&hdr->stats.timeouts, __ATOMIC_RELAXED) : 0;
 }
 const char* indurtdb_get_last_error(void) {
-    return g_rtdb.last_error;
+    return g_last_error;
 }
