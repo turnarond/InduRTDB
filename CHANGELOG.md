@@ -9,6 +9,16 @@ All notable changes to InduRTDB.
 ### 概述
 纯 C 重写。所有模块从 C++ (v2.x) 直译为 C11，保证共享内存布局逐字节一致。
 
+### 收益
+- **API 面积极小**：全部功能浓缩为单一头文件 `indurtdb.h`，仅 100 行、24 个函数，学习成本几乎为零
+- **零 C++ 运行时依赖**：不依赖 STL、异常、RTTI、虚表，可在任何 C11 编译器上构建和链接
+- **代码量大幅缩减**：核心 C 源码仅 ~760 行 + 内部头 ~300 行，远少于原 C++ 实现（含 C API 桥接层）
+- **编译速度显著提升**：无模板展开、无 STL 头文件包含链，增量编译接近 C 编译速度
+- **确定性执行**：去除虚函数调用（间接跳转），所有调用路径编译期确定，更利于 WCET 分析
+- **跨语言 FFI 原生兼容**：纯 C API 可被 C++、Python ctypes、Rust FFI、Go cgo 直接调用，无需桥接层
+- **SylixOS 友好**：避免 SylixOS 对 C++17 特性支持不完整的问题（特别是 stdatomic），全部使用 `__atomic` builtins
+- **单例无锁设计**：全局 Seqlock + 无堆分配，运行时无内存碎片，适合 7x24 工业场景
+
 ### Added
 - 纯 C 公共 API (`include/indurtdb/indurtdb.h`): 24 个函数，单头文件，零 C++ 依赖
 - C11 OSAL 层 (`irt_osal.h`): POSIX + SylixOS 双平台，无虚表
