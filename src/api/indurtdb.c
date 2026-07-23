@@ -21,6 +21,7 @@ static struct {
     irt_pm_t  pm;
     irt_sub_t sub;
     bool      initialized;
+    int32_t   owner_pid;   /* fork 检测: 非零时 compare getpid() */
 } g_rtdb;
 
 /* 每个线程独立的错误信息，无需锁保护 */
@@ -34,6 +35,12 @@ static void set_error(const char* msg) {
 
 int indurtdb_initialize(const char* instance_id,
                         uint32_t max_points, uint32_t max_subscribers) {
+    /* fork 后子进程自动重置: 继承的 owner_pid 仍为父进程 PID,
+     * 但 getpid() 已返回子进程 PID —— 不匹配则自动重置 */
+    if (g_rtdb.initialized && g_rtdb.owner_pid != 0
+        && g_rtdb.owner_pid != (int32_t)getpid()) {
+        indurtdb_shutdown();
+    }
     if (g_rtdb.initialized) { set_error("already initialized"); return -1; }
     if (!instance_id || instance_id[0] == '\0'
         || max_points == 0) { set_error("invalid argument"); return -1; }
@@ -49,6 +56,7 @@ int indurtdb_initialize(const char* instance_id,
     irt_pm_init(&g_rtdb.pm, &g_rtdb.shm);
     irt_sub_init(&g_rtdb.sub, &g_rtdb.shm);
     g_rtdb.initialized = true;
+    g_rtdb.owner_pid = (int32_t)getpid();
     return 0;
 }
 

@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include <sys/wait.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <cstring>
 
@@ -54,6 +55,34 @@ TEST(CMultiProcess, ParentSeesChildWrite) {
     double v = 0;
     EXPECT_EQ(indurtdb_read_double(9, &v), 0);
     EXPECT_DOUBLE_EQ(v, 2.718);
+    indurtdb_shutdown();
+}
+
+/* 实例隔离: fork 后子进程创建独立实例, 父进程实例不受影响 */
+TEST(CMultiProcess, InstanceIsolation) {
+    shm_unlink("/indurtdb_test_A");
+    shm_unlink("/indurtdb_test_B");
+
+    ASSERT_EQ(indurtdb_initialize("test_A", 32, 2), 0);
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+
+    if (pid == 0) {
+        /* 子进程: 创建独立实例 test_B (fork 检测自动重置 g_rtdb) */
+        ASSERT_EQ(indurtdb_initialize("test_B", 64, 2), 0);
+        indurtdb_shutdown();
+        _exit(0);
+    }
+
+    wait(nullptr);
+
+    /* 父进程: test_A 仍可正常读写 */
+    ASSERT_EQ(indurtdb_write_int32(10, 123), 0);
+    int32_t val = 0;
+    ASSERT_EQ(indurtdb_read_int32(10, &val), 0);
+    EXPECT_EQ(val, 123);
+
     indurtdb_shutdown();
 }
 
