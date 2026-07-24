@@ -170,17 +170,69 @@ TEST_F(CApiTest, TimeoutCount) {
 
 /* ---- 错误信息 ---- */
 
-TEST_F(CApiTest, LastError) {
-    /* 未初始化时调用应设置错误信息 */
+TEST_F(CApiTest, LastError_NotInitialized) {
     indurtdb_shutdown();
     EXPECT_FALSE(indurtdb_is_initialized());
 
-    /* 未初始化写入 -> 返回 -1, last_error 非空 */
-    int rc = indurtdb_write_int32(0, 1);
-    EXPECT_NE(rc, 0);
+    /* 未初始化写入 -> 返回非0, last_error 非空 */
+    EXPECT_NE(indurtdb_write_int32(0, 1), 0);
     const char* err = indurtdb_get_last_error();
-    EXPECT_NE(err, nullptr);
+    ASSERT_NE(err, nullptr);
     EXPECT_STRNE(err, "");
+}
+
+TEST_F(CApiTest, LastError_AlreadyInitialized) {
+    /* SetUp 已初始化, 再调 initialize -> "already initialized" */
+    EXPECT_NE(indurtdb_initialize("test_dup2", 64, 4), 0);
+    EXPECT_STREQ(indurtdb_get_last_error(), "already initialized");
+}
+
+TEST_F(CApiTest, LastError_InvalidArg) {
+    indurtdb_shutdown();
+
+    /* NULL instance_id -> "invalid argument" */
+    EXPECT_NE(indurtdb_initialize(NULL, 64, 4), 0);
+    EXPECT_STREQ(indurtdb_get_last_error(), "invalid argument");
+
+    /* max_points == 0 -> "invalid argument" */
+    EXPECT_NE(indurtdb_initialize("test_inv", 0, 4), 0);
+    EXPECT_STREQ(indurtdb_get_last_error(), "invalid argument");
+}
+
+TEST_F(CApiTest, LastError_NullOutputPointer) {
+    /* NULL 输出指针 -> "null output pointer" */
+    EXPECT_NE(indurtdb_read_int32(0, NULL), 0);
+    EXPECT_STREQ(indurtdb_get_last_error(), "null output pointer");
+}
+
+TEST_F(CApiTest, LastError_NotOverwrittenBySuccess) {
+    /* 先触发一个错误 */
+    indurtdb_shutdown();
+    EXPECT_NE(indurtdb_write_bool(99, true), 0);
+    EXPECT_STRNE(indurtdb_get_last_error(), "");
+
+    /* 成功初始化 —— g_last_error 是 _Thread_local,
+     * 不受 initialize 内部 memset 影响, 上一个错误仍在 */
+    ASSERT_EQ(indurtdb_initialize("test_err_keep", 64, 4), 0);
+    EXPECT_NE(indurtdb_get_last_error(), nullptr);
+}
+
+TEST_F(CApiTest, LastError_Sequence) {
+    /* NULL 指针错误先于 not-initialized 触发 (检查顺序验证) */
+    EXPECT_NE(indurtdb_read_double(1, NULL), 0);
+    EXPECT_STREQ(indurtdb_get_last_error(), "null output pointer");
+
+    /* shutdown 后重新初始化 -> 正常读写 */
+    indurtdb_shutdown();
+    ASSERT_EQ(indurtdb_initialize("test_seq", 64, 4), 0);
+    ASSERT_EQ(indurtdb_write_double(1, 3.14), 0);
+    double v = 0.0;
+    ASSERT_EQ(indurtdb_read_double(1, &v), 0);
+    EXPECT_DOUBLE_EQ(v, 3.14);
+
+    /* 越界 ID -> 报错 */
+    EXPECT_NE(indurtdb_write_int32(9999, 1), 0);
+    EXPECT_STRNE(indurtdb_get_last_error(), "");
 }
 
 /* ---- 配置加载 ---- */
