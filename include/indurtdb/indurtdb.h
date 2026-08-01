@@ -70,6 +70,9 @@ int indurtdb_read_int32(uint32_t id, int32_t* value);
 int indurtdb_read_double(uint32_t id, double* value);
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
+/** 零拷贝读取点位数据 (seqlock 保护, 线程本地缓冲).
+ * 返回的指针在下一次 indurtdb_peek() 调用时被覆盖 (同线程).
+ * 如需长期持有数据, 请用 indurtdb_read_point() 拷贝到自管理的缓冲区. */
 const indurtdb_point_t* indurtdb_peek(uint32_t id);
 
 /* ==== 批量 (返回实际处理点数, 负值=参数错误) ==== */
@@ -89,6 +92,7 @@ void indurtdb_update_heartbeat(void);
 
 /* ==== 校验/统计/错误 ==== */
 int indurtdb_validate_id(uint32_t id);
+int  indurtdb_check_timeouts(uint64_t timeout_ns);
 uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);
 const char* indurtdb_get_last_error(void);

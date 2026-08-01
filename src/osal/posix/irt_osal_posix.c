@@ -92,3 +92,9 @@ void irt_shm_os_unmap(irt_shm_os_t* s) {
 bool irt_shm_os_is_owner(const irt_shm_os_t* s) {
     return s ? s->owner : false;
 }
+
+void irt_shm_os_claim_ownership(irt_shm_os_t* s) {
+    if (s && !s->owner) {
+        s->owner = true;  /* 接管所有权: 后续 shm_unlink 由本进程负责 */
+    }
+}

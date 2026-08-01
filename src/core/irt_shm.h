@@ -9,8 +9,8 @@
 #ifndef IRT_CORE_IRT_SHM_H_
 #define IRT_CORE_IRT_SHM_H_
 
-#include "osal/irt_osal.h"
-#include "internal/irt_types.h"
+#include <osal/irt_osal.h>
+#include <internal/irt_types.h>
 
 /* 段名前缀 */
 #define IRT_SHM_PREFIX  "/indurtdb_"
