@@ -12,7 +12,7 @@
 将 InduRTDB 从 C++17 重写为纯 C11，实现：
 - 代码量从 ~3900 行降至 ~1160 行（-70%）
 - 文件从 54 个减至 16 个
-- API 函数从 14 个增至 24 个（新增批量读写、peek/subscribe/config/heartbeat 对 C 开放）
+- API 函数从 14 个增至 26 个（新增批量读写、peek/subscribe/config/heartbeat/check_timeouts/统计查询对 C 开放）
 - 共享内存布局与 v2.x 逐字节兼容
 - 零 C++ 运行时依赖，SylixOS 原生支持
 
