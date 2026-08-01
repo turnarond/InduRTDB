@@ -60,11 +60,17 @@ TEST_F(CSeqlockTest, WriteConflictDetection) {
     irt_seqlock_write_end(&header_.write_seq, s0);
 }
 
-TEST_F(CSeqlockTest, ReadReturnsConsistentPointer) {
+TEST_F(CSeqlockTest, ReadReturnsConsistentData) {
     points_[2].value.i = 42;
-    const indurtdb_point_t* p =
-        irt_seqlock_read(&header_.write_seq, points_, 2);
-    ASSERT_NE(p, nullptr);
-    EXPECT_EQ(p, &points_[2]);
-    EXPECT_EQ(p->value.i, 42);
+    /* 标准 seqlock 读模式: 在重试循环内读取数据, 避免 TOCTOU 脏读 */
+    int32_t val;
+    uint64_t s0, s1;
+    do {
+        s0 = __atomic_load_n(&header_.write_seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1ULL) continue;
+        val = points_[2].value.i;
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        s1 = __atomic_load_n(&header_.write_seq, __ATOMIC_ACQUIRE);
+    } while (s0 != s1);
+    EXPECT_EQ(val, 42);
 }

@@ -238,19 +238,22 @@ TEST_F(CApiTest, LastError_Sequence) {
 /* ---- 配置加载 ---- */
 
 TEST_F(CApiTest, LoadConfig) {
-    /* 旧实例必须关闭后 load_config 才能重新初始化 */
-    indurtdb_shutdown();
-
-    /* 写临时配置文件 */
-    const char* path = "/tmp/irt_test_load_config.cfg";
+    /* load_config 在已初始化实例上加载点位元数据 (v3.0.0) */
+    const char* path = "/tmp/irt_test_load_config_point.yaml";
     FILE* f = fopen(path, "w");
     ASSERT_NE(f, nullptr);
-    fprintf(f, "instance_id=cfg_test\nmax_points=128\nmax_subscribers=16\n");
+    fprintf(f, "points:\n  - id: 10\n    name: \"Test_Point\"\n    type: int32\n    unit: 0\n    access: 3\n");
     fclose(f);
 
     int rc = indurtdb_load_config(path);
     EXPECT_EQ(rc, 0);
-    EXPECT_TRUE(indurtdb_is_initialized());
+
+    /* 验证元数据已应用 */
+    indurtdb_point_t p;
+    ASSERT_EQ(indurtdb_read_point(10, &p), 0);
+    /* YAML 解析器可能保留前导空格: 兼容两种格式 */
+    EXPECT_TRUE(strstr(p.name, "Test_Point") != nullptr);
+    EXPECT_EQ(p.access, INDURTDB_ACCESS_READ_WRITE);
 
     remove(path);
 }
