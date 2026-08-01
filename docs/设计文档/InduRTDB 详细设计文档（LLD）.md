@@ -247,7 +247,7 @@ int  irt_config_parse_line(const char* line, char* key, size_t key_sz,
 ```
 indurtdb/
 ├── include/indurtdb/
-│   └── indurtdb.h              # 唯一公共头文件 (纯 C API, 24 函数)
+│   └── indurtdb.h              # 唯一公共头文件 (纯 C API, 26 函数)
 ├── src/
 │   ├── api/
 │   │   └── indurtdb.c           # 公共 API 单例实现
@@ -292,7 +292,7 @@ indurtdb/
 | PointManager | 虚接口 + `vector<unique_ptr<ISeqlock>>` | 非虚类 + 直接操作共享内存 | `irt_pm_t` 结构体 + 自由函数 |
 | SubscriptionManager | `unordered_map` + `vector` + `function` | 定长 `SubscriberSlot[256]` + 函数指针 | `irt_sub_t` + `irt_sub_callback_t` |
 | OSAL | 虚接口 (ISharedMemory 等) | 同左 | `irt_osal.h` 纯 C 函数 (4 个导出) |
-| API | C++ 类 + C ABI 桥接 | C++ 单例 + C ABI 17 函数 | `indurtdb.h` 单一头文件 24 个 C 函数 |
+| API | C++ 类 + C ABI 桥接 | C++ 单例 + C ABI 17 函数 | `indurtdb.h` 单一头文件 26 个 C 函数 |
 | 公共头 | `indurtdb.hpp` + `c/indurtdb_c.h` | 同左 | **仅** `indurtdb/indurtdb.h` |
 | 编译选项 | `-std=c++11` | `-std=c++11` | `-std=gnu11 -Wall -Wextra -Werror` |
 | 测试 | C++ gtest | C++ gtest | C++17 gtest (仅测试)，8 suites |
@@ -302,4 +302,4 @@ indurtdb/
 **文档变更记录**
 - v1.0.0 (2026-03-26)：初始版本
 - v2.0.0 (2026-05-11)：移除 STL 依赖，Seqlock 回归全局机制，PointManager 非虚化
-- v3.0.0 (2026-07-21)：纯 C11 重写——全部 C++ 类替换为 C 结构体+自由函数；使用实际 `irt_*.c/h` 文件名和函数签名；单一公共头 `indurtdb.h` (24 函数)
+- v3.0.0 (2026-07-21)：纯 C11 重写——全部 C++ 类替换为 C 结构体+自由函数；使用实际 `irt_*.c/h` 文件名和函数签名；单一公共头 `indurtdb.h` (26 函数)

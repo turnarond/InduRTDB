@@ -7,7 +7,7 @@
  */
 
 #include "core/irt_subscription.h"
-#include "osal/irt_osal.h"
+#include <osal/irt_osal.h>
 #include <string.h>
 
 void irt_sub_init(irt_sub_t* sub, irt_shm_t* shm) {
@@ -23,11 +23,10 @@ int irt_sub_subscribe(irt_sub_t* sub, uint32_t id,
     if (sub->slot_count >= IRT_SUB_MAX_CALLBACKS) return -1;
 
     irt_sub_slot_t* slot = &sub->slots[sub->slot_count];
-    slot->point_id          = id;
-    slot->callback          = cb;
-    slot->user_data         = user_data;
-    slot->last_heartbeat_ns = irt_time_now_ns();
-    slot->active            = true;
+    slot->point_id  = id;
+    slot->callback  = cb;
+    slot->user_data = user_data;
+    slot->active    = true;
     sub->slot_count++;
     return 0;
 }
@@ -47,13 +46,17 @@ int irt_sub_unsubscribe(irt_sub_t* sub, uint32_t id) {
             i++;
         }
     }
-    return removed > 0 ? 0 : -1;
+    return removed > 0 ? 0 : -2;  /* -2: 未找到匹配的订阅 */
 }
 
 void irt_sub_notify(irt_sub_t* sub, uint32_t id,
                     const indurtdb_point_t* data) {
     if (!sub || !data) return;
-    for (uint32_t i = 0; i < sub->slot_count; i++) {
+    /* 快照入口时的 slot_count, 防止 callback 重入 subscribe 同一点位导致无限递归 */
+    uint32_t n = sub->slot_count;
+    for (uint32_t i = 0; i < n; i++) {
+        /* callback 可能重入 unsubscribe, 用 swap-with-last 将后面元素移到当前位置,
+         * 所以每次迭代都重新取 slots[i]; 被 swap 移走后 zeroed 的槽位通过 active==false 跳过 */
         irt_sub_slot_t* slot = &sub->slots[i];
         if (slot->active && slot->point_id == id && slot->callback) {
             slot->callback(id, data, slot->user_data);

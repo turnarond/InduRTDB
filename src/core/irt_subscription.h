@@ -18,7 +18,6 @@ typedef struct {
     uint32_t            point_id;
     indurtdb_callback_t callback;
     void*               user_data;
-    uint64_t            last_heartbeat_ns;
     bool                active;
 } irt_sub_slot_t;
 
@@ -32,7 +31,7 @@ typedef struct {
 /* 绑定到已初始化的共享内存段 */
 void irt_sub_init(irt_sub_t* sub, irt_shm_t* shm);
 
-/* 订阅/取消订阅 (成功 0, 失败 -1: 槽位满或 id 越界) */
+/* 订阅/取消订阅 (订阅: 成功 0, 槽位满/null cb -1; 取消: 成功 0, null sub -1, 未找到 -2) */
 int  irt_sub_subscribe(irt_sub_t* sub, uint32_t id,
                        indurtdb_callback_t cb, void* user_data);
 int  irt_sub_unsubscribe(irt_sub_t* sub, uint32_t id);

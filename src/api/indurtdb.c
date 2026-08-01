@@ -11,6 +11,7 @@
 #include "core/irt_point_manager.h"
 #include "core/irt_subscription.h"
 #include "core/irt_config.h"
+#include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -20,7 +21,7 @@ static struct {
     irt_shm_t shm;
     irt_pm_t  pm;
     irt_sub_t sub;
-    bool      initialized;
+    bool    initialized;
     int32_t   owner_pid;   /* fork 检测: 非零时 compare getpid() */
 } g_rtdb;
 
@@ -55,13 +56,17 @@ int indurtdb_initialize(const char* instance_id,
 
     irt_pm_init(&g_rtdb.pm, &g_rtdb.shm);
     irt_sub_init(&g_rtdb.sub, &g_rtdb.shm);
-    g_rtdb.initialized = true;
+    __atomic_store_n(&g_rtdb.initialized, true, __ATOMIC_RELEASE);
     g_rtdb.owner_pid = (int32_t)getpid();
     return 0;
 }
 
 void indurtdb_shutdown(void) {
-    if (!g_rtdb.initialized) return;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return;
+    /* 先标记为未初始化 (RELEASE 语义), 阻止并发 ENSURE_INIT 通过;
+     * 在此之后的 ENSURE_INIT ACQUIRE 读到 false 后返回 -1, 不会再访问 shm. */
+    __atomic_store_n(&g_rtdb.initialized, false, __ATOMIC_RELEASE);
+    /* 然后释放共享内存资源 */
     irt_shm_shutdown(&g_rtdb.shm);
     memset(&g_rtdb, 0, sizeof(g_rtdb));
 }
@@ -72,17 +77,22 @@ bool indurtdb_is_initialized(void) {
 
 /* ---- 写入 ---- */
 
-/* 写入成功后通知订阅者 (与 v2.x InduRTDB::write 行为一致) */
+/* 写入成功后通知订阅者. irt_pm_write_* 返回 0=成功, 负值=失败.
+ * 使用 irt_pm_read(栈变量) 而非 irt_pm_peek(_Thread_local 缓冲),
+ * 因为通知回调可能重入 write_and_notify, 覆盖 _Thread_local 缓冲. */
 static int write_and_notify(int rc, uint32_t id) {
     if (rc == 0) {
-        const indurtdb_point_t* p = irt_pm_peek(&g_rtdb.pm, id);
-        if (p) irt_sub_notify(&g_rtdb.sub, id, p);
+        indurtdb_point_t pt;
+        if (irt_pm_read(&g_rtdb.pm, id, &pt) == 0)
+            irt_sub_notify(&g_rtdb.sub, id, &pt);
     }
     return rc;
 }
 
+/* __atomic_load_n 确保多线程可见; initialized 由 shutdown 通过 __atomic_store_n(RELEASE) 清零 */
 #define ENSURE_INIT() do { \
-    if (!g_rtdb.initialized) { set_error("not initialized"); return -1; } \
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) \
+        { set_error("not initialized"); return -1; } \
 } while (0)
 
 int indurtdb_write_bool(uint32_t id, bool value) {
@@ -142,7 +152,7 @@ int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data) {
     return irt_pm_read(&g_rtdb.pm, id, point_data);
 }
 const indurtdb_point_t* indurtdb_peek(uint32_t id) {
-    if (!g_rtdb.initialized) { set_error("not initialized"); return NULL; }
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) { set_error("not initialized"); return NULL; }
     return irt_pm_peek(&g_rtdb.pm, id);
 }
 
@@ -164,8 +174,10 @@ int indurtdb_write_range_bool(uint32_t start_id, const bool* values,
     ENSURE_INIT();
     if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
-        if (irt_pm_write_bool(&g_rtdb.pm, start_id + i, values[i]) != 0)
-            return i;
+        int rc = write_and_notify(
+            irt_pm_write_bool(&g_rtdb.pm, start_id + i, values[i]),
+            start_id + i);
+        if (rc != 0) return i;
     }
     return count;
 }
@@ -174,8 +186,10 @@ int indurtdb_write_range_int32(uint32_t start_id, const int32_t* values,
     ENSURE_INIT();
     if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
-        if (irt_pm_write_int32(&g_rtdb.pm, start_id+i, values[i]) != 0)
-            return i;
+        int rc = write_and_notify(
+            irt_pm_write_int32(&g_rtdb.pm, start_id + i, values[i]),
+            start_id + i);
+        if (rc != 0) return i;
     }
     return count;
 }
@@ -184,8 +198,10 @@ int indurtdb_write_range_double(uint32_t start_id, const double* values,
     ENSURE_INIT();
     if (!values) { set_error("null values pointer"); return -1; }
     for (uint16_t i = 0; i < count; i++) {
-        if (irt_pm_write_double(&g_rtdb.pm, start_id+i, values[i]) != 0)
-            return i;
+        int rc = write_and_notify(
+            irt_pm_write_double(&g_rtdb.pm, start_id + i, values[i]),
+            start_id + i);
+        if (rc != 0) return i;
     }
     return count;
 }
@@ -204,34 +220,69 @@ int indurtdb_unsubscribe(uint32_t id) {
 /* ---- 配置/心跳 ---- */
 
 int indurtdb_load_config(const char* config_path) {
-    if (g_rtdb.initialized) { set_error("already initialized"); return -1; }
-    irt_config_t cfg;
-    irt_config_init_defaults(&cfg);
-    if (irt_config_load_file(&cfg, config_path) != 0) {
-        set_error("config file read failed");
-        return -1;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) {
+        set_error("not initialized"); return -1;
     }
-    return indurtdb_initialize(cfg.instance_id, cfg.max_points,
-                               cfg.max_subscribers);
+    if (!config_path) { set_error("null config path"); return -1; }
+
+    irt_point_meta_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    int n = irt_point_config_parse_yaml(config_path, &batch);
+    if (n < 0) { set_error("config parse failed"); return -1; }
+
+    /* 将解析出的元数据写入已存在的点位中 */
+    indurtdb_point_t* pts = irt_shm_points(&g_rtdb.shm);
+    uint32_t maxp = g_rtdb.shm.max_points;
+    if (!pts || maxp == 0) { irt_point_config_free(&batch); return -1; }
+    irt_header_t* hdr = irt_shm_header(&g_rtdb.shm);
+    if (!hdr) { irt_point_config_free(&batch); return -1; }
+    for (int i = 0; i < n; ++i) {
+        const irt_point_meta_t* pm = &batch.points[i];
+        if (pm->id >= maxp) continue;
+        /* 跳过未知类型 (irt_config_parse_type 返回 0xff) */
+        if (pm->type > INDURTDB_TYPE_STRING) continue;
+
+        uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+        if (seq0 & 1ULL) continue;  /* 写冲突,跳过此点 */
+
+        indurtdb_point_t* p = &pts[pm->id];
+        p->type   = pm->type;
+        p->unit   = pm->unit;
+        p->access = pm->access;
+        strncpy(p->name, pm->name, sizeof(p->name) - 1);
+        p->name[sizeof(p->name) - 1] = '\0';
+
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        irt_seqlock_write_end(&hdr->write_seq, seq0);
+    }
+
+    irt_point_config_free(&batch);
+    return 0;
 }
 
 void indurtdb_update_heartbeat(void) {
-    if (!g_rtdb.initialized) return;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return;
     irt_sub_update_heartbeat(&g_rtdb.sub, (int32_t)getpid());
 }
 
 /* ---- 校验/统计/错误 ---- */
 
 int indurtdb_validate_id(uint32_t id) {
-    if (!g_rtdb.initialized) return 0;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return 0;
     return irt_pm_validate_id(&g_rtdb.pm, id) ? 1 : 0;
 }
+int indurtdb_check_timeouts(uint64_t timeout_ns) {
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) {
+        set_error("not initialized"); return -1;
+    }
+    return irt_pm_check_timeouts(&g_rtdb.pm, timeout_ns);
+}
 uint64_t indurtdb_get_write_count(void) {
-    if (!g_rtdb.initialized) return 0;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return 0;
     return irt_pm_write_count(&g_rtdb.pm);
 }
 uint64_t indurtdb_get_timeout_count(void) {
-    if (!g_rtdb.initialized) return 0;
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return 0;
     irt_header_t* hdr = irt_shm_header(&g_rtdb.shm);
     return hdr ? __atomic_load_n(&hdr->stats.timeouts, __ATOMIC_RELAXED) : 0;
 }

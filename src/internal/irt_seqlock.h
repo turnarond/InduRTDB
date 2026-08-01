@@ -11,6 +11,7 @@
 
 #include "irt_types.h"
 
+/* ---- 写端 (CAS 循环) ---- */
 static inline uint64_t irt_seqlock_write_begin(uint64_t* seq) {
     uint64_t expected = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
     while (1) {
@@ -27,17 +28,15 @@ static inline void irt_seqlock_write_end(uint64_t* seq, uint64_t seq0) {
     __atomic_store_n(seq, seq0 + 2, __ATOMIC_RELEASE);
 }
 
-static inline const indurtdb_point_t* irt_seqlock_read(
-    const uint64_t* seq, const indurtdb_point_t* points, uint32_t id) {
-    uint64_t s0, s1;
-    s0 = 0; s1 = 1;   /* 初始化不同, 确保至少循环一次 */
-    do {
-        s0 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
-        if (s0 & 1ULL) continue;                     /* 写中, 重试 */
-        __atomic_thread_fence(__ATOMIC_ACQUIRE);
-        s1 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
-    } while (s0 != s1);
-    return &points[id];
-}
+/* 读端: 调用方自行在重试循环内读取数据, 模式如下:
+ *   uint64_t s0, s1;
+ *   do {
+ *       s0 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+ *       if (s0 & 1ULL) continue;
+ *       // 读取数据 (memcpy / 字段访问)
+ *       __atomic_thread_fence(__ATOMIC_ACQUIRE);
+ *       s1 = __atomic_load_n(seq, __ATOMIC_ACQUIRE);
+ *   } while (s0 != s1);
+ * irt_seqlock_read() 已移除: 返回裸指针导致调用方在验证窗之外读数据, 存在 TOCTOU 脏读. */
 
 #endif /* IRT_INTERNAL_IRT_SEQLOCK_H_ */

@@ -20,13 +20,15 @@
 #define IRT_MAGIC        0x1DBA1DBAu
 #define IRT_SHM_VERSION  1u
 
-/* 共享内存头部 (64 字节, == v2.x InduRTDBHeader) */
+/* 共享内存头部 (64 字节, == v2.x InduRTDBHeader)
+ * v3.1: 在填充区添加 owner_pid 用于崩溃恢复; 保持 64 字节不变 */
 typedef struct {
     uint32_t magic;
     uint32_t version;
     uint32_t max_points;
     uint32_t max_subscribers;
     uint64_t write_seq;          /* Seqlock 序列号 */
+    int32_t  owner_pid;          /* 创建进程 PID (0=未知, 填充区复用) */
     struct {
         uint64_t writes;
         uint64_t timeouts;

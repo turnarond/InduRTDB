@@ -131,7 +131,7 @@ OSAL                 432 行           195 行           -237 行
 | **批量读写 (range)** | **No** | **Yes** |
 | **线程安全错误信息** | No | **Yes** (_Thread_local) |
 
-旧的 C API 只有 14 个函数。新的 `indurtdb.h` 有 24 个，而且所有函数对 C 来说是原生的——C++ 用户通过 `extern "C"` 调用即可。
+旧的 C API 只有 14 个函数。新的 `indurtdb.h` 有 26 个，而且所有函数对 C 来说是原生的——C++ 用户通过 `extern "C"` 调用即可。
 
 **功能多了，代码少了。** 这违反直觉，但如果你见过 C++ 项目里虚接口 + 工厂 + PIMPL + STL + C ABI 桥接的组合拳，你就理解为什么。
 
@@ -196,7 +196,7 @@ int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value) {
 ```
 100% tests passed, 0 tests failed out of 8
 
-test_c_api                — 公共 API 24/24 函数全覆盖
+test_c_api                — 公共 API 26/26 函数全覆盖
 test_c_config             — key=value 配置解析
 test_c_layout_seqlock     — 共享内存布局 + Seqlock 正确性
 test_c_osal               — OS 抽象层 (shm_open/mmap/时间)

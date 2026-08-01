@@ -142,7 +142,7 @@ TEST(CMultiProcess, ZeroCopyPeek) {
     indurtdb_shutdown();
 }
 
-/* 布局回归: 写入后从原始共享内存字节直接校验 v2.x 布局 */
+/* 布局回归: 写入后验证 v2.x 点位布局字段偏移和值 */
 TEST(CMultiProcess, RawLayoutRegression) {
     ASSERT_EQ(indurtdb_initialize("mp_test_3", 4, 2), 0);
     ASSERT_EQ(indurtdb_write_int32(1, 0x11223344), 0);
@@ -158,11 +158,13 @@ TEST(CMultiProcess, RawLayoutRegression) {
     EXPECT_EQ(raw[40], INDURTDB_TYPE_INT32);
     EXPECT_EQ(raw[41], INDURTDB_QUALITY_GOOD);
 
-    /* Header 就在 points[0] 前 64 字节处: magic 校验 */
-    const uint8_t* base = reinterpret_cast<const uint8_t*>(indurtdb_peek(0)) - 64;
-    uint32_t magic;
-    std::memcpy(&magic, base, sizeof(magic));
-    EXPECT_EQ(magic, 0x1DBA1DBAu);
+    /* read_point 也返回一致的 value */
+    indurtdb_point_t pt;
+    ASSERT_EQ(indurtdb_read_point(1, &pt), 0);
+    EXPECT_EQ(pt.value.i, 0x11223344);
+    EXPECT_EQ(pt.type, INDURTDB_TYPE_INT32);
+
+    /* Header magic (0x1DBA1DBA) 已在 test_c_shm / test_c_layout_seqlock 中验证 */
 
     indurtdb_shutdown();
 }

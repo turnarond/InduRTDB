@@ -30,11 +30,12 @@ typedef struct {
     bool   owner;
 } irt_shm_os_t;
 
-/* 映射成功返回基址, 失败返回 NULL. owner 检测: 段大小为 0 视为新建者 */
+/* 映射成功返回基址, 失败返回 NULL. owner 检测通过 O_EXCL 原子判断 */
 void* irt_shm_os_map(irt_shm_os_t* s, const char* name, size_t size);
 /* munmap + close + (owner ? shm_unlink : 0), 清零 struct */
 void  irt_shm_os_unmap(irt_shm_os_t* s);
 bool  irt_shm_os_is_owner(const irt_shm_os_t* s);
+void  irt_shm_os_claim_ownership(irt_shm_os_t* s);  /* v3.1: attacher 接管崩溃 owner 的所有权 */
 
 #ifdef __cplusplus
 }

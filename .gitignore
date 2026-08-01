@@ -136,3 +136,4 @@ docker_cache/
 # Keep these files
 !.gitignore
 !.clang-format
+demo/demo

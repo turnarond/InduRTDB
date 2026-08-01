@@ -4,13 +4,26 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.0.0] — 2026-07-21
+## [3.1.0] — 2026-07-31 (内部迭代, 未发布)
+
+### Added
+- **崩溃恢复** (irt_shm): owner 进程崩溃后, attacher 通过 `kill(pid, 0)` 存活检查接管所有权 (`irt_shm_os_claim_ownership`)
+- **Seqlock 奇数恢复**: attach 时检测到遗留的奇数 write_seq (写锁内崩溃) 自动推进到偶数, 恢复一致性
+- header 填充区新增 `owner_pid` 字段 (128 字节布局保持不变)
+- OSAL 新增 `irt_shm_os_claim_ownership()` 接口 (posix/sylixos 双平台)
+
+### Notes
+- `VERSION` 文件仍为 3.0.0 (发布版本); 3.1.0 为代码内迭代版本号, 仅在源文件头与 CHANGELOG 中体现
+
+---
+
+## [3.0.0] — 2026-07-27
 
 ### 概述
 纯 C 重写。所有模块从 C++ (v2.x) 直译为 C11，保证共享内存布局逐字节一致。
 
 ### 收益
-- **API 面积极小**：全部功能浓缩为单一头文件 `indurtdb.h`，仅 100 行、24 个函数，学习成本几乎为零
+- **API 面积极小**：全部功能浓缩为单一头文件 `indurtdb.h`，仅 100 行、26 个函数，学习成本几乎为零
 - **零 C++ 运行时依赖**：不依赖 STL、异常、RTTI、虚表，可在任何 C11 编译器上构建和链接
 - **代码量大幅缩减**：核心 C 源码仅 ~760 行 + 内部头 ~300 行，远少于原 C++ 实现（含 C API 桥接层）
 - **编译速度显著提升**：无模板展开、无 STL 头文件包含链，增量编译接近 C 编译速度
@@ -20,19 +33,24 @@ All notable changes to InduRTDB.
 - **单例无锁设计**：全局 Seqlock + 无堆分配，运行时无内存碎片，适合 7x24 工业场景
 
 ### Added
-- 纯 C 公共 API (`include/indurtdb/indurtdb.h`): 24 个函数，单头文件，零 C++ 依赖
+- 纯 C 公共 API (`include/indurtdb/indurtdb.h`): 26 个函数，单头文件，零 C++ 依赖
 - C11 OSAL 层 (`irt_osal.h`): POSIX + SylixOS 双平台，无虚表
 - irt_shm 共享内存段管理: shm_open/mmap, owner 检测, magic/version 校验
-- irt_point_manager: 4 种类型写入 (bool/int32/double/string), seqlock 读, 零拷贝 peek
+- irt_point_manager: 4 种类型写入 (bool/int32/double/string), seqlock 读, 单拷贝 peek, 超时检测
 - irt_subscription: 回调注册/通知/心跳/僵尸清理, 定长 Slot 数组
-- irt_config: 轻量 key=value 解析器, zero-allocation
-- 单元测试 x7 (C API, config, layout+seqlock, osal, point_manager, shm, subscription)
-- 集成测试 x1 (多进程 fork + 布局回归): 3 用例, 覆盖父子进程读写和原始字节布局校验
-- `indurtdb_peek()`: 零拷贝读取, 返回共享内存直接指针
+- irt_config: 轻量 key=value 解析器 + YAML 点位元数据解析
+- 单元测试 x14 (C API, config, layout+seqlock, osal, point_manager, shm, subscription, boundary, concurrency, data_model, multi_instance, performance, quality)
+- 集成测试 x1 (多进程 fork + 布局回归): 6 用例, 覆盖父子进程读写和原始字节布局校验
+- `indurtdb_peek()`: 单拷贝读取, 返回线程本地缓冲指针（同线程下次 peek 覆盖, 需长期持有请用 read_point）
 - `indurtdb_read_range()` / `indurtdb_write_range_*()`: 批量读写接口
 - `indurtdb_subscribe()` / `indurtdb_unsubscribe()`: 变更订阅
-- `indurtdb_load_config()`: 从配置文件加载实例参数
+- `indurtdb_load_config()`: 从 YAML 配置文件加载点位元数据
 - `indurtdb_update_heartbeat()` / `indurtdb_is_initialized()`: 心跳与状态查询
+- `indurtdb_check_timeouts()`: 超时检测, 将超时点标记为 QUALITY_TIMEOUT
+- `indurtdb_get_write_count()` / `indurtdb_get_timeout_count()` / `indurtdb_get_last_error()`: 统计与错误查询
+- _Thread_local error storage (indurtdb_get_last_error)
+- Shared memory layout byte-identical to v2.x
+- C11 _Static_assert for layout verification
 
 ### Changed
 - **语言**: C++17 → C11 (gcc), 测试保留 C++17+gtest
