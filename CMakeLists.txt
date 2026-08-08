@@ -94,4 +94,9 @@ if(INDURTDB_IS_TOP_LEVEL)
         ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfig.cmake
         ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfigVersion.cmake
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/InduRTDB)
+
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/cmake/indurtdb.pc.in
+        ${CMAKE_CURRENT_BINARY_DIR}/indurtdb.pc @ONLY)
+    install(FILES ${CMAKE_CURRENT_BINARY_DIR}/indurtdb.pc
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 endif()
