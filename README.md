@@ -42,7 +42,12 @@ ctest --output-on-failure
 
 ## 版本
 
-v3.0.0 — 纯 C11 重写,C++ API 已移除。共享内存布局与 v2.x 逐字节兼容。
+v3.1.0 — 纯 C11 重写,C++ API 已移除。共享内存布局与 v2.x 逐字节兼容。
+
+## 文档
+
+- [集成指南](docs/05-SDK手册/04-集成指南.md) — find_package / pkg-config / FetchContent 三种集成方式
+- [完整文档目录](docs/README.md) — 白皮书、设计、API 参考等
 
 ## 许可证
 
