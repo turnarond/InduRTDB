@@ -10,9 +10,9 @@
 
 // Version information
 #define INDURTDB_VERSION_MAJOR 2
-#define INDURTDB_VERSION_MINOR 0
+#define INDURTDB_VERSION_MINOR 1
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "2.0.0"
+#define INDURTDB_VERSION_STRING "2.1.0"
 
 // Basic types
 #include "indurtdb/types/basic_types.hpp"
