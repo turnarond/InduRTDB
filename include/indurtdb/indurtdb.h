@@ -1,7 +1,7 @@
 /**
  * @file indurtdb.h
  * @brief InduRTDB 纯 C 公共 API（单例风格）
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */
@@ -16,6 +16,12 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* ==== 版本 (须与 VERSION 文件、CMake project(VERSION) 一致) ==== */
+#define INDURTDB_VERSION_MAJOR 3
+#define INDURTDB_VERSION_MINOR 1
+#define INDURTDB_VERSION_PATCH 0
+#define INDURTDB_VERSION_STRING "3.1.0"
 
 /* ==== 点位类型/质量/权限常量 (与 v2.x 枚举值一致) ==== */
 #define INDURTDB_TYPE_BOOL     0

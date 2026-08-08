@@ -4,7 +4,7 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.1.0] — 2026-07-31 (内部迭代, 未发布)
+## [3.1.0] — 2026-07-31
 
 ### Added
 - **崩溃恢复** (irt_shm): owner 进程崩溃后, attacher 通过 `kill(pid, 0)` 存活检查接管所有权 (`irt_shm_os_claim_ownership`)
@@ -13,7 +13,7 @@ All notable changes to InduRTDB.
 - OSAL 新增 `irt_shm_os_claim_ownership()` 接口 (posix/sylixos 双平台)
 
 ### Notes
-- `VERSION` 文件仍为 3.0.0 (发布版本); 3.1.0 为代码内迭代版本号, 仅在源文件头与 CHANGELOG 中体现
+- VERSION 文件、CMake project(VERSION)、indurtdb.h 版本宏已统一为 3.1.0
 
 ---
 

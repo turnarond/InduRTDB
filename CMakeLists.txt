@@ -1,6 +1,6 @@
 # InduRTDB - Industrial Real-Time Database (pure C core)
 cmake_minimum_required(VERSION 3.15)
-project(InduRTDB VERSION 3.0.0 LANGUAGES C CXX)
+project(InduRTDB VERSION 3.1.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
