@@ -5,10 +5,13 @@
 set(UNIT_TEST_SOURCES
     test_alignment
     test_basic_types
+    test_config_loader
     test_error
     test_logging
     test_memory_layout
+    test_point_manager
     test_seqlock
+    test_shared_memory_segment
     test_subscription_manager
     test_version
 )
