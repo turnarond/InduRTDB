@@ -92,38 +92,13 @@ install(DIRECTORY include/ DESTINATION include
 option(BUILD_TESTS "Build tests" ON)
 if(BUILD_TESTS)
     enable_testing()
-    
-    # 检查GTest
-    find_package(GTest QUIET)
-    if(GTest_FOUND)
-        message(STATUS "GTest found, building tests")
-        
-        # 收集测试源文件
-        file(GLOB_RECURSE TEST_SOURCES
-            "tests/*.cpp"
-        )
-        
-        if(TEST_SOURCES)
-            # 创建测试可执行文件
-            add_executable(indurtdb_tests ${TEST_SOURCES})
-            
-            # 链接库
-            target_link_libraries(indurtdb_tests
-                PRIVATE
-                    indurtdb
-                    GTest::gtest
-                    GTest::gtest_main
-            )
-            
-            # 添加测试
-            add_test(NAME indurtdb_tests COMMAND indurtdb_tests)
-            message(STATUS "Tests enabled: ${TEST_SOURCES}")
-        else()
-            message(STATUS "No test sources found")
-        endif()
-    else()
-        message(STATUS "GTest not found, skipping tests")
-    endif()
+
+    # 检查GTest (测试必需, 缺失即失败)
+    find_package(GTest REQUIRED)
+
+    # 各测试子目录独立 target, 支持单独构建/运行 (make test_seqlock)
+    add_subdirectory(tests)
+    message(STATUS "Tests enabled (unit + integration + performance)")
 else()
     message(STATUS "Tests disabled by user")
 endif()

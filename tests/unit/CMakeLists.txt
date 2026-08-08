@@ -1,39 +1,33 @@
 # Unit tests configuration
+# 每个 test_xxx.cpp 独立 target, 链接 indurtdb 静态库 + GTest
+# 编码规范要求: 每个 src/*.cpp 必须有对应的 test_xxx.cpp
 
-# Find GoogleTest
-find_package(GTest REQUIRED)
-
-# Add tests
-add_executable(test_seqlock
-    test_seqlock.cpp
+set(UNIT_TEST_SOURCES
+    test_alignment
+    test_basic_types
+    test_error
+    test_logging
+    test_memory_layout
+    test_seqlock
+    test_subscription_manager
+    test_version
 )
 
-# Link libraries
-target_link_libraries(test_seqlock
-    PRIVATE
-        GTest::gtest
-        GTest::gtest_main
-        indurtdb_core
-        indurtdb_osal
-)
-
-# Include directories
-target_include_directories(test_seqlock
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/include
-)
-
-# Add test to CTest
-add_test(NAME test_seqlock COMMAND test_seqlock)
-
-# Set test properties
-set_target_properties(test_seqlock PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
-)
-
-# Install test executable
-install(TARGETS test_seqlock
-    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}/tests
-)
+foreach(TEST_NAME IN LISTS UNIT_TEST_SOURCES)
+    add_executable(${TEST_NAME} ${TEST_NAME}.cpp)
+    target_link_libraries(${TEST_NAME}
+        PRIVATE
+            indurtdb
+            GTest::gtest
+            GTest::gtest_main
+    )
+    target_include_directories(${TEST_NAME}
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+    )
+    set_target_properties(${TEST_NAME} PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED ON
+    )
+    add_test(NAME ${TEST_NAME} COMMAND ${TEST_NAME})
+endforeach()
