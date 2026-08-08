@@ -15,7 +15,7 @@ InduRTDB 是面向工业边缘控制场景（BAS、DDC、PLC）的**超低延迟
 | **超低延迟** | ✅ 已实现 | P99 ≤10μs (目标), 全局 Seqlock 无锁读 |
 | **工业语义** | ✅ 已实现 | 每个点位携带 quality/unit/access/timestamp |
 | **多进程共享** | ✅ 已实现 | POSIX shm_open + mmap(MAP_SHARED) |
-| **多进程读写** | ✅ 已验证 | 59 单元/集成测试通过, 含 6 个 fork 多进程测试 |
+| **多进程读写** | ✅ 已验证 | 79 单元/集成测试通过, 含 6 个 fork 多进程测试 |
 | **C++ API** | ✅ 已实现 | `write<T>()` / `read()` / `peek()` / `subscribe()` / `loadConfig()` |
 | **C ABI** | ✅ 已实现 | `indurtdb_write_*` / `indurtdb_read_*` 等 17 个函数 |
 | **YAML 配置** | ✅ 已实现 | 轻量解析器, 零第三方依赖 |
@@ -86,7 +86,7 @@ InduRTDB/
 │   ├── osal/sylixos/# SylixOS 实现
 │   └── utils/       # alignment, error, logging
 ├── tests/
-│   ├── unit/        # 53 单元测试 (7 test suites)
+│   ├── unit/        # 73 单元测试 (12 test suites)
 │   └── integration/ # 6 多进程集成测试
 ├── docs/            # 需求/设计/技术 文档
 ├── examples/        # 使用示例
@@ -114,23 +114,40 @@ cmake .. -DBUILD_TESTS=ON
 make -j$(nproc)
 ```
 
+### 运行测试
+
+每个 `tests/unit/test_xxx.cpp` 编译为独立可执行文件并注册到 ctest：
+
+```bash
+cd build
+ctest --output-on-failure              # 运行全部 (12 个 target)
+ctest -R test_point_manager            # 运行单个 target
+./tests/unit/test_point_manager        # 直接运行某个测试
+./tests/unit/test_point_manager --gtest_filter=PointManagerTest.PeekZeroCopyReturnsSharedArrayPtr
+```
+
 ### 测试结果
 
 ```
-[==========] 59 tests from 8 test suites ran.
-[  PASSED  ] 59 tests.
+[==========] 79 tests from 13 test suites ran.
+[  PASSED  ] 79 tests.
 ```
 
 | 测试套件 | 用例数 | 说明 |
 |---------|--------|------|
-| MultiProcessTest | 6 | 多进程共享内存集成测试 |
-| SeqlockTest | 7 | Seqlock 无锁读写算法 |
-| SubscriptionManagerTest | 10 | 订阅管理器 (定长数组) |
-| MemoryLayoutTest | 11 | 共享内存布局 |
-| BasicTypesTest | 8 | 基础类型 |
+| MemoryLayoutTest | 11 | 共享内存布局 (static_assert) |
 | AlignmentTest | 11 | 内存对齐工具 |
+| SubscriptionManagerTest | 10 | 订阅管理器 (定长数组) |
+| BasicTypesTest | 8 | 基础类型 |
+| SeqlockTest | 7 | Seqlock 无锁读写算法 |
+| PointManagerTest | 7 | 点位读写 / 零拷贝 peek / 越界拒绝 |
+| SharedMemorySegmentTest | 6 | 共享内存段生命周期 / 布局 / 跨段可见 |
+| MultiProcessTest | 6 | 多进程共享内存集成测试 (fork) |
+| ConfigLoaderTest | 4 | YAML 点位配置解析 |
 | ErrorTest | 3 | 错误处理 |
 | LoggingTest | 3 | 日志系统 |
+| VersionTest | 2 | 版本宏一致性 |
+| ConfigLoaderTypeTest | 1 | 类型字符串映射 |
 
 ## C++ API 快速开始
 
@@ -191,6 +208,7 @@ int main() {
 
 | 文档 | 位置 | 版本 |
 |------|------|------|
+| 产品白皮书 | `docs/01-白皮书/InduRTDB产品白皮书.md` | v2.1.0 |
 | 需求规格说明书 (SRS) | `docs/需求文档/` | v2.1.0 |
 | 编码规范 | `docs/需求文档/编码规范.md` | v2.1.0 |
 | 概要设计 (HLD) | `docs/设计文档/` | v2.1.0 |

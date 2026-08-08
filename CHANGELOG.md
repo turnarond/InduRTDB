@@ -4,6 +4,24 @@ All notable changes to InduRTDB.
 
 ---
 
+## [Unreleased] — 2026-08-09（分支 feature/whitepaper-and-known-issues）
+
+### Added
+- 产品白皮书 `docs/01-白皮书/InduRTDB产品白皮书.md`（以用户使用体验为主线）
+- 核心组件单元测试：`PointManagerTest` (7)、`SharedMemorySegmentTest` (6)、`ConfigLoaderTest` (4) + `ConfigLoaderTypeTest` (1)、`VersionTest` (2)；新增 `fake_time.hpp` 测试辅助
+- 测试独立 target 化：每个 `test_xxx.cpp` 独立可执行并逐条注册 ctest，支持 `make test_xxx` / `ctest -R`
+
+### Changed
+- 版本宏统一为 2.1.0（头文件原为 2.0.0，与 CMake/README/VERSION 对齐）
+- 测试总数 59 → 79 用例、8 → 13 套件（单元 73 / 集成 6）
+
+### Fixed
+- ConfigLoader：`parse_kv` 值前导空白未去除（`trim` 返回指针被丢弃），导致引号剥离与类型解析失效
+- ConfigLoader：`"- id: N"` 列表项行中 `"- "` 后首个 key:value 被吞掉，id 恒为 0
+- 清理 `tests/` 子目录引用不存在 target 的死代码 CMakeLists
+
+---
+
 ## [2.1.0] — 2026-05-11
 
 ### Added
