@@ -67,3 +67,31 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         add_subdirectory(examples)
     endif()
 endif()
+
+# --- 安装与包导出 (仅顶层项目; 子项目不安装) ---
+if(INDURTDB_IS_TOP_LEVEL)
+    include(CMakePackageConfigHelpers)
+
+    install(TARGETS indurtdb EXPORT InduRTDBTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(DIRECTORY include/indurtdb DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+    install(EXPORT InduRTDBTargets
+        FILE InduRTDBTargets.cmake
+        NAMESPACE InduRTDB::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/InduRTDB)
+
+    configure_package_config_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/cmake/InduRTDBConfig.cmake.in
+        ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfig.cmake
+        INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/InduRTDB)
+    write_basic_package_version_file(
+        ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfigVersion.cmake
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion)
+    install(FILES
+        ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfig.cmake
+        ${CMAKE_CURRENT_BINARY_DIR}/InduRTDBConfigVersion.cmake
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/InduRTDB)
+endif()
