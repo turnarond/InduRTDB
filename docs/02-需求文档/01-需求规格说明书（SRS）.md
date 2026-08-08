@@ -275,8 +275,8 @@ Application Layer → InduRTDB Core → OS Abstraction Layer (OSAL)
 
 ---
 
-📄 **文档位置**：`docs/INDURTDB_SRS.md`  
-📦 **代码仓库**：`github.com/yourorg/indurtdb`
+📄 **文档位置**：`docs/02-需求文档/01-需求规格说明书（SRS）.md`  
+📦 **代码仓库**：`github.com/turnarond/InduRTDB`
 
 ---
 

@@ -12,7 +12,7 @@ InduRTDB（Industrial Real-Time Database，版本 2.1.0）是面向工业边缘�
 
 1. **交流使用中文**，专有名词（API 名、类名、技术名词）除外。代码注释、提交信息、文档均为中文。
 2. **文档是唯一对外接口**：`docs/` 下的需求/设计/技术文档必须保持最新，代码与文档不允许出现分歧（防止文档腐败）。修改功能/API/架构时，必须同步更新对应文档。
-3. **文档命名**：`docs/` 下文件夹名、文件名必须使用中文，且用数字前缀排序（如 `01-白皮书`、`02-需求分析`、`03-设计`、`04-使用手册`、`05-部署文档`）。当前 `docs/` 已按「需求文档/设计文档/技术文档/开发规划/sdk」组织。
+3. **文档命名**：`docs/` 下文件夹名、文件名必须使用中文，且用数字前缀排序。当前 `docs/` 已按此组织：`01-白皮书 / 02-需求文档 / 03-设计文档 / 04-技术文档 / 05-SDK手册 / 06-开发规划`，总览入口为 `docs/README.md`。
 4. **分支策略**：每次需求开发、需求变更、修改 issue，必须新建分支（`feature/xxx` 或 `fix/xxx`），禁止直接在 main 上开发。
 5. **工具集**：开发过程中按工程需要创建配套工具（脚本、静态检查、CI 等），沉淀到仓库。
 6. **TDD 强制**：永远遵循红-绿-重构循环。每次请求实现，必须附带对应的测试代码，或指明要让它变绿的测试用例。
@@ -32,7 +32,7 @@ make -j$(nproc)
 - 产物: `build/libindurtdb.a`（静态库）+ 每个 `tests/*/test_xxx.cpp` 各自的可执行文件
 - 编译标志: `-Wall -Wextra -Werror -fno-exceptions -fno-rtti -fno-asynchronous-unwind-tables`（零警告是硬要求）
 - `BUILD_EXAMPLES` 默认 OFF，开启需 `cmake .. -DBUILD_EXAMPLES=ON`（examples 链接 `indurtdb` 库）
-- 静态检查（未配置进 CMake）: `clang-tidy` / `cppcheck` / `clang-format`，见 `docs/需求文档/编码规范.md` 附录
+- 静态检查（未配置进 CMake）: `clang-tidy` / `cppcheck` / `clang-format`，见 `docs/02-需求文档/02-编码规范.md` 附录
 
 ## 测试
 
@@ -68,7 +68,7 @@ OSAL Layer   (接口 + Factory: ISharedMemory/ITime/IThreading/INotification)
 
 **核心设计原则**: 确定性优先、可靠性至上、简洁性核心、平台无关性。
 
-## 编码红线（`docs/需求文档/编码规范.md`，代码审查直接拒绝）
+## 编码红线（`docs/02-需求文档/02-编码规范.md`，代码审查直接拒绝）
 
 - ❌ `std::vector` / `std::string` / `std::shared_ptr`（用定长数组 + `char[]` + 返回码替代）
 - ❌ `new`/`delete`、`malloc`/`free`、异常、RTTI
@@ -82,4 +82,4 @@ OSAL Layer   (接口 + Factory: ISharedMemory/ITime/IThreading/INotification)
 
 - **新增测试**: 在 `tests/unit/`（或 `tests/integration/`）放 `test_xxx.cpp`，并把 target 名追加进该目录 `CMakeLists.txt` 的 `UNIT_TEST_SOURCES` 列表（unit 用 foreach 生成 target）；`tests/performance/` 仍是空壳 TODO
 - 版本宏（`include/indurtdb.hpp`）必须与 `CMakeLists.txt` `project(VERSION)`、`VERSION` 文件一致，`VersionTest` 会校验；改版本时三处同步
-- 文档索引: 产品白皮书在 `docs/01-白皮书/`，需求 SRS / 编码规范在 `docs/需求文档/`，概要/详细设计在 `docs/设计文档/`，Seqlock 算法在 `docs/技术文档/`，SDK 手册在 `docs/sdk/`（开发者指南/快速入门/C API/C++ API）
+- 文档索引: 总览入口 `docs/README.md`；产品白皮书在 `docs/01-白皮书/`，需求 SRS / 编码规范在 `docs/02-需求文档/`，概要/详细设计在 `docs/03-设计文档/`，Seqlock 算法在 `docs/04-技术文档/`，SDK 手册在 `docs/05-SDK手册/`（快速入门/开发者指南/C API/C++ API），开发规划在 `docs/06-开发规划/`
