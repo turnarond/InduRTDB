@@ -32,16 +32,38 @@ set(IRT_CORE_SRC
     ${IRT_OSAL_SRC}
 )
 
+# --- 顶层检测 (子项目隔离) ---
+if(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_SOURCE_DIR)
+    set(INDURTDB_IS_TOP_LEVEL TRUE)
+else()
+    set(INDURTDB_IS_TOP_LEVEL FALSE)
+endif()
+if(INDURTDB_IS_TOP_LEVEL)
+    set(_indurtdb_default ON)
+else()
+    set(_indurtdb_default OFF)
+endif()
+option(INDURTDB_BUILD_TESTS    "Build InduRTDB tests"    ${_indurtdb_default})
+option(INDURTDB_BUILD_EXAMPLES "Build InduRTDB examples" ${_indurtdb_default})
+
+include(GNUInstallDirs)
+
 add_library(indurtdb STATIC ${IRT_CORE_SRC})
+add_library(InduRTDB::indurtdb ALIAS indurtdb)
 target_include_directories(indurtdb PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(indurtdb PUBLIC rt pthread)
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-	enable_testing()
-	add_subdirectory(tests)
-	add_subdirectory(examples)
+    if(INDURTDB_BUILD_TESTS)
+        enable_testing()
+        add_subdirectory(tests)
+    endif()
+    if(INDURTDB_BUILD_EXAMPLES)
+        add_subdirectory(examples)
+    endif()
 endif()
