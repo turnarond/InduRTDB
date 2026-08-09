@@ -4,16 +4,30 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.1.0] — 2026-07-31
+## [3.1.0] — 2026-08-09
 
 ### Added
 - **崩溃恢复** (irt_shm): owner 进程崩溃后, attacher 通过 `kill(pid, 0)` 存活检查接管所有权 (`irt_shm_os_claim_ownership`)
 - **Seqlock 奇数恢复**: attach 时检测到遗留的奇数 write_seq (写锁内崩溃) 自动推进到偶数, 恢复一致性
 - header 填充区新增 `owner_pid` 字段 (128 字节布局保持不变)
 - OSAL 新增 `irt_shm_os_claim_ownership()` 接口 (posix/sylixos 双平台)
+- **集成产品化**: 三种方式将 InduRTDB 作为库引入 C/C++ 工程
+  - `find_package(InduRTDB)`: install 规则 + CMake 包导出 (Config/Version/Targets)
+  - pkg-config: `indurtdb.pc` 生成与安装
+  - FetchContent / add_subdirectory: 源码内嵌, 默认子项目隔离
+- `InduRTDB::indurtdb` 命名空间目标 (三条消费路径统一链接名)
+- 子项目隔离: `INDURTDB_IS_TOP_LEVEL` 检测 + `INDURTDB_BUILD_TESTS`/`INDURTDB_BUILD_EXAMPLES` 选项门控
+- 版本宏 `INDURTDB_VERSION_MAJOR/MINOR/PATCH/STRING` + 一致性测试 (`test_c_version`)
+- 开箱即用 starter 模板 (`templates/indurtdb-starter`, find_package/FetchContent 双模式)
+- 外部消费回归脚本 (`scripts/verify_consume.sh`, 含 pkg-config 前缀一致性校验)
+- 集成指南 (`docs/05-SDK手册/04-集成指南.md`)
+
+### Changed
+- demo 改为经 pkg-config 消费已安装库 (`demo/Makefile`, `INDU_PREFIX` 可覆盖)
 
 ### Notes
 - VERSION 文件、CMake project(VERSION)、indurtdb.h 版本宏已统一为 3.1.0
+- `indurtdb.pc` 的 `prefix` 在 configure 阶段写入; 安装前缀须经 `-DCMAKE_INSTALL_PREFIX` 指定
 
 ---
 
