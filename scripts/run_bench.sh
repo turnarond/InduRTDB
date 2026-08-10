@@ -60,8 +60,8 @@ cleanup_shm
 echo "== [1/3] Building libindurtdb.a =="
 if [ ! -f "$BUILD_DIR/libindurtdb.a" ]; then
     echo "   Library not found, running cmake build..."
-    cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release > /dev/null
-    cmake --build "$BUILD_DIR" -j"$(nproc)" > /dev/null
+    cmake -S "$REPO_ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+    cmake --build "$BUILD_DIR" -j"$(nproc)"
     echo "   Build complete."
 else
     echo "   Library already built: $BUILD_DIR/libindurtdb.a"
@@ -73,7 +73,7 @@ echo "== [2/3] Compiling bench.c =="
 mkdir -p "$BUILD_DIR/bench"
 
 CC="${CC:-gcc}"
-CFLAGS="-std=gnu11 -Wall -Wextra -Werror -O2 -I$REPO_ROOT/include"
+CFLAGS="-std=c11 -Wall -Wextra -Werror -O2 -I$REPO_ROOT/include"
 LDFLAGS="-L$BUILD_DIR -lindurtdb -lpthread -lrt -lm"
 
 # 编译期参数通过 -D 传入
