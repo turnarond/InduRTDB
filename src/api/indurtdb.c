@@ -37,9 +37,15 @@ static void set_error(const char* msg) {
 int indurtdb_initialize(const char* instance_id,
                         uint32_t max_points, uint32_t max_subscribers) {
     /* fork 后子进程自动重置: 继承的 owner_pid 仍为父进程 PID,
-     * 但 getpid() 已返回子进程 PID —— 不匹配则自动重置 */
+     * 但 getpid() 已返回子进程 PID —— 不匹配则自动重置.
+     *
+     * 关键: 子进程通过 fork 继承了父进程的 irt_shm_os_t.owner=true,
+     * 直接 shutdown 会触发 shm_unlink 销毁父进程创建的共享内存名称,
+     * 导致后续 re-init 时 shm_open(O_EXCL) 创建全新空段而非 attach.
+     * 必须先清除 owner 标记, 确保 shutdown 仅做进程本地 detach. */
     if (g_rtdb.initialized && g_rtdb.owner_pid != 0
         && g_rtdb.owner_pid != (int32_t)getpid()) {
+        g_rtdb.shm.os.owner = false;  /* 子进程不是 owner, 禁止 unlink */
         indurtdb_shutdown();
     }
     if (g_rtdb.initialized) { set_error("already initialized"); return -1; }

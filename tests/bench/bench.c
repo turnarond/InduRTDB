@@ -23,6 +23,9 @@
  *   bench [-w 预热次数] [-i 迭代次数] [-b 批量点数] [-t 吞吐秒数] [-h]
  */
 
+/* C11 严格模式下需显式启用 POSIX 扩展 (clock_gettime) */
+#define _POSIX_C_SOURCE 199309L
+
 #include <indurtdb/indurtdb.h>
 
 #include <inttypes.h>
