@@ -1,7 +1,7 @@
 /**
  * @file test_c_multi_instance.cpp
  * @brief SRS §7.1 多实例隔离测试
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>

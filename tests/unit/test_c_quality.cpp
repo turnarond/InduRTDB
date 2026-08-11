@@ -1,7 +1,7 @@
 /**
  * @file test_c_quality.cpp
  * @brief SRS §3.2 §4.3 数据质量测试:access 控制、timeout 检测、quality 字段
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>
