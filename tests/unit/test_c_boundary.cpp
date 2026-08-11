@@ -1,7 +1,7 @@
 /**
  * @file test_c_boundary.cpp
  * @brief SRS §4.2 边界测试:reinitialize、幂等shutdown、订阅耗尽、cap=0、buffer过小
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>

@@ -1,7 +1,7 @@
 /**
  * @file test_c_api.cpp
  * @brief InduRTDB 公共 API 集成测试
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>

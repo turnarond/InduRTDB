@@ -1,7 +1,7 @@
 /**
  * @file test_c_pm.cpp
  * @brief PointManager 单元测试
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>

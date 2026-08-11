@@ -1,7 +1,7 @@
 /**
  * @file test_c_sub.cpp
  * @brief SubscriptionManager 单元测试
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>

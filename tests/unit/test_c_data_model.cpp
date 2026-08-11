@@ -1,7 +1,7 @@
 /**
  * @file test_c_data_model.cpp
  * @brief SRS §3.1 数据模型测试:元数据读写、字符串截断、peek未写点位
- * @version 3.0.0
+ * @version 3.1.0
  */
 
 #include <gtest/gtest.h>
