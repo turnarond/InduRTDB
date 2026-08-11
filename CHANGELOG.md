@@ -27,7 +27,7 @@ All notable changes to InduRTDB.
 - **soak 长稳测试**: 多进程持续读写 + 数据完整性校验 (`tests/soak/`, `scripts/run_soak.sh`)
 - **故障注入测试**: kill-owner 崩溃自愈 / 奇数 write_seq 恢复 / SIGKILL 活跃 owner (`tests/soak/fault_injection_test.c`)
 - **x86 性能基准**: P99 write_int32 0.39μs / read_int32 0.07μs / peek 0.06μs, 全部超越 10μs 设计目标 (`tests/bench/`, `scripts/run_bench.sh`)
-- **CI 流水线**: GitHub Actions, Debug/Release 双配置, build+ctest+verify_consume+soak+benech (`.github/workflows/ci.yml`)
+- **CI 流水线**: GitHub Actions, Debug/Release 双配置, build+ctest+verify_consume+soak+bench (`.github/workflows/ci.yml`)
 - **定位与边界文档**: README 前列定位/边界表, 明确与 node-server 分工
 
 ### Changed
