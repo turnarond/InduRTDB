@@ -22,8 +22,19 @@ All notable changes to InduRTDB.
 - 外部消费回归脚本 (`scripts/verify_consume.sh`, 含 pkg-config 前缀一致性校验)
 - 集成指南 (`docs/05-SDK手册/04-集成指南.md`)
 
+### 产品化交付 (v3.1.0 发布缺口, 2026-08-10)
+- **测试覆盖强化**: 边界/异常/质量路径 49 用例 (`test_c_edge_cases`)
+- **soak 长稳测试**: 多进程持续读写 + 数据完整性校验 (`tests/soak/`, `scripts/run_soak.sh`)
+- **故障注入测试**: kill-owner 崩溃自愈 / 奇数 write_seq 恢复 / SIGKILL 活跃 owner (`tests/soak/fault_injection_test.c`)
+- **x86 性能基准**: P99 write_int32 0.39μs / read_int32 0.07μs / peek 0.06μs, 全部超越 10μs 设计目标 (`tests/bench/`, `scripts/run_bench.sh`)
+- **CI 流水线**: GitHub Actions, Debug/Release 双配置, build+ctest+verify_consume+soak+benech (`.github/workflows/ci.yml`)
+- **定位与边界文档**: README 前列定位/边界表, 明确与 node-server 分工
+
 ### Changed
 - demo 改为经 pkg-config 消费已安装库 (`demo/Makefile`, `INDU_PREFIX` 可覆盖)
+
+### Fixed
+- fork 后子进程 owner 标记未清除导致 `shm_unlink` 误删父进程共享内存段 (`indurtdb_initialize`)
 
 ### Notes
 - VERSION 文件、CMake project(VERSION)、indurtdb.h 版本宏已统一为 3.1.0
