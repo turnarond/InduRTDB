@@ -173,13 +173,13 @@ int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
 
 通过 Seqlock 协议读取完整点位数据 (128 字节安全拷贝)。
 
-### indurtdb_peek (零拷贝)
+### indurtdb_peek (单拷贝·线程本地缓冲)
 
 ```c
 const indurtdb_point_t* indurtdb_peek(uint32_t id);
 ```
 
-返回共享内存中点位数据的**直接指针** (零拷贝)。ID 无效时返回 NULL。
+通过 Seqlock 协议将点位数据**单拷贝**到线程本地缓冲后返回其指针，同线程下次 `peek` 覆盖。ID 无效时返回 NULL。
 
 **约束**: 调用方不应长期持有此指针。跨写入边界时数据可能变化。适合高频读取和批量遍历场景。
 
@@ -346,7 +346,7 @@ int main() {
                pt.type, pt.quality, (unsigned long)pt.timestamp_ns);
     }
 
-    // 零拷贝 peek (高频场景)
+    // peek 快速读取 (高频场景)
     const indurtdb_point_t* p = indurtdb_peek(1001);
     if (p) printf("温度(peek): %.1f\n", p->value.d);
 
