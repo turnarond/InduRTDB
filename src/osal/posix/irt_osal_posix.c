@@ -1,7 +1,7 @@
 /**
  * @file irt_osal_posix.c
  * @brief POSIX OSAL 实现 (直译自 time_posix.cpp / shared_memory_posix.cpp)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

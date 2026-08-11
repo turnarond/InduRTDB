@@ -1,7 +1,7 @@
 /**
  * @file irt_seqlock.h
  * @brief Seqlock 自由函数 (直译自 v2.x seqlock.hpp)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

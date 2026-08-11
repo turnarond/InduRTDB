@@ -1,7 +1,7 @@
 /**
  * @file irt_osal.h
  * @brief OS 抽象层 (无虚表; 平台实现由构建系统选择)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

@@ -1,7 +1,7 @@
 /**
  * @file irt_point_manager.c
  * @brief 点位管理器实现
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

@@ -1,7 +1,7 @@
 /**
  * @file irt_config.h
  * @brief 配置加载器 (key=value 初始化参数 + YAML 点位元数据)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

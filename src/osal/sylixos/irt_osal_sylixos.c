@@ -8,7 +8,7 @@
  * 此文件仅在 CMAKE_SYSTEM_NAME STREQUAL "SylixOS" 时编译;
  * 由 CMake 通过 IRT_OSAL_SRC 变量选择。
  *
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

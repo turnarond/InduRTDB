@@ -1,7 +1,7 @@
 /**
  * @file irt_types.h
  * @brief 内部共享内存布局 (与 v2.x memory_layout.hpp 逐字节一致)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

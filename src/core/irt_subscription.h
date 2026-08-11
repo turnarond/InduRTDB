@@ -1,7 +1,7 @@
 /**
  * @file irt_subscription.h
  * @brief 订阅管理器 (直译自 v2.x SubscriptionManager)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

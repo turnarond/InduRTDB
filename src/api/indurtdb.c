@@ -1,7 +1,7 @@
 /**
  * @file indurtdb.c
  * @brief InduRTDB 主 API — 单例串联所有模块
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */

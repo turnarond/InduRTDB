@@ -1,7 +1,7 @@
 /**
  * @file irt_shm.h
  * @brief 共享内存段管理 (直译自 v2.x SharedMemorySegment)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */
