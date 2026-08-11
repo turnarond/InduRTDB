@@ -1,7 +1,7 @@
 /**
  * @file basic_example.c
  * @brief InduRTDB 基本使用示例 (C11)
- * @version 3.0.0
+ * @version 3.1.0
  * @date 2026-07-15
  * @copyright MIT License
  */
