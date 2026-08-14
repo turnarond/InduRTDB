@@ -202,9 +202,9 @@ Reader 在 s0 为偶数时读取数据，若 Writer 在读取期间再次更新�
 
 ### 6.2 测试工具
 
-- Google Test / gtest (14 套件, ~73 用例, 100% 通过)
+- Google Test / gtest (26 套件, 126 用例, 100% 通过)
 - 并发测试: test_c_concurrency (2 线程同点写/异点写/回调重入)
-- CI: GitLab CI, GCC ≥7.5, `-Wall -Wextra -Werror`
+- CI: GitHub Actions, GCC ≥7.5, `-Wall -Wextra -Werror`
 
 ---
 
