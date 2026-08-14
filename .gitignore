@@ -137,3 +137,7 @@ docker_cache/
 !.gitignore
 !.clang-format
 demo/demo
+
+# 工具产物
+.omc/
+.codegraph/
