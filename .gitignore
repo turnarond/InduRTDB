@@ -136,3 +136,8 @@ docker_cache/
 # Keep these files
 !.gitignore
 !.clang-format
+
+# AI tool runtime directories (not for the repo)
+.omc/
+.claude/
+docs/superpowers/
