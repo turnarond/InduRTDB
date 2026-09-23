@@ -120,7 +120,7 @@ TEST(CMultiProcess, AllDataTypes) {
     indurtdb_shutdown();
 }
 
-/* 零拷贝 peek: 子进程通过 peek 直接访问父进程写入的共享内存 */
+/* 单拷贝 peek: 子进程通过 peek 读取父进程写入共享内存的数据 (拷贝到线程本地缓冲) */
 TEST(CMultiProcess, ZeroCopyPeek) {
     ASSERT_EQ(indurtdb_initialize("mp_peek", 64, 8), 0);
     ASSERT_EQ(indurtdb_write_double(7, 42.0), 0);

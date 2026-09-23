@@ -89,6 +89,13 @@ examples/build/
 .cache/
 .ccls-cache/
 
+# AI / 插件中间目录 (不入库, 保持工程整洁)
+.codegraph/
+.superpowers/
+.omc/
+.claude/
+.codebuddy/memory/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

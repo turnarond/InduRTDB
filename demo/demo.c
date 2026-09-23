@@ -40,9 +40,9 @@ int main(void) {
     indurtdb_write_double(1, 26.0);
     sleep(1);
 
-    /* 6. 零拷贝 peek */
+    /* 6. 单拷贝 peek (线程本地缓冲, 下次 peek 覆盖) */
     const indurtdb_point_t* p = indurtdb_peek(1);
-    printf("[OK] peek point 1 = %.1f (零拷贝)\n", p->value.d);
+    printf("[OK] peek point 1 = %.1f (单拷贝)\n", p->value.d);
 
     /* 7. 批量读 */
     indurtdb_point_t buf[2];
