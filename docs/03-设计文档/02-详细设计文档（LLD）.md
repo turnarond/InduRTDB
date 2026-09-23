@@ -24,11 +24,14 @@
 | 8 | `max_points` | `uint32_t` | 最大点位数（默认 10000） |
 | 12 | `max_subscribers` | `uint32_t` | 最大订阅者数（默认 32） |
 | 16 | `write_seq` | `uint64_t` | **全局** Seqlock 序列号（偶=空闲，奇=写中） |
-| 24 | `stats.writes` | `uint64_t` | 总写入次数 |
-| 32 | `stats.timeouts` | `uint64_t` | 超时点位计数 |
-| 40–63 | **Padding** | — | 对齐到 64B |
+| 24 | `owner_pid` | `int32_t` | 创建进程 PID（**v3.1 新增**，复用原填充区；0=未知）。用于崩溃接管与 fork 检测 |
+| 28 | `stats.writes` | `uint64_t` | 总写入次数 |
+| 36 | `stats.timeouts` | `uint64_t` | 超时点位计数 |
+| 44–63 | **Padding** | — | 20B 空闲，对齐到 64B（v3.4 CRC / flags 候选区） |
 
-> ✅ **Header 大小 = 64 字节**（`sizeof(InduRTDBHeader) == 64`）
+> ✅ **Header 大小 = 64 字节**（`sizeof(irt_header_t) == 64`）
+>
+> ⚠️ 本节曾在 v3.1 新增 `owner_pid` 后未同步（旧表把 `stats.writes` 记为偏移 24），2026-09-23 已按 `src/internal/irt_types.h` 更正。
 
 ### 1.3 PointData 结构（定长 128 字节）
 
