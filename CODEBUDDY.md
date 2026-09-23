@@ -22,7 +22,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```bash
 cd build && ctest --output-on-failure -j$(nproc)
 ```
-需先安装 GTest（`find_package(GTest REQUIRED)`）。15 个单元测试 + 1 个多进程集成测试（共 16 个 ctest 用例），每个 `test_c_*.cpp` 一个可执行文件。
+需先安装 GTest（`find_package(GTest REQUIRED)`）。15 个单元测试 + 1 个多进程集成测试（共 16 个 ctest 用例，每个 `test_c_*.cpp` 一个可执行文件）；gtest 层面共 26 套件 / 126 用例。引用测试数量时须说明是哪一层。
 
 **运行单个测试**
 ```bash
