@@ -11,8 +11,8 @@ All notable changes to InduRTDB.
 
 ### Added
 - **统一版白皮书 4.0**（`docs/01-白皮书/01-产品白皮书.md`）成为对外口径唯一来源。
-- `docs/06-开发规划/07-功能评审与下一步规划.md`：功能盘点、竞品对标（iceoryx / IoTDB / openHistorian / OPC UA）、差距清单 G8–G20、版本边界。
-- `docs/06-开发规划/08-文档一致性检查清单.md`：发布前 Release Checklist，防止文档腐败。
+- `docs/06-开发规划/08-功能评审与下一步规划.md`：功能盘点、竞品对标（iceoryx / IoTDB / openHistorian / OPC UA）、差距清单 G8–G20、版本边界。
+- `docs/06-开发规划/09-文档一致性检查清单.md`：发布前 Release Checklist，防止文档腐败。
 - README / 白皮书 / SDK 手册统一声明 **6 条已知行为约束**（peek 单拷贝、单进程单例、写冲突 busy 不重试、超时检测 best-effort、订阅为进程内回调、无鉴权/加密/持久化）。
 - `docs/05-SDK手册/03-C-API参考手册.md` 补齐缺失的 `indurtdb_check_timeouts()` 条目。
 
