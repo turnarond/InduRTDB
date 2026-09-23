@@ -21,7 +21,7 @@
 |------|-----|-----|------|
 | write_int32 | 0.156 μs | 0.386 μs | 5.2M op/s |
 | read_int32 | 0.062 μs | 0.068 μs | 16.2M op/s |
-| peek (零拷贝) | 0.057 μs | 0.062 μs | 17.7M op/s |
+| peek (单拷贝·线程本地) | 0.057 μs | 0.062 μs | 17.7M op/s |
 | read_range (100点) | 2.893 μs | 2.992 μs | 35.5M pt/s |
 | write_range (100点) | 12.459 μs | 17.911 μs | 8.1M pt/s |
 | mixed_rw | -- | -- | 16.3M op/s |
@@ -47,7 +47,7 @@ int main(void) {
     indurtdb_read_point(1001, &p);
     printf("温度: %.2f\n", p.value.d);
 
-    // peek (零拷贝)
+    // peek (单拷贝到线程本地缓冲, 下次 peek 覆盖; 长期持有请用 read_point)
     const indurtdb_point_t* pk = indurtdb_peek(1001);
 
     // 批量
@@ -58,6 +58,17 @@ int main(void) {
     indurtdb_shutdown();
 }
 ```
+
+## 已知约束（使用前必读）
+
+1. **`peek()` 是单拷贝，不是零拷贝**：拷贝到 `_Thread_local` 缓冲后返回其指针，同线程下一次 `peek()` 即覆盖；需长期持有请用 `indurtdb_read_point()`。
+2. **单进程单例**：同一进程内只能持有一个实例，切换实例须先 `indurtdb_shutdown()`；不同 `instance_id` 的跨进程隔离正常。
+3. **写冲突不重试**：多写者并发时若 Seqlock 处于写中状态，`write_*` 直接返回 `-2`（busy），不阻塞、不重试，调用方自行处理。
+4. **超时检测 best-effort**：`check_timeouts()` 扫描遇写冲突会跳过该点位，单次调用不保证覆盖全部点位。
+5. **订阅为进程内回调**：暂不支持跨进程变更通知（规划于 v3.3）。
+6. **本库不含鉴权/加密/持久化/北向协议**：这些能力由 node-server 或上层 Bridge 承担。
+
+完整边界与路线图见 [`docs/01-白皮书/01-产品白皮书.md`](docs/01-白皮书/01-产品白皮书.md)。
 
 ## 构建
 

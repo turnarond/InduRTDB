@@ -66,7 +66,9 @@ static inline void irt_seqlock_write_end(uint64_t* seq, uint64_t seq0) {
 
 // --- 读取协议 ---
 
-// 从共享内存读取点位数据，返回 const 指针（零拷贝）
+// ⚠️ 以下 irt_seqlock_read() 为**早期设计**，现已移除。
+// 移除原因：返回指向共享内存的裸指针，调用方会在 seqlock 校验窗之外继续读数据，存在 TOCTOU 脏读。
+// 现行实现：irt_pm_peek() 在重试循环内拷贝到 _Thread_local 缓冲后返回其指针（单拷贝，非零拷贝）。
 static inline const indurtdb_point_t* irt_seqlock_read(
     const uint64_t* seq, const indurtdb_point_t* points, uint32_t id) {
     uint64_t s0, s1;
@@ -131,7 +133,7 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     return 0;
 }
 
-// irt_point_manager.c: irt_pm_peek —— 真正零拷贝
+// irt_point_manager.c: irt_pm_peek —— 单拷贝到 _Thread_local 缓冲（并非零拷贝）
 const indurtdb_point_t* irt_pm_peek(irt_pm_t* pm, uint32_t id) {
     if (!irt_pm_validate_id(pm, id)) return NULL;
     indurtdb_point_t* pts = irt_shm_points(pm->shm);
@@ -202,7 +204,7 @@ Reader 在 s0 为偶数时读取数据，若 Writer 在读取期间再次更新�
 
 ### 6.2 测试工具
 
-- Google Test / gtest (14 套件, ~73 用例, 100% 通过)
+- Google Test / gtest（15 单元 + 1 多进程集成 = 16 个测试，100% 通过）
 - 并发测试: test_c_concurrency (2 线程同点写/异点写/回调重入)
 - CI: GitLab CI, GCC ≥7.5, `-Wall -Wextra -Werror`
 

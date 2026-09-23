@@ -109,7 +109,8 @@ int irt_pm_read_double(const irt_pm_t* pm, uint32_t id, double* out);
 int irt_pm_read_string(const irt_pm_t* pm, uint32_t id, char* buf, size_t sz);
 int irt_pm_read_point(const irt_pm_t* pm, uint32_t id, irt_point_t* out);
 
-// 零拷贝 peek，内部使用 Seqlock 重试保护
+// 单拷贝 peek：Seqlock 重试循环内拷贝到 _Thread_local 缓冲后返回其指针
+// 注意：不是零拷贝；同线程下一次 peek 会覆盖该缓冲
 const irt_point_t* irt_pm_peek(const irt_pm_t* pm, uint32_t id);
 
 // 批量读写
@@ -130,7 +131,8 @@ uint64_t irt_pm_get_timeout_count(const irt_pm_t* pm);
 **关键设计决策**：
 - **显式类型函数**：C 无模板，用 4 个类型化函数替代 `write<T>()`
 - **Seqlock 写入流程**：`irt_seqlock_write_begin()` → 写数据 → `irt_seqlock_write_end()`，冲突返回 `IRT_ERR_BUSY`
-- **`peek()` 在 Seqlock 重试循环内直接返回 `&points[id]`**：真正零拷贝
+- **`peek()` 在 Seqlock 重试循环内拷贝到 `_Thread_local` 缓冲**：**单拷贝，并非零拷贝**；同线程下一次 `peek()` 即覆盖该缓冲，需长期持有请用 `irt_pm_read()`
+- **写冲突不重试**：`irt_seqlock_write_begin()` 遇写中状态直接返回 `IRT_ERR_BUSY`，不阻塞、不自旋重试（v3.3 将确定化该语义）
 
 ### 2.2 Seqlock (`irt_seqlock.h`, inline 实现)
 
