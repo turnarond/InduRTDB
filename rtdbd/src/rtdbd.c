@@ -75,6 +75,35 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* 取对端进程凭据（pid / uid），用于鉴权与审计 */
+static int peer_cred(int fd, uint32_t* pid, uint32_t* uid)
+{
+    struct ucred cr;
+    socklen_t    len = sizeof(cr);
+    if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return -1;
+    *pid = (uint32_t)cr.pid;
+    *uid = (uint32_t)cr.uid;
+    return 0;
+}
+
+/* 执行一次点位写入。返回 0 成功，非 0 失败 */
+static int do_write(const rtdbd_write_req_t* w)
+{
+    switch (w->type) {
+    case RTDBD_TYPE_BOOL:
+        return indurtdb_write_bool(w->point_id, (w->value_bits & 1u) ? true : false);
+    case RTDBD_TYPE_INT32:
+        return indurtdb_write_int32(w->point_id, (int32_t)w->value_bits);
+    case RTDBD_TYPE_DOUBLE: {
+        double d = 0.0;
+        memcpy(&d, &w->value_bits, sizeof(d));
+        return indurtdb_write_double(w->point_id, d);
+    }
+    default:
+        return -99; /* 不支持的类型 */
+    }
+}
+
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
 static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
 {
@@ -94,15 +123,17 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
     if (req.opcode == RTDBD_OP_PING) {
         resp.status      = RTDBD_ST_OK;
         resp.payload_len = 0;
-        (void)policy;
-        (void)audit;
         return send_all(fd, &resp, sizeof(resp));
     }
 
     if (req.opcode == RTDBD_OP_AUDIT_DUMP) {
+        rtdbd_audit_entry_t out[RTDBD_AUDIT_CAPACITY];
+        uint32_t n = irt_audit_dump(audit, out, RTDBD_AUDIT_CAPACITY);
+
         resp.status      = RTDBD_ST_OK;
-        resp.payload_len = 0; /* 红阶段：审计尚未接入 */
+        resp.payload_len = n * (uint32_t)sizeof(rtdbd_audit_entry_t);
         if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        if (n > 0 && send_all(fd, out, resp.payload_len) != 0) return 1;
         return 0;
     }
 
@@ -114,8 +145,36 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
             (void)send_all(fd, &resp, sizeof(resp));
             return 1;
         }
-        /* 红阶段：尚未实现写入 */
-        resp.status      = RTDBD_ST_NOT_IMPLEMENTED;
+
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        /* 鉴权：deny by default */
+        if (!irt_policy_allows(policy, uid, w.point_id)) {
+            resp.status      = RTDBD_ST_DENIED;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        int rc = do_write(&w);
+        if (rc == -99) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        irt_audit_record(audit, pid, uid, w.point_id, now_ns());
+        resp.status      = RTDBD_ST_OK;
         resp.payload_len = 0;
         return send_all(fd, &resp, sizeof(resp));
     }
