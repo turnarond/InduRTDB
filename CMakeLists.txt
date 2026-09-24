@@ -58,6 +58,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(indurtdb PUBLIC rt pthread)
 endif()
 
+# --- rtdbd 写权威服务进程（v3.3 读写分离） ---
+# 仅 Linux；作为子项目引入时默认关闭，不污染消费方构建。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(INDURTDB_IS_TOP_LEVEL)
+        set(_rtdbd_default ON)
+    else()
+        set(_rtdbd_default OFF)
+    endif()
+    option(INDURTDB_BUILD_RTDBD "Build rtdbd write-authority daemon" ${_rtdbd_default})
+    if(INDURTDB_BUILD_RTDBD)
+        add_subdirectory(rtdbd)
+    endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(INDURTDB_BUILD_TESTS)
         enable_testing()
