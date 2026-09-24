@@ -50,4 +50,13 @@ IRT_STATIC_ASSERT(sizeof(irt_subscriber_entry_t) == 16,
 IRT_STATIC_ASSERT(sizeof(indurtdb_point_t) == 128,
                   "point must be 128 bytes");
 
+/* v3.3: source_timestamp_ns 落在 padding 区（offset 112，8B 对齐），
+ * sizeof 与既有字段偏移均不变 —— ABI 仍为 v1。 */
+IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, source_timestamp_ns) == 112,
+                  "source_timestamp_ns must be at offset 112");
+IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, name) == 45,
+                  "name offset must not change (ABI v1)");
+IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, quality) == 41,
+                  "quality offset must not change (ABI v1)");
+
 #endif /* IRT_INTERNAL_IRT_TYPES_H_ */

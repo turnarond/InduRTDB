@@ -295,3 +295,25 @@ uint64_t indurtdb_get_timeout_count(void) {
 const char* indurtdb_get_last_error(void) {
     return g_last_error;
 }
+
+/* ==== T5 红阶段桩：声明已就位，实现待下一个提交 ==== */
+int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns) {
+    (void)id; (void)value; (void)source_ts_ns;
+    set_error("not implemented"); return -1;
+}
+int indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns) {
+    (void)id; (void)value; (void)source_ts_ns;
+    set_error("not implemented"); return -1;
+}
+int indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns) {
+    (void)id; (void)value; (void)source_ts_ns;
+    set_error("not implemented"); return -1;
+}
+int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns) {
+    (void)id; (void)value; (void)source_ts_ns;
+    set_error("not implemented"); return -1;
+}
+int indurtdb_set_quality(uint32_t id, uint8_t quality) {
+    (void)id; (void)quality;
+    set_error("not implemented"); return -1;
+}

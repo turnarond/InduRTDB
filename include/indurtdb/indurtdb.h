@@ -50,9 +50,36 @@ typedef struct {
     uint8_t  quality;   /* INDURTDB_QUALITY_* */
     uint16_t unit;
     uint8_t  access;    /* INDURTDB_ACCESS_*  */
-    char     name[64];
-    uint8_t  padding[19];
+    char     name[64];              /* 45–108  */
+    uint8_t  padding[3];            /* 109–111: 保持 8B 对齐前导 */
+    uint64_t source_timestamp_ns;   /* 112–119: 采集时刻(SourceTimestamp)，0=未提供 */
+    uint8_t  reserved[8];           /* 120–127: 保留（须为 0） */
 } __attribute__((packed, aligned(128))) indurtdb_point_t;
+
+/* ---- 质量位（quality）分层布局 ----
+ *   bit 0–3 : 基础质量码（16 种，现有 0–3 取值不变）
+ *   bit 4–5 : 量程位（无 / Low / High / Constant）
+ *   bit 6–7 : 预留（须为 0）
+ *
+ * 「值是否可用」只看基础码；量程位是与可用性正交的附加信息。
+ */
+#define INDURTDB_QUALITY_UNCERTAIN        4
+#define INDURTDB_QUALITY_NOT_INITIALIZED  5
+#define INDURTDB_QUALITY_OUT_OF_SERVICE   6
+#define INDURTDB_QUALITY_COMM_FAILURE     7
+#define INDURTDB_QUALITY_SENSOR_FAILURE   8
+#define INDURTDB_QUALITY_LAST_KNOWN       9
+#define INDURTDB_QUALITY_CONFIG_ERROR     10
+
+#define INDURTDB_LIMIT_NONE     0u
+#define INDURTDB_LIMIT_LOW      1u
+#define INDURTDB_LIMIT_HIGH     2u
+#define INDURTDB_LIMIT_CONSTANT 3u
+
+#define INDURTDB_QUALITY_BASE(q)  ((uint8_t)((q) & 0x0Fu))
+#define INDURTDB_QUALITY_LIMIT(q) ((uint8_t)(((q) >> 4) & 0x03u))
+#define INDURTDB_QUALITY_MAKE(base, limit) \
+        ((uint8_t)(((base) & 0x0Fu) | (((limit) & 0x03u) << 4)))
 
 /* ==== 订阅回调 ==== */
 typedef void (*indurtdb_callback_t)(uint32_t id,
@@ -69,6 +96,21 @@ int indurtdb_write_bool(uint32_t id, bool value);
 int indurtdb_write_int32(uint32_t id, int32_t value);
 int indurtdb_write_double(uint32_t id, double value);
 int indurtdb_write_string(uint32_t id, const char* value);
+
+/* ==== 单点写（携带采集时刻 SourceTimestamp） ====
+ * source_ts_ns 为数据在现场被采集的时刻；传 0 表示"未提供"，
+ * 此时点位语义退化为仅使用入库时刻 timestamp_ns（旧行为不变）。
+ */
+int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns);
+int indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns);
+int indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns);
+int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns);
+
+/* ==== 质量标记 ====
+ * 用于显式设置点位质量（如与控制面失联时标记 COMM_FAILURE）。
+ * 取值见 INDURTDB_QUALITY_* 与 INDURTDB_QUALITY_MAKE()。
+ */
+int indurtdb_set_quality(uint32_t id, uint8_t quality);
 
 /* ==== 单点读 ==== */
 int indurtdb_read_bool(uint32_t id, bool* value);
