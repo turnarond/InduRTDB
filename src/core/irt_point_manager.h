@@ -25,6 +25,15 @@ int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value);
 int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value);
 int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value);
 
+/* 携带采集时刻（SourceTimestamp）的写入，source_ts_ns=0 表示未提供 */
+int irt_pm_write_bool_ts(irt_pm_t* pm, uint32_t id, bool value, uint64_t source_ts_ns);
+int irt_pm_write_int32_ts(irt_pm_t* pm, uint32_t id, int32_t value, uint64_t source_ts_ns);
+int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns);
+int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns);
+
+/* 显式设置点位质量（如失联标记 COMM_FAILURE） */
+int irt_pm_set_quality(irt_pm_t* pm, uint32_t id, uint8_t quality);
+
 /* 读取 (seqlock 保护, 拷贝到 out, 成功 0) */
 int irt_pm_read(irt_pm_t* pm, uint32_t id, indurtdb_point_t* out);
 

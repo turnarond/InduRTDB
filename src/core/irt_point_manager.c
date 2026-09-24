@@ -25,7 +25,8 @@ bool irt_pm_validate_id(const irt_pm_t* pm, uint32_t id) {
 }
 
 static int pm_write_impl(irt_pm_t* pm, uint32_t id,
-                          uint8_t type, const void* value) {
+                          uint8_t type, const void* value,
+                          uint64_t source_ts_ns) {
     if (!irt_pm_validate_id(pm, id)) return -1;
 
     irt_header_t*      hdr = irt_shm_header(pm->shm);
@@ -55,6 +56,8 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     }
     p->timestamp_ns = irt_time_now_ns();
     p->quality      = INDURTDB_QUALITY_GOOD;
+    /* 采集时刻：0 表示"未提供"，语义退化为仅用入库时刻（旧行为不变） */
+    p->source_timestamp_ns = source_ts_ns;
 
     /*
      * ARM weak memory ordering: 保证所有数据写入 (type/value/timestamp/
@@ -67,16 +70,48 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
 }
 
 int irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value) {
-    return pm_write_impl(pm, id, INDURTDB_TYPE_BOOL, &value);
+    return pm_write_impl(pm, id, INDURTDB_TYPE_BOOL, &value, 0);
 }
 int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value) {
-    return pm_write_impl(pm, id, INDURTDB_TYPE_INT32, &value);
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT32, &value, 0);
 }
 int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value) {
-    return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value);
+    return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, 0);
 }
 int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value) {
-    return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value);
+    return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, 0);
+}
+
+/* ---- 携带采集时刻（SourceTimestamp）的写入 ---- */
+int irt_pm_write_bool_ts(irt_pm_t* pm, uint32_t id, bool value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_BOOL, &value, source_ts_ns);
+}
+int irt_pm_write_int32_ts(irt_pm_t* pm, uint32_t id, int32_t value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT32, &value, source_ts_ns);
+}
+int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, source_ts_ns);
+}
+int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, source_ts_ns);
+}
+
+/* ---- 显式设置质量（如失联时标记 COMM_FAILURE） ---- */
+int irt_pm_set_quality(irt_pm_t* pm, uint32_t id, uint8_t quality) {
+    if (!irt_pm_validate_id(pm, id)) return -1;
+
+    irt_header_t*     hdr = irt_shm_header(pm->shm);
+    indurtdb_point_t* pts = irt_shm_points(pm->shm);
+    if (!hdr || !pts) return -1;
+
+    uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+    if (seq0 & 1ULL) return -2; /* 写冲突 */
+
+    pts[id].quality = quality;
+
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    irt_seqlock_write_end(&hdr->write_seq, seq0);
+    return 0;
 }
 
 int irt_pm_read(irt_pm_t* pm, uint32_t id, indurtdb_point_t* out) {
