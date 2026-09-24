@@ -72,6 +72,20 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 endif()
 
+# --- indurtdb-client（rtdbd 的 RPC 客户端，含本地写队列） ---
+# 同样仅 Linux；作为子项目引入时默认关闭。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(INDURTDB_IS_TOP_LEVEL)
+        set(_client_default ON)
+    else()
+        set(_client_default OFF)
+    endif()
+    option(INDURTDB_BUILD_CLIENT "Build indurtdb-client (RPC client with write queue)" ${_client_default})
+    if(INDURTDB_BUILD_CLIENT)
+        add_subdirectory(client)
+    endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(INDURTDB_BUILD_TESTS)
         enable_testing()
