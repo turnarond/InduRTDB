@@ -295,3 +295,29 @@ uint64_t indurtdb_get_timeout_count(void) {
 const char* indurtdb_get_last_error(void) {
     return g_last_error;
 }
+
+/* ==== 单点写（携带采集时刻 SourceTimestamp） ====
+ * 与无 _ts 版本行为一致（写后通知订阅者），仅多写入 source_timestamp_ns。
+ */
+int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns) {
+    ENSURE_INIT();
+    return write_and_notify(irt_pm_write_bool_ts(&g_rtdb.pm, id, value, source_ts_ns), id);
+}
+int indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns) {
+    ENSURE_INIT();
+    return write_and_notify(irt_pm_write_int32_ts(&g_rtdb.pm, id, value, source_ts_ns), id);
+}
+int indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns) {
+    ENSURE_INIT();
+    return write_and_notify(irt_pm_write_double_ts(&g_rtdb.pm, id, value, source_ts_ns), id);
+}
+int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns) {
+    ENSURE_INIT();
+    return write_and_notify(irt_pm_write_string_ts(&g_rtdb.pm, id, value, source_ts_ns), id);
+}
+
+/* ==== 质量标记 ==== */
+int indurtdb_set_quality(uint32_t id, uint8_t quality) {
+    ENSURE_INIT();
+    return irt_pm_set_quality(&g_rtdb.pm, id, quality);
+}
