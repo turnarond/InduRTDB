@@ -86,18 +86,24 @@ static int peer_cred(int fd, uint32_t* pid, uint32_t* uid)
     return 0;
 }
 
-/* 执行一次点位写入。返回 0 成功，非 0 失败 */
+/* 执行一次点位写入（携带采集时刻）。返回 0 成功，非 0 失败
+ *
+ * 采集时刻由客户端经协议传入；为 0 表示"未提供"，
+ * 库侧语义退化为仅记录入库时刻（与旧行为一致）。
+ */
 static int do_write(const rtdbd_write_req_t* w)
 {
     switch (w->type) {
     case RTDBD_TYPE_BOOL:
-        return indurtdb_write_bool(w->point_id, (w->value_bits & 1u) ? true : false);
+        return indurtdb_write_bool_ts(w->point_id, (w->value_bits & 1u) ? true : false,
+                                      w->source_ts_ns);
     case RTDBD_TYPE_INT32:
-        return indurtdb_write_int32(w->point_id, (int32_t)w->value_bits);
+        return indurtdb_write_int32_ts(w->point_id, (int32_t)w->value_bits,
+                                       w->source_ts_ns);
     case RTDBD_TYPE_DOUBLE: {
         double d = 0.0;
         memcpy(&d, &w->value_bits, sizeof(d));
-        return indurtdb_write_double(w->point_id, d);
+        return indurtdb_write_double_ts(w->point_id, d, w->source_ts_ns);
     }
     default:
         return -99; /* 不支持的类型 */
