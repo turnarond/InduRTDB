@@ -43,6 +43,13 @@ bash scripts/run_bench.sh --quick      # 快速模式；WARMUP/ITERS/BATCH_CNT/T
 ```
 输出 P50/P99/吞吐。设计目标 **P99 ≤ 10μs**，改动读/写热路径后必须跑，回归数据需回填 README 表格。
 
+**UDS 延迟基准（v3.3 架构验证）**
+```bash
+bash scripts/run_uds_bench.sh                 # 默认 16B 报文
+MSG_SIZE=48 bash scripts/run_uds_bench.sh     # 接近真实写请求的尺寸
+```
+测量 Unix Domain Socket 往返延迟（P50/P99/P99.9/吞吐），用于验证读写分离架构的延迟预算。实测参考（x86）：16B 时 P50 ≈ 11.6μs / P99 ≈ 18.2μs；48B 时 P50 ≈ 12.8μs / P99 ≈ 24.0μs。详见 `docs/06-开发规划/11-v3.3-T0-UDS延迟实测报告.md`。
+
 **外部消费回归**
 ```bash
 bash scripts/verify_consume.sh
