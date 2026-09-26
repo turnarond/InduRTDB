@@ -248,6 +248,38 @@ TEST(IrtcliQueue, ReplayCarriesSourceTimestamp)
     irtcli_close(&c);
 }
 
+/* 7. 服务不可用期间写入队不丢，恢复后重放（fail-operational 的核心） */
+TEST(IrtcliQueue, QueuedWhileServiceDownThenReplayedOnReconnect)
+{
+    Proc p;
+    ASSERT_TRUE(p.start("down", policy_for_self()));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, alert_cb, NULL), IRTCLI_OK);
+
+    /* 服务停止 */
+    p.stop();
+
+    /* 写入不阻塞、不失败 —— 入队 */
+    EXPECT_EQ(irtcli_write_int32(&c, 9, 55, 0), IRTCLI_QUEUED);
+    EXPECT_EQ(irtcli_queue_count(&c), 1u);
+
+    /* 服务不可用期间 flush 提交 0 条，但**保留队列**（不丢数据） */
+    EXPECT_EQ(irtcli_flush(&c), 0);
+    EXPECT_EQ(irtcli_queue_count(&c), 1u);
+
+    /* 服务恢复后重放 */
+    ASSERT_TRUE(p.start("down", policy_for_self()));
+    EXPECT_EQ(irtcli_flush(&c), 1);
+    EXPECT_EQ(irtcli_queue_count(&c), 0u);
+
+    int32_t v = 0;
+    ASSERT_TRUE(shm_read_int32(p.instance, 9, &v));
+    EXPECT_EQ(v, 55);
+
+    irtcli_close(&c);
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
