@@ -45,6 +45,23 @@ if(TARGET rtdbd)
     add_test(NAME test_rtdbd_recovery COMMAND test_rtdbd_recovery)
 endif()
 
+# ---- rtdbd 变更通知（v3.3 T4） ----
+if(TARGET rtdbd)
+    add_executable(test_rtdbd_notify test_rtdbd_notify.cpp)
+    target_link_libraries(test_rtdbd_notify PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb)
+    target_include_directories(test_rtdbd_notify PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_rtdbd_notify PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_notify PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_notify rtdbd)
+    add_test(NAME test_rtdbd_notify COMMAND test_rtdbd_notify)
+endif()
+
 # ---- indurtdb-client 与写队列集成测试（v3.3 T3） ----
 if(TARGET rtdbd AND TARGET irtcli)
     add_executable(test_irtcli_queue test_irtcli_queue.cpp)
