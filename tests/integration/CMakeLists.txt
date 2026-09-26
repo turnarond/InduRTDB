@@ -27,3 +27,20 @@ if(TARGET rtdbd)
     add_dependencies(test_rtdbd_core rtdbd)
     add_test(NAME test_rtdbd_core COMMAND test_rtdbd_core)
 endif()
+
+# ---- rtdbd 快速自恢复（v3.3 T2） ----
+if(TARGET rtdbd)
+    add_executable(test_rtdbd_recovery test_rtdbd_recovery.cpp)
+    target_link_libraries(test_rtdbd_recovery PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb)
+    target_include_directories(test_rtdbd_recovery PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_rtdbd_recovery PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_recovery PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_recovery rtdbd)
+    add_test(NAME test_rtdbd_recovery COMMAND test_rtdbd_recovery)
+endif()
