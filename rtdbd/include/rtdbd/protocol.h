@@ -19,6 +19,12 @@
 #define RTDBD_OP_PING        1u
 #define RTDBD_OP_WRITE       2u
 #define RTDBD_OP_AUDIT_DUMP  3u
+#define RTDBD_OP_SUBSCRIBE   4u
+#define RTDBD_OP_UNSUBSCRIBE 5u
+#define RTDBD_OP_NOTIFY      6u /* 服务端→客户端推送（非请求响应） */
+
+/* 单连接最大订阅点数 */
+#define RTDBD_SUB_MAX 32u
 
 /* ---- 状态码 ---- */
 #define RTDBD_ST_OK               0u
@@ -66,5 +72,20 @@ typedef struct {
     uint32_t point_id;
     uint64_t ts_ns;
 } rtdbd_audit_entry_t;
+
+/* 订阅/退订请求负载 4B */
+typedef struct {
+    uint32_t point_id;
+} rtdbd_sub_req_t;
+
+/* 变更通知负载 32B（服务端主动推送） */
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  reserved[3];
+    uint64_t value_bits;
+    uint64_t timestamp_ns;   /* 入库时刻 */
+    uint64_t source_ts_ns;   /* 采集时刻 */
+} rtdbd_notify_t;
 
 #endif /* RTDBD_PROTOCOL_H_ */
