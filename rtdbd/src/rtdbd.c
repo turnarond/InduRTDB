@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -191,6 +192,83 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
     return 1;
 }
 
+/* 写 worker pid 文件，供运维与测试观测当前 worker */
+static void write_pidfile(const char* path, pid_t pid)
+{
+    if (!path) return;
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "%d\n", (int)pid);
+    fclose(f);
+}
+
+/* ---- supervisor：worker 挂了立刻拉起，实现"马上起来继续运行"（T2） ----
+ * 用 fork + execv 自身（去掉 --supervise）的方式拉起 worker，
+ * 保证每次都是干净的进程，避免残留状态。
+ */
+static int supervise_loop(int argc, char** argv, const char* pidfile)
+{
+    /* 不用 SA_RESTART：确保 SIGTERM 能打断 waitpid */
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = on_signal;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+    signal(SIGPIPE, SIG_IGN);
+
+    /* 构造 worker 参数：去掉 --supervise / --pidfile */
+    char* wargv[32];
+    int   n = 0;
+    wargv[n++] = (char*)"/proc/self/exe";
+    for (int i = 1; i < argc && n < 31; ++i) {
+        if (strcmp(argv[i], "--supervise") == 0) continue;
+        if (strcmp(argv[i], "--pidfile") == 0) { i++; continue; }
+        wargv[n++] = argv[i];
+    }
+    wargv[n] = NULL;
+
+    printf("rtdbd supervisor started\n");
+    fflush(stdout);
+
+    for (;;) {
+        if (g_stop) break;
+
+        pid_t child = fork();
+        if (child < 0) {
+            usleep(10000);
+            continue;
+        }
+        if (child == 0) {
+            execv("/proc/self/exe", wargv);
+            _exit(127);
+        }
+
+        write_pidfile(pidfile, child);
+        printf("rtdbd worker pid=%d\n", (int)child);
+        fflush(stdout);
+
+        int status = 0;
+        pid_t r = waitpid(child, &status, 0);
+        if (r < 0 && errno != EINTR) break;
+
+        if (g_stop) {
+            kill(child, SIGTERM);
+            break;
+        }
+
+        printf("rtdbd: worker %d exited, respawning\n", (int)child);
+        fflush(stdout);
+        usleep(1000); /* 极短退避，优先保证快速恢复 */
+    }
+
+    if (pidfile) unlink(pidfile);
+    printf("rtdbd supervisor stopped\n");
+    fflush(stdout);
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     const char* sock_path  = "/run/indurtdb/default.sock";
@@ -198,6 +276,8 @@ int main(int argc, char** argv)
     const char* policy_path = NULL;
     uint32_t    max_points = 10000;
     uint32_t    max_subs   = 32;
+    bool        supervise  = false;
+    const char* pidfile    = NULL;
 
     static struct option long_opts[] = {
         {"socket",     required_argument, 0, 's'},
@@ -205,19 +285,27 @@ int main(int argc, char** argv)
         {"policy",     required_argument, 0, 'p'},
         {"max-points", required_argument, 0, 'm'},
         {"max-subs",   required_argument, 0, 'b'},
+        {"supervise",  no_argument,       0, 'S'},
+        {"pidfile",    required_argument, 0, 'P'},
         {0, 0, 0, 0}
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "s:i:p:m:b:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "s:i:p:m:b:SP:", long_opts, NULL)) != -1) {
         switch (c) {
         case 's': sock_path = optarg; break;
         case 'i': instance = optarg; break;
         case 'p': policy_path = optarg; break;
         case 'm': max_points = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'b': max_subs = (uint32_t)strtoul(optarg, NULL, 10); break;
+        case 'S': supervise = true; break;
+        case 'P': pidfile = optarg; break;
         default: break;
         }
+    }
+
+    if (supervise) {
+        return supervise_loop(argc, argv, pidfile);
     }
 
     signal(SIGPIPE, SIG_IGN);
