@@ -22,6 +22,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <indurtdb/indurtdb.h>
 #include <rtdbd/protocol.h>
 
 #ifndef RTDBD_BIN
@@ -282,6 +283,40 @@ TEST(RtdbdCore, ProtocolVersionMismatchRejected)
     EXPECT_EQ(n, 0) << "版本不匹配时服务端应关闭连接，而非返回响应";
 
     close(fd);
+    p.stop();
+}
+
+/* 6. 写入携带采集时刻（SourceTimestamp）—— rtdbd 须将其写入 shm */
+TEST(RtdbdCore, WriteCarriesSourceTimestamp)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("srcts", policy_for_uid((unsigned long)getuid())));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_write_req_t w;
+    memset(&w, 0, sizeof(w));
+    w.point_id = 5;
+    w.type     = RTDBD_TYPE_DOUBLE;
+    double v   = 21.5;
+    memcpy(&w.value_bits, &v, sizeof(v));
+    w.source_ts_ns = 1700000000123456789ull;
+
+    ASSERT_TRUE(send_req(fd, RTDBD_OP_WRITE, &w, sizeof(w)));
+    rtdbd_resp_hdr_t resp;
+    ASSERT_TRUE(recv_resp(fd, &resp));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    close(fd);
+
+    /* 从共享内存侧读取，确认采集时刻已落地 */
+    ASSERT_EQ(indurtdb_initialize(p.instance.c_str(), 64, 4), 0);
+    indurtdb_point_t pt;
+    ASSERT_EQ(indurtdb_read_point(5, &pt), 0);
+    EXPECT_EQ(pt.source_timestamp_ns, 1700000000123456789ull);
+    EXPECT_DOUBLE_EQ(pt.value.d, 21.5);
+    indurtdb_shutdown();
+
     p.stop();
 }
 

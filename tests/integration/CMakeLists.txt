@@ -61,3 +61,21 @@ if(TARGET rtdbd)
     add_dependencies(test_rtdbd_notify rtdbd)
     add_test(NAME test_rtdbd_notify COMMAND test_rtdbd_notify)
 endif()
+
+# ---- indurtdb-client 与写队列集成测试（v3.3 T3） ----
+if(TARGET rtdbd AND TARGET irtcli)
+    add_executable(test_irtcli_queue test_irtcli_queue.cpp)
+    target_link_libraries(test_irtcli_queue PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_irtcli_queue PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_irtcli_queue PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_irtcli_queue PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_irtcli_queue rtdbd irtcli)
+    add_test(NAME test_irtcli_queue COMMAND test_irtcli_queue)
+endif()
