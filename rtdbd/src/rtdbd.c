@@ -75,6 +75,84 @@ static uint64_t now_ns(void)
     return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* ---- 连接状态：每连接的订阅表（定长，无堆分配） ---- */
+typedef struct {
+    int      fd;
+    uint32_t subs[RTDBD_SUB_MAX];
+    uint32_t nsubs;
+} rtdbd_conn_t;
+
+static void conn_init(rtdbd_conn_t* c)
+{
+    c->fd = -1;
+    c->nsubs = 0;
+}
+
+static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
+{
+    for (uint32_t i = 0; i < c->nsubs; ++i) {
+        if (c->subs[i] == point_id) return true;
+    }
+    return false;
+}
+
+static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id)
+{
+    if (conn_has_sub(c, point_id)) return 0;
+    if (c->nsubs >= RTDBD_SUB_MAX) return -1;
+    c->subs[c->nsubs++] = point_id;
+    return 0;
+}
+
+static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
+{
+    for (uint32_t i = 0; i < c->nsubs; ++i) {
+        if (c->subs[i] != point_id) continue;
+        c->subs[i] = c->subs[c->nsubs - 1];
+        c->nsubs--;
+        return;
+    }
+}
+
+/* 写成功后向所有订阅了该点位的连接广播变更通知（T4） */
+static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t* w)
+{
+    rtdbd_req_hdr_t  nh;
+    rtdbd_notify_t   nt;
+
+    memset(&nh, 0, sizeof(nh));
+    memset(&nt, 0, sizeof(nt));
+
+    nh.magic       = RTDBD_MAGIC;
+    nh.version     = RTDBD_PROTO_VERSION;
+    nh.opcode      = RTDBD_OP_NOTIFY;
+    nh.payload_len = (uint32_t)sizeof(nt);
+
+    nt.point_id     = w->point_id;
+    nt.type         = w->type;
+    nt.value_bits   = w->value_bits;
+    nt.source_ts_ns = w->source_ts_ns;
+    nt.timestamp_ns = 0; /* 由服务端在广播前补齐 */
+
+    for (int i = 0; i < n; ++i) {
+        rtdbd_conn_t* c = &conns[i];
+        if (c->fd < 0) continue;
+        if (!conn_has_sub(c, w->point_id)) continue;
+
+        /* 取当前值的时间戳，保证通知携带最新入库时刻 */
+        indurtdb_point_t pt;
+        if (indurtdb_read_point(w->point_id, &pt) == 0) {
+            nt.timestamp_ns = pt.timestamp_ns;
+        }
+
+        if (send_all(c->fd, &nh, sizeof(nh)) != 0 ||
+            send_all(c->fd, &nt, sizeof(nt)) != 0) {
+            /* 推送失败（对端已关闭）：移除该订阅，避免反复失败 */
+            conn_del_sub(c, w->point_id);
+        }
+    }
+}
+
 /* 取对端进程凭据（pid / uid），用于鉴权与审计 */
 static int peer_cred(int fd, uint32_t* pid, uint32_t* uid)
 {
@@ -105,7 +183,8 @@ static int do_write(const rtdbd_write_req_t* w)
 }
 
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
-static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
+static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
+                          rtdbd_conn_t* conn, rtdbd_conn_t* conns, int nconns)
 {
     rtdbd_req_hdr_t req;
     if (recv_all(fd, &req, sizeof(req)) != 0) return 1;
@@ -175,6 +254,27 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit)
 
         irt_audit_record(audit, pid, uid, w.point_id, now_ns());
         resp.status      = RTDBD_ST_OK;
+        resp.payload_len = 0;
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+
+        /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了） */
+        notify_broadcast(conns, nconns, &w);
+        return 0;
+    }
+
+    if (req.opcode == RTDBD_OP_SUBSCRIBE || req.opcode == RTDBD_OP_UNSUBSCRIBE) {
+        rtdbd_sub_req_t s;
+        if (req.payload_len != sizeof(s) || recv_all(fd, &s, sizeof(s)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+        int rc = (req.opcode == RTDBD_OP_SUBSCRIBE)
+                     ? conn_add_sub(conn, s.point_id)
+                     : (conn_del_sub(conn, s.point_id), 0);
+
+        resp.status      = (rc == 0) ? RTDBD_ST_OK : RTDBD_ST_INTERNAL;
         resp.payload_len = 0;
         return send_all(fd, &resp, sizeof(resp));
     }
@@ -255,8 +355,8 @@ int main(int argc, char** argv)
     printf("rtdbd listening on %s (instance=%s)\n", sock_path, instance);
     fflush(stdout);
 
-    int clients[RTDBD_MAX_CLIENTS];
-    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) clients[i] = -1;
+    rtdbd_conn_t conns[RTDBD_MAX_CLIENTS];
+    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_init(&conns[i]);
 
     while (!g_stop) {
         struct pollfd fds[RTDBD_MAX_CLIENTS + 1];
@@ -265,8 +365,8 @@ int main(int argc, char** argv)
         int nfds = 1;
 
         for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-            if (clients[i] >= 0) {
-                fds[nfds].fd = clients[i];
+            if (conns[i].fd >= 0) {
+                fds[nfds].fd = conns[i].fd;
                 fds[nfds].events = POLLIN;
                 nfds++;
             }
@@ -283,8 +383,9 @@ int main(int argc, char** argv)
             if (cfd >= 0) {
                 int placed = 0;
                 for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-                    if (clients[i] < 0) {
-                        clients[i] = cfd;
+                    if (conns[i].fd < 0) {
+                        conn_init(&conns[i]);
+                        conns[i].fd = cfd;
                         placed = 1;
                         break;
                     }
@@ -295,20 +396,22 @@ int main(int argc, char** argv)
 
         for (int i = 1; i < nfds; ++i) {
             if (!(fds[i].revents & POLLIN)) continue;
-            if (handle_request(fds[i].fd, &policy, &audit) != 0) {
+            rtdbd_conn_t* conn = NULL;
+            for (int k = 0; k < RTDBD_MAX_CLIENTS; ++k) {
+                if (conns[k].fd == fds[i].fd) { conn = &conns[k]; break; }
+            }
+            if (!conn) continue;
+
+            if (handle_request(fds[i].fd, &policy, &audit,
+                               conn, conns, RTDBD_MAX_CLIENTS) != 0) {
                 close(fds[i].fd);
-                for (int k = 0; k < RTDBD_MAX_CLIENTS; ++k) {
-                    if (clients[k] == fds[i].fd) {
-                        clients[k] = -1;
-                        break;
-                    }
-                }
+                conn_init(conn);
             }
         }
     }
 
     for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-        if (clients[i] >= 0) close(clients[i]);
+        if (conns[i].fd >= 0) close(conns[i].fd);
     }
     close(listen_fd);
     unlink(sock_path);
