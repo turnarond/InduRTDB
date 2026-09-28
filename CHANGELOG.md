@@ -4,6 +4,28 @@ All notable changes to InduRTDB.
 
 ---
 
+## [未发布] — v3.3.0「读写分离与双通道」(2026-09-28)
+
+### Added
+- `rtdbd` 写权威守护进程：UDS 监听、极简二进制协议（magic + 版本，不匹配即拒）、单线程串行写、`SO_PEERCRED` 鉴权、定长审计环形缓冲（T1）。
+- `indurtdb-client`（`irtcli_*`）：本地写队列（默认 256，同点位合并去重，满则告警不静默丢）、断连重放、同步/异步两种写入模式（T3）。
+- 跨进程变更通知：复用已建立的 UDS 连接广播变更，订阅者收到 `RTDBD_OP_NOTIFY`（T4）。
+- `source_timestamp_ns`（偏移 112，占原 padding）与 `COMM_FAILURE` 质量码落地，**`sizeof(indurtdb_point_t)` 仍为 128，既有字段偏移不变，ABI 保持 v1**（T5）。
+- supervisor 自动拉起 + 重启 attach 已有段（不重建），RTO 实测 ≈12ms（T2）。
+- 端到端混合角色测试 `tests/integration/test_e2e_mixed.cpp`：驱动（客户端写）→ rtdbd → 共享内存 → 控制逻辑（核心库直读）/ HMI（跨进程通知），含服务重启后重放场景（T6）。
+- `scripts/run_e2e.sh`：端到端脚本（清理残留守护进程/socket/shm → 构建 → 混合角色用例 → rtdbd 集成回归），已接入 CI 双配置。
+- UDS 往返延迟实测报告 `docs/06-开发规划/11-v3.3-T0-UDS延迟实测报告.md`（16B：P50 11.585μs / P99 18.182μs；门槛通过）。
+
+### Fixed
+- **`indurtdb-client` 未屏蔽 `SIGPIPE`**：`rtdbd` 崩溃后客户端向失效 socket 写入会被内核投递 `SIGPIPE` 直接终止，与 fail-operational 目标相悖。改为 `send(..., MSG_NOSIGNAL)`，失败由返回码表达（T6 端到端发现并修复）。
+- `irtcli_flush()` 在旧连接失效时不重连，导致服务恢复后需二次 flush 才重放。现 IO 失败后先重连再重试一次，"恢复后一次 flush 完成重放"成立。
+- 测试守护进程继承测试进程 stdio：父进程异常退出后成为孤儿并持有输出管道，挂住 ctest / CI 采集。测试中改为 `setsid()` + stdout/stderr 重定向到 `/dev/null`。
+
+### Notes
+- 版本号 bump 至 3.3.0 与 tag `v3.3.0` 在 T6 合入后执行（四处同步：`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / README + CHANGELOG）。
+
+---
+
 ## [未发布] — v3.2 文档治理基线 (2026-09-23)
 
 ### 定位统一

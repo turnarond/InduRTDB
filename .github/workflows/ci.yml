@@ -54,6 +54,10 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -j$(nproc)
 
+      # ---- 端到端混合角色（v3.3 T6） ----
+      - name: run_e2e.sh
+        run: E2E_BUILD_DIR=build bash scripts/run_e2e.sh
+
       # ---- 外部消费验证 ----
       - name: verify_consume.sh
         run: bash scripts/verify_consume.sh

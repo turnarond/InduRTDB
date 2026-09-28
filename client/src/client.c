@@ -63,7 +63,10 @@ static int send_all(int fd, const void* buf, size_t len)
 {
     const char* p = (const char*)buf;
     while (len > 0) {
-        ssize_t n = send(fd, p, len, 0);
+        /* MSG_NOSIGNAL：对端（rtdbd）已崩溃时，写失效 socket 不得用 SIGPIPE 打死调用进程。
+         * 库不应修改进程级信号处理，故在发送侧屏蔽，交由返回码表达失败。
+         * 这是 fail-operational 的前提：服务挂掉不能连累采集进程。 */
+        ssize_t n = send(fd, p, len, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) continue;
             return -1;
@@ -266,9 +269,16 @@ int irtcli_flush(irtcli_t* c)
     irtcli_entry_t e;
     while (q_pop(c, &e)) {
         int rc = submit_one(c, &e);
+
+        /* IO 失败（多因服务重启导致旧连接失效）：先重连再重试一次，
+         * 使「服务恢复后一次 flush 即完成重放」成立。 */
+        if (rc == IRTCLI_ERR_IO) {
+            c->connected = false;
+            if (irtcli_connect(c) == IRTCLI_OK) rc = submit_one(c, &e);
+        }
+
         if (rc != IRTCLI_OK) {
             /* 失败：恢复计数即可把该条放回队首（数据仍在槽位中，顺序不变） */
-            if (rc == IRTCLI_ERR_IO) c->connected = false;
             if (c->alert) c->alert("irtcli: submit failed, entry retained", c->user_data);
             c->count++;
             break;
