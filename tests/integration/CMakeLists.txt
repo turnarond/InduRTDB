@@ -79,3 +79,21 @@ if(TARGET rtdbd AND TARGET irtcli)
     add_dependencies(test_irtcli_queue rtdbd irtcli)
     add_test(NAME test_irtcli_queue COMMAND test_irtcli_queue)
 endif()
+
+# ---- 端到端混合角色（v3.3 T6） ----
+if(TARGET rtdbd AND TARGET irtcli)
+    add_executable(test_e2e_mixed test_e2e_mixed.cpp)
+    target_link_libraries(test_e2e_mixed PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_e2e_mixed PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_e2e_mixed PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_e2e_mixed PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_e2e_mixed rtdbd irtcli)
+    add_test(NAME test_e2e_mixed COMMAND test_e2e_mixed)
+endif()
