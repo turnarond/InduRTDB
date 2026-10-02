@@ -20,6 +20,8 @@ All notable changes to InduRTDB.
 - **`indurtdb-client` 未屏蔽 `SIGPIPE`**：`rtdbd` 崩溃后客户端向失效 socket 写入会被内核投递 `SIGPIPE` 直接终止，与 fail-operational 目标相悖。改为 `send(..., MSG_NOSIGNAL)`，失败由返回码表达（T6 端到端发现并修复）。
 - `irtcli_flush()` 在旧连接失效时不重连，导致服务恢复后需二次 flush 才重放。现 IO 失败后先重连再重试一次，"恢复后一次 flush 完成重放"成立。
 - 测试守护进程继承测试进程 stdio：父进程异常退出后成为孤儿并持有输出管道，挂住 ctest / CI 采集。测试中改为 `setsid()` + stdout/stderr 重定向到 `/dev/null`。
+- `test_c_quality` 的 `TimeoutDetectionConcurrentWriteSurvives` 使用 `timeout_ns = 1`，断言依赖"并发写恰好落在纳秒级窗口内"，属**竞态断言**：Debug 构建与 CI 多任务争用下 writer 线程被抢占即失败（CI Debug 红灯、Release 绿）。改为确定性超时窗口（1s），并新增 DQ-07「陈旧点位在并发写期间仍须被标记」补回覆盖率（写者限速 200µs 保证确定性）。
+- 附带发现并**文档化**边界：`check_timeouts()` 在写入者无间隙自旋时可能整轮取不到全局 seqlock 而返回 0（真实采集周期下不触发）——已写入 README / SDK 手册约束第 4 条，并立 [issue #19](https://github.com/turnarond/InduRTDB/issues/19) 供 v3.4 评估。
 
 ### Notes
 - 版本号 bump 至 3.3.0 与 tag `v3.3.0` 在 T6 合入后执行（四处同步：`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / README + CHANGELOG）。

@@ -64,7 +64,7 @@ int main(void) {
 1. **`peek()` 是单拷贝，不是零拷贝**：拷贝到 `_Thread_local` 缓冲后返回其指针，同线程下一次 `peek()` 即覆盖；需长期持有请用 `indurtdb_read_point()`。
 2. **单进程单例**：同一进程内只能持有一个实例，切换实例须先 `indurtdb_shutdown()`；不同 `instance_id` 的跨进程隔离正常。
 3. **写冲突不重试**：多写者并发时若 Seqlock 处于写中状态，`write_*` 直接返回 `-2`（busy），不阻塞、不重试，调用方自行处理。
-4. **超时检测 best-effort**：`check_timeouts()` 扫描遇写冲突会跳过该点位，单次调用不保证覆盖全部点位。
+4. **超时检测 best-effort**：`check_timeouts()` 扫描遇写冲突会跳过该点位，单次调用不保证覆盖全部点位；**写入者以最大速率无间隙自旋时，扫描可能整轮取不到写锁而返回 0**（真实采集周期下不会触发，见 [issue #19](https://github.com/turnarond/InduRTDB/issues/19)）。
 5. **订阅为进程内回调**：暂不支持跨进程变更通知（规划于 v3.3）。
 6. **本库不含鉴权/加密/持久化/北向协议**：这些能力由 node-server 或上层 Bridge 承担。
 
