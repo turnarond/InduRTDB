@@ -15,7 +15,7 @@
 
 **与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。
 
-### x86 实测性能 (v3.1.0, Release -O2)
+### x86 实测性能 (v3.3.0, Release -O2)
 
 | 操作 | P50 | P99 | 吞吐 |
 |------|-----|-----|------|
@@ -79,6 +79,8 @@ ctest --output-on-failure
 ```
 
 ## 版本
+
+**v3.3.0** — 读写分离与双通道：新增 `rtdbd` 写权威守护进程（UDS 串行写 + 本机 UID 鉴权 + 审计）与 `indurtdb-client`（写队列，fail-operational），支持跨进程变更通知；点位新增 `source_timestamp_ns`（采集时刻）与 `COMM_FAILURE` 质量码。**共享内存布局与 v2.x 仍逐字节兼容，ABI 保持 v1。**
 
 v3.1.0 — 纯 C11 重写,C++ API 已移除。共享内存布局与 v2.x 逐字节兼容。
 

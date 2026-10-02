@@ -339,6 +339,29 @@ const char* indurtdb_get_last_error(void);
 
 ---
 
+## indurtdb-client（受控通道 API，v3.3）
+
+`indurtdb-client` 与核心库**并列但独立**：核心库不感知 RPC，容器进程或需要受控写入的进程使用本客户端。
+头文件 `client/include/irtcli/client.h`，链接目标 `irtcli`。
+
+| 函数 | 说明 |
+|---|---|
+| `irtcli_init(c, sock_path, cap, alert, user_data)` | 初始化；`cap = 0` 用默认 256。返回 `IRTCLI_OK` 或负错误码 |
+| `irtcli_close(c)` | 释放队列与连接 |
+| `irtcli_connect(c)` | 建立 / 重连 `rtdbd`；失败时仍可异步入队 |
+| `irtcli_set_async(c, bool)` | 切换异步（默认）/ 同步模式 |
+| `irtcli_write_bool / int32 / double(c, id, value, source_ts_ns)` | 写入；异步返回 `IRTCLI_QUEUED`，同步返回 `IRTCLI_OK` |
+| `irtcli_flush(c)` | 按序提交队列；返回提交条数。IO 失败会**先重连再重试一次**，连接不可用则保留队列（不丢） |
+| `irtcli_queue_count(c)` | 当前队列长度 |
+
+**返回码**：`IRTCLI_OK` 0（已提交并确认）、`IRTCLI_QUEUED` 1（已入队未提交）、`ERR_ARG` -1、`ERR_FULL` -2（队列满，同时触发告警）、`ERR_IO` -3、`ERR_DENIED` -4（鉴权拒绝）、`ERR_PROTO` -5。
+
+**语义要点**：
+
+- 同点位合并去重（只保留最新值）；队列满触发告警回调，**绝不静默丢弃**；
+- 重放携带**原始** `source_ts_ns`，采集时刻不失真；
+- `send()` 使用 `MSG_NOSIGNAL`：`rtdbd` 崩溃只返回错误码，**不会以 `SIGPIPE` 终止调用进程**。
+
 ## 完整示例
 
 ```c

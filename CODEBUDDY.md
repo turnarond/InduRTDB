@@ -8,7 +8,7 @@ InduRTDB 是**纯 C11 实现的工业实时数据库**，定位为边缘控制�
 |---|---|
 | 跨进程共享内存点位存储（低延迟、确定性）、工业语义（quality/timestamp/unit/access）、订阅、崩溃自愈 | 南向设备驱动（Modbus/OPC UA/S7）、北向 SCADA 对接、持久化/历史库、集群同步 |
 
-它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 v3.1.0（README / `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏四处一致）。
+它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 v3.3.0（README / `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏四处一致）。
 
 ## 常用命令
 

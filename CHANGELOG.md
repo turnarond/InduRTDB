@@ -4,7 +4,7 @@ All notable changes to InduRTDB.
 
 ---
 
-## [未发布] — v3.3.0「读写分离与双通道」(2026-09-28)
+## [3.3.0] — 2026-10-02「读写分离与双通道」
 
 ### Added
 - `rtdbd` 写权威守护进程：UDS 监听、极简二进制协议（magic + 版本，不匹配即拒）、单线程串行写、`SO_PEERCRED` 鉴权、定长审计环形缓冲（T1）。
@@ -23,12 +23,20 @@ All notable changes to InduRTDB.
 - `test_c_quality` 的 `TimeoutDetectionConcurrentWriteSurvives` 使用 `timeout_ns = 1`，断言依赖"并发写恰好落在纳秒级窗口内"，属**竞态断言**：Debug 构建与 CI 多任务争用下 writer 线程被抢占即失败（CI Debug 红灯、Release 绿）。改为确定性超时窗口（1s），并新增 DQ-07「陈旧点位在并发写期间仍须被标记」补回覆盖率（写者限速 200µs 保证确定性）。
 - 附带发现并**文档化**边界：`check_timeouts()` 在写入者无间隙自旋时可能整轮取不到全局 seqlock 而返回 0（真实采集周期下不触发）——已写入 README / SDK 手册约束第 4 条，并立 [issue #19](https://github.com/turnarond/InduRTDB/issues/19) 供 v3.4 评估。
 
-### Notes
-- 版本号 bump 至 3.3.0 与 tag `v3.3.0` 在 T6 合入后执行（四处同步：`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / README + CHANGELOG）。
+### Changed
+- **版本一致性由构建系统守护**：`test_c_version` 不再硬编码版本号，期望值由 CMake `project(VERSION)` 注入（`INDURTDB_EXPECT_VERSION_*`）。此前每次发布都需手改测试，否则红灯（本次发布实测踩到）。
+- 白皮书 4.0 → 4.1、用户体验白皮书 4.0 → 4.1：新增读写分离与双通道、受控通道实测延迟、跨进程通知已可用，并修正"不支持跨进程通知""无鉴权审计"等已过时表述。
+- SDK 手册新增「indurtdb-client（受控通道 API）」章节（`irtcli_*` 函数、返回码与语义）。
+
+### 发布信息
+- 版本号四处同步：`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / README + CHANGELOG 均为 **3.3.0**。
+- **ABI 保持 v1**：`sizeof(indurtdb_point_t)` 仍为 128，既有字段偏移不变，与 v2.x 逐字节兼容。
+- 发布前按 `docs/06-开发规划/09-文档一致性检查清单.md` 逐项勾选（见该文"v3.3.0 勾选记录"）。
+- 验证：Debug / Release 零警告；`ctest` 22/22；`verify_consume.sh`、`run_soak.sh`(30s)、`run_bench.sh --quick`、`run_e2e.sh` 全部通过。
 
 ---
 
-## [未发布] — v3.2 文档治理基线 (2026-09-23)
+## [3.2.0-docs] — 2026-09-23「文档治理基线」（仅文档，库版本仍为 3.1.0）
 
 ### 定位统一
 - 对外口径统一为「**node-server 底层共享内存实时数据层**」；北向 OPC UA、持久化/历史、集群同步一律归 node-server / Bridge，本库不重复造轮子。
