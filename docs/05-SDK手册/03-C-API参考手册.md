@@ -64,7 +64,7 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
 | 1 | **单进程单例** | 同一进程内 `indurtdb_initialize()` 只能持有一个实例；切换实例必须先 `indurtdb_shutdown()`。不同 `instance_id` 的跨进程隔离正常。 |
 | 2 | **`peek()` 为单拷贝** | 数据经 Seqlock 拷贝到 `_Thread_local` 缓冲后返回其指针，**同线程下一次 `peek()` 即覆盖**；需长期持有请用 `indurtdb_read_point()` 拷贝到自管理缓冲。 |
 | 3 | **写冲突不重试** | 多写者并发时，若 Seqlock 处于写中状态，`write_*` 立即返回 `-2`（busy），**不阻塞、不自旋重试**；只读点位返回 `-3`。调用方需按业务策略自行重试（该语义将在 v3.3 确定化）。 |
-| 4 | **超时检测 best-effort** | `indurtdb_check_timeouts()` 扫描时若遇写冲突会跳过该点位，单次调用不保证覆盖全部点位；周期性调用即可收敛。 |
+| 4 | **超时检测 best-effort** | `indurtdb_check_timeouts()` 扫描时若遇写冲突会跳过该点位, 单次调用不保证覆盖全部点位; 周期性调用即可收敛。**严苛边界**: 写入者以最大速率**自旋**(无间隙连续写)时, 全局单 seqlock 的可用窗口极短, 扫描可能整轮取不到写锁而返回 `0`; 真实采集周期(ms 级)下不会触发, 见 [issue #19](https://github.com/turnarond/InduRTDB/issues/19)。 |
 | 5 | **订阅为进程内回调** | 回调仅在**本进程**内注册的订阅者上触发，**不支持跨进程变更通知**（v3.3 规划）。跨进程感知当前需轮询。 |
 | 6 | **无鉴权/加密/持久化** | 库不提供网络服务、认证、加密与持久化；`access` 字段是静态只读标记，不是访问控制机制。这些能力由 node-server / 上层 Bridge 承担。 |
 
@@ -299,6 +299,8 @@ int indurtdb_check_timeouts(uint64_t timeout_ns);
 扫描全部点位, 将超过 `timeout_ns` 未更新的点位标记为 `QUALITY_TIMEOUT`, 返回本次检测到的超时点数。`timeout_ns = 0` 时不做任何处理。
 
 **约束**: 该扫描为 **best-effort** —— 遍历过程中若某个点位正处在写冲突状态会跳过该点, 因此单次调用不保证覆盖全部点位; 建议周期性调用使其收敛。时钟获取失败时整体跳过, 不会把所有点误标为 TIMEOUT。
+
+**严苛边界(实测)**: 若写入者以最大速率**自旋**写入(无间隙连续 `write_*`), 全局单 seqlock 的"偶数窗口"极短, 扫描可能**整轮取不到写锁而返回 0**。真实采集周期(ms 级)下不会触发。该边界已立 [issue #19](https://github.com/turnarond/InduRTDB/issues/19) 供后续评估(扫描侧让步/退避、写锁有限重试等)。
 
 ### indurtdb_get_write_count
 

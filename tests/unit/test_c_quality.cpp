@@ -114,7 +114,13 @@ TEST_F(CQualityTest, PeekReturnsGoodQuality) {
 }
 
 /* DQ-06: check_timeouts 扫描期间被并发 writer 持续刷新的点位不会误标 TIMEOUT.
- * 验证 double-check (p->timestamp_ns >= now 守卫) 正确拦截 false-positive. */
+ *
+ * 修正说明（2026-10-02）：原实现用 timeout_ns = 1，断言依赖"并发写恰好落在
+ * [捕获 now, 扫描到该点] 这一纳秒级窗口内"，属**竞态断言**——writer 线程一旦
+ * 被抢占（Debug 构建 / CI 多任务争用）即失败，CI Debug 红灯而 Release 绿。
+ * 改为确定性表述：给定现实的超时窗口（1s），持续刷新的点位永不应被判超时，
+ * 结论不再依赖调度时序。
+ */
 TEST_F(CQualityTest, TimeoutDetectionConcurrentWriteSurvives) {
     const int N = 150;
     for (int i = 0; i < N; i++) {
@@ -122,7 +128,6 @@ TEST_F(CQualityTest, TimeoutDetectionConcurrentWriteSurvives) {
         ASSERT_EQ(indurtdb_write_int32(i, i), 0);
     }
 
-    /* writer 线程持续刷新目标点位, 使其 timestamp 总是 > now (now 在 check_timeouts 入口捕获) */
     std::atomic<bool> stop{false};
     std::atomic<int>  wcount{0};
     std::thread writer([&]() {
@@ -136,15 +141,51 @@ TEST_F(CQualityTest, TimeoutDetectionConcurrentWriteSurvives) {
     /* 给 writer 足够时间产生写入 */
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
 
-    int detected = indurtdb_check_timeouts(1);
+    /* 1s 超时窗口: 与线程调度无关, 只表达"刷新中的点位远未到期" */
+    const uint64_t timeout_ns = 1000000000ULL;
+    int detected = indurtdb_check_timeouts(timeout_ns);
     stop.store(true);
     writer.join();
 
     EXPECT_GT(wcount.load(), 0) << "writer should have written at least once";
 
-    /* 点位 100 被 writer 持续刷新, 其 timestamp >= now, double-check 应跳过 */
+    /* 点位 100 被 writer 持续刷新, 不得被标记为 TIMEOUT */
     indurtdb_point_t p;
     ASSERT_EQ(indurtdb_read_point(100, &p), 0);
     EXPECT_EQ(p.quality, INDURTDB_QUALITY_GOOD)
         << "concurrently-refreshed point must NOT be marked TIMEOUT";
+}
+
+/* DQ-07: 并发写进行中, 真正陈旧的点位仍必须被标记 TIMEOUT.
+ * 与 DQ-06 互补: 证明扫描没有被并发写"带偏", 该标的仍标。
+ * 确定性: 目标点位自写入后 5ms 未刷新, 超时窗口 1ms, 与调度无关。 */
+TEST_F(CQualityTest, TimeoutDetectionMarksStalePointUnderConcurrentWrite) {
+    ASSERT_EQ(indurtdb_write_int32(101, 1), 0);
+
+    std::atomic<bool> stop{false};
+    std::thread writer([&]() {
+        int v = 0;
+        while (!stop.load()) {
+            indurtdb_write_int32(102, v++);
+            /* 限速: 模拟真实采集周期。
+             * 若改为无间隙自旋, 全局单 seqlock 的"偶数窗口"极短,
+             * check_timeouts 会在读重试与 write_begin 上持续冲突,
+             * 整个扫描会被饿死 (detected=0) —— 这是既有 best-effort 语义的
+             * 真实边界, 已记入 SDK 手册约束并另立 issue, 不在此断言。 */
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+    });
+
+    /* 让 101 明确超出 1ms 超时窗口 */
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    int detected = indurtdb_check_timeouts(1000000ULL); /* 1ms */
+    stop.store(true);
+    writer.join();
+
+    EXPECT_GT(detected, 0) << "stale points must be detected";
+
+    indurtdb_point_t p;
+    ASSERT_EQ(indurtdb_read_point(101, &p), 0);
+    EXPECT_EQ(p.quality, INDURTDB_QUALITY_TIMEOUT)
+        << "stale point must be marked TIMEOUT even while writes are in flight";
 }
