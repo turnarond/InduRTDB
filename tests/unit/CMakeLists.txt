@@ -14,3 +14,13 @@ foreach(src ${UNIT_TEST_SOURCES})
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME ${name} COMMAND ${name})
 endforeach()
+
+# 版本一致性：期望值由 CMake project(VERSION) 注入，测试端不得硬编码，
+# 否则每次发布都会漂移（v3.3.0 发布时实测踩到）。
+if(TARGET test_c_version)
+    target_compile_definitions(test_c_version PRIVATE
+        INDURTDB_EXPECT_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+        INDURTDB_EXPECT_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+        INDURTDB_EXPECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+        INDURTDB_EXPECT_VERSION_STRING="${PROJECT_VERSION}")
+endif()
