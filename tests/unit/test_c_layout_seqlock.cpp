@@ -14,11 +14,13 @@ extern "C" {
 }
 
 TEST(CLayout, SizesMatchV2) {
-    EXPECT_EQ(sizeof(irt_header_t), 64u);
+    /* v3.4 布局 v2：Header 由 64B 扩至 128B（CRC + flags + 区段偏移）。
+     * 点位与订阅者条目尺寸不变；前 44B 字段偏移与 v1 一致。 */
+    EXPECT_EQ(sizeof(irt_header_t), 128u);
     EXPECT_EQ(sizeof(indurtdb_point_t), 128u);
     EXPECT_EQ(sizeof(irt_subscriber_entry_t), 16u);
     EXPECT_EQ(IRT_MAGIC, 0x1DBA1DBAu);
-    EXPECT_EQ(IRT_SHM_VERSION, 1u);
+    EXPECT_EQ(IRT_SHM_VERSION, 2u);
 }
 
 TEST(CLayout, PointFieldOffsets) {
