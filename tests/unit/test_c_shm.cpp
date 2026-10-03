@@ -82,10 +82,11 @@ TEST_F(CShmTest, InitZeroSubscribers) {
     irt_header_t* hdr = irt_shm_header(&shm_);
     EXPECT_EQ(hdr->max_subscribers, 0u);
 
-    /* 总大小 = header + points + 索引区(定长开放寻址表) */
+    /* 总大小 = header + points + 索引区 + 元数据区(均定长, 随段预分配) */
     EXPECT_EQ(irt_shm_total_size(16, 0),
               sizeof(irt_header_t) + 16 * sizeof(indurtdb_point_t)
-              + irt_layout_index_size(16));
+              + irt_layout_index_size(16)
+              + irt_layout_meta_size(16));
 }
 
 TEST_F(CShmTest, TotalSizeFormula) {
@@ -94,8 +95,10 @@ TEST_F(CShmTest, TotalSizeFormula) {
     EXPECT_EQ(sz, sizeof(irt_header_t)
                 + 100 * sizeof(indurtdb_point_t)
                 + irt_layout_index_size(100)
+                + irt_layout_meta_size(100)
                 + 16  * sizeof(irt_subscriber_entry_t));
-    /* IRT_STATIC_ASSERT 已保证各 struct 大小; 索引区 = 桶数(256) × 8B = 2048
-     * v3.4 布局 v2: 128(header) + 100*128(points) + 2048(index) + 16*16(subs) */
-    EXPECT_EQ(sz, 128u + 12800u + 2048u + 256u);
+    /* IRT_STATIC_ASSERT 已保证各 struct 大小; 索引区 = 桶数(256) × 8B = 2048,
+     * 元数据区 = 100 × 32B = 3200
+     * v3.4 布局 v2: 128 + 100*128 + 2048(index) + 3200(meta) + 16*16(subs) */
+    EXPECT_EQ(sz, 128u + 12800u + 2048u + 3200u + 256u);
 }

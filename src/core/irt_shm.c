@@ -10,6 +10,7 @@
 
 #include "core/irt_shm.h"
 #include "core/irt_index.h"
+#include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -103,6 +104,11 @@ int irt_shm_init(irt_shm_t* s, const char* instance_id,
         irt_header_seal(hdr);
         /* 索引区置空 (EMPTY = UINT32_MAX), 随段一起交付给 attacher */
         irt_index_clear(s);
+        /* 元数据区清零: 默认 eur_min/max=0, deadband=0, flags=0 */
+        {
+            indurtdb_meta_t* meta = irt_shm_meta(s);
+            if (meta) memset(meta, 0, irt_layout_meta_size(max_points));
+        }
     } else {
         /* attach: 先判版本/布局兼容性。
          * 版本不匹配必须**拒绝挂载**：旧段按新布局解释会读到错误偏移，
@@ -176,4 +182,49 @@ irt_subscriber_entry_t* irt_shm_subscribers(const irt_shm_t* s) {
     if (!hdr || s->max_subscribers == 0) return NULL;
     if (hdr->off_subs == 0) return NULL;
     return (irt_subscriber_entry_t*)((char*)hdr + hdr->off_subs);
+}
+
+/* ---- v3.4 T3: 元数据区 (每点 32B, 冷数据) ---- */
+
+indurtdb_meta_t* irt_shm_meta(const irt_shm_t* s) {
+    irt_header_t* hdr = irt_shm_header(s);
+    if (!hdr || hdr->off_meta == 0) return NULL;
+    return (indurtdb_meta_t*)((char*)hdr + hdr->off_meta);
+}
+
+int irt_meta_set(irt_shm_t* s, uint32_t id, const indurtdb_meta_t* m) {
+    if (!s || !m) return INDURTDB_ERR_ARG;
+    if (id >= s->max_points) return INDURTDB_ERR_ARG;
+
+    indurtdb_meta_t* meta = irt_shm_meta(s);
+    if (!meta) return INDURTDB_ERR_ARG;
+
+    irt_header_t* hdr = irt_shm_header(s);
+    uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+    if (seq0 & 1ULL) return INDURTDB_ERR_BUSY;
+
+    memcpy(&meta[id], m, sizeof(indurtdb_meta_t));
+    __atomic_thread_fence(__ATOMIC_RELEASE);
+    irt_seqlock_write_end(&hdr->write_seq, seq0);
+    return 0;
+}
+
+int irt_meta_get(irt_shm_t* s, uint32_t id, indurtdb_meta_t* out) {
+    if (!s || !out) return INDURTDB_ERR_ARG;
+    if (id >= s->max_points) return INDURTDB_ERR_ARG;
+
+    indurtdb_meta_t* meta = irt_shm_meta(s);
+    if (!meta) return INDURTDB_ERR_ARG;
+
+    irt_header_t* hdr = irt_shm_header(s);
+    /* seqlock 读重试: 拷贝在窗口内, 窗口前后 seq 一致才采信 */
+    for (int attempt = 0; attempt < 16; ++attempt) {
+        uint64_t s0 = __atomic_load_n(&hdr->write_seq, __ATOMIC_ACQUIRE);
+        if (s0 & 1ULL) continue;
+        memcpy(out, &meta[id], sizeof(indurtdb_meta_t));
+        __atomic_thread_fence(__ATOMIC_ACQUIRE);
+        uint64_t s1 = __atomic_load_n(&hdr->write_seq, __ATOMIC_ACQUIRE);
+        if (s0 == s1) return 0;
+    }
+    return INDURTDB_ERR_BUSY;
 }

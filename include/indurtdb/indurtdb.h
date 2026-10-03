@@ -56,6 +56,16 @@ typedef struct {
     uint8_t  reserved[8];           /* 120–127: 保留（须为 0） */
 } __attribute__((packed, aligned(128))) indurtdb_point_t;
 
+/* ---- 元数据 (v3.4 新增, 每点 32B, 冷数据, 按 point_id O(1) 索引) ----
+ * 仅存储参数, 不参与热路径读写, 也不上送执行。 */
+typedef struct {
+    double   eur_min;     /* 0–7   : 工程量程下限 */
+    double   eur_max;     /* 8–15  : 工程量程上限 */
+    float    deadband;    /* 16–19 : 变化阈值（只存参数） */
+    uint32_t flags;       /* 20–23 : 是否启用量程 / 死区等（bit0=eur, bit1=deadband） */
+    uint8_t  reserved[8]; /* 24–31 : 保留（须为 0） */
+} __attribute__((packed, aligned(32))) indurtdb_meta_t;
+
 /* ---- 质量位（quality）分层布局 ----
  *   bit 0–3 : 基础质量码（16 种，现有 0–3 取值不变）
  *   bit 4–5 : 量程位（无 / Low / High / Constant）
@@ -157,6 +167,14 @@ int indurtdb_validate_id(uint32_t id);
  * 参数非法 INDURTDB_ERR_ARG；并发冲突重试耗尽 INDURTDB_ERR_BUSY。
  * 点位名须先经 indurtdb_load_config() 注册（或由 rtdbd 注册，T9）。 */
 int indurtdb_find_by_name(const char* name, uint32_t* out_id);
+
+/* v3.4 T3: 读写点位元数据 (每点 32B: eur_min/max/deadband/flags)。
+ * 冷数据, 按 id O(1) 索引, 不进入读写热路径, 也不上送执行。
+ * set 成功返回 INDURTDB_OK(0); 越界 id / 空指针返回 INDURTDB_ERR_ARG;
+ * 未初始化 INDURTDB_ERR_NOT_INIT; 并发写冲突重试耗尽 INDURTDB_ERR_BUSY。
+ * 读/写前须确保 id 对应的点已存在 (注册), 否则数据无意义。 */
+int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta);
+int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
 int  indurtdb_check_timeouts(uint64_t timeout_ns);
 uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);

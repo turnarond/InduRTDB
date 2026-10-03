@@ -314,6 +314,30 @@ int indurtdb_find_by_name(const char* name, uint32_t* out_id);
 
 ---
 
+### indurtdb_get_meta / indurtdb_set_meta
+
+```c
+int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta);
+int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
+```
+
+**v3.4 新增**。读写点位**元数据**（每点 32B 冷数据）：工程量程 `eur_min / eur_max`、变化阈值 `deadband`、启用位 `flags`（bit0=量程, bit1=死区）。
+
+| 返回值 | 含义 |
+|---|---|
+| `INDURTDB_OK` (0) | 成功 |
+| `INDURTDB_ERR_ARG` (-1) | 越界 id / 空指针 |
+| `INDURTDB_ERR_NOT_INIT` (-4) | 未 `indurtdb_initialize` |
+| `INDURTDB_ERR_BUSY` (-5) | 并发写冲突且重试耗尽（重试即可） |
+
+**约束**:
+- 元数据是**参数存储**，库**只存不执行**：量程/死区不被 RTDB 主动用于过滤或上送，消费方（如 `rtdbd`）自行据此处理。
+- `set` 走全局 seqlock 写锁（**注册/配置期**），`get` 走无锁读重试；**两者都不进入读写热路径** —— 频繁的点位值读写不会触碰元数据区。
+- 结构 `indurtdb_meta_t` 为 **32B**（`align(32)`），字段偏移已静态断言锁死；升级/跨语言互操作时须保持逐字节兼容。
+- 读/写前应确保 id 对应的点已注册（配置加载），否则数据无意义；未初始化/越界由返回码明确区分。
+
+---
+
 ### indurtdb_check_timeouts
 
 ```c
