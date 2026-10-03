@@ -25,9 +25,22 @@
  * 索引区（T2）与元数据区（T3）在 v3.4 后续任务启用；当前为 0。
  * 所有访问点一律走这里的偏移/Header 中的 off_*，禁止按 sizeof 硬算。 */
 
+/* 索引槽大小 (8B): 与 irt_index_slot_t 保持一致。
+ * 此处不 include core/irt_index.h（后者依赖本头），故以常量约束，
+ * 由 irt_types.h / irt_index.h 的静态断言共同保证。 */
+#define IRT_INDEX_SLOT_SIZE 8u
+
+/* 桶数: roundup_pow2(max_points * 2), 下限 8 —— 负载因子 ≤ 0.5 */
+static inline uint32_t irt_layout_buckets(uint32_t max_points) {
+    uint64_t want = (uint64_t)max_points * 2u;
+    uint32_t cap  = 8u;
+    while ((uint64_t)cap < want && cap <= (1u << 30)) cap <<= 1;
+    return cap;
+}
+
+/* v3.4 T2 启用: 定长开放寻址表, 8B/槽 */
 static inline size_t irt_layout_index_size(uint32_t max_points) {
-    (void)max_points;
-    return 0u;   /* v3.4 T2 起启用 */
+    return (size_t)irt_layout_buckets(max_points) * IRT_INDEX_SLOT_SIZE;
 }
 
 static inline size_t irt_layout_meta_size(uint32_t max_points) {

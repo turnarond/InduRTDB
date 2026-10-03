@@ -15,12 +15,24 @@ All notable changes to InduRTDB.
 - **版本协商**：段版本与布局不匹配即拒绝挂载并返回独立错误码 `IRT_SHM_ERR_VERSION`（-2），另区分 `IRT_SHM_ERR_ARG`(-1) 与 `IRT_SHM_ERR_CRC`(-3)。绝不按新布局解释旧段。
 - **区段偏移写进 Header**：`irt_shm_points()` / `irt_shm_subscribers()` 改读 `hdr->off_*`，不再按 `sizeof(irt_header_t)` 硬算；布局计算集中于 `irt_layout_*()` 内联函数，为 T2（索引区）/ T3（元数据区）预留。
 
+### Added（T2 — name→id 索引）
+
+- **共享内存内 name→id 索引**（`src/core/irt_index.{h,c}`）：开放寻址（线性探测）+ 墓碑删除，条目 8B `{hash32, point_id}`，桶数 `roundup_pow2(max_points × 2)`（负载因子 ≤ 0.5），哈希 FNV-1a 32；冲突比较复用点位区内 `name[64]`，**不重复存字符串**。定长预分配、**零堆分配**。
+- **公共 API `indurtdb_find_by_name(const char* name, uint32_t* out_id)`**：索引在共享内存内，对同段所有进程**全局一致**，集成方不必各自维护映射层。
+- **语义化错误码**：`INDURTDB_OK / ERR_ARG(-1) / ERR_NOT_FOUND(-2) / ERR_FULL(-3) / ERR_NOT_INIT(-4) / ERR_BUSY(-5)`。既有接口仍返回 -1，只判 `< 0` 的旧代码行为不变。
+- `indurtdb_load_config()` 在写入点位名后自动注册进索引（注册期集中写，不入热路径）。
+- Header 新增 `index_count`（offset 72，取自保留区）：索引当前装载条目数，供巡检/诊断使用（易变，不入 CRC）。
+
+**实测（负载 0.5，桶 1024 / 装载 512）**：平均探测长度 **0.246**，最长 **7**，冲突率 **14.1%** —— 远优于 O(B) 最坏界。满负载（对抗性填满全部桶）查找仍在**有限步内终止**并报 `ERR_FULL`，不死循环、不越界写。
+
 ### Changed
 - 段格式版本 `IRT_SHM_VERSION` 1 → 2。
-- 既有布局测试随之上移：`test_c_layout_seqlock` 期望 Header 128B / version 2；`test_c_shm` 总大小公式改为 `128 + N*128 + M*16`。
+- 段布局：点位区与订阅者心跳区之间插入**索引区**（预留的元数据区在 T3 启用）。既有布局测试随之改为按 `hdr->off_*` 断言，不再假设"点位区紧邻心跳区"。
+- 既有布局测试随之上移：`test_c_layout_seqlock` 期望 Header 128B / version 2；`test_c_shm` 总大小公式改为 `128 + N*128 + 索引区 + M*16`。
 
 ### Notes
 - 点位 `sizeof(indurtdb_point_t)` 仍为 **128**、既有字段偏移不变；bench 回归无退化（P99 peek / read / write 均 PASS）。
+- **段内存开销**：新增 Header 64B + 索引区 `8B × roundup_pow2(2N)`。例：10000 点由 1.28MB → 约 1.54MB（索引 256KB）。索引为一次性的定长预分配，运行期不增长。
 - 升级流程：停机 → 迁移（T5 工具）或清理 `/dev/shm/indurtdb_*` → 全进程同时升级。回退：重新部署 v3.3.x + 清理段。
 
 ---
