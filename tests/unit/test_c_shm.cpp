@@ -90,6 +90,7 @@ TEST_F(CShmTest, TotalSizeFormula) {
     EXPECT_EQ(sz, sizeof(irt_header_t)
                 + 100 * sizeof(indurtdb_point_t)
                 + 16  * sizeof(irt_subscriber_entry_t));
-    /* IRT_STATIC_ASSERT 已保证各 struct 大小: 64 + 100*128 + 16*16 = 64+12800+256 */
-    EXPECT_EQ(sz, 64u + 12800u + 256u);
+    /* IRT_STATIC_ASSERT 已保证各 struct 大小:
+     * v3.4 布局 v2: 128(header) + 100*128(points) + 16*16(subs) */
+    EXPECT_EQ(sz, 128u + 12800u + 256u);
 }

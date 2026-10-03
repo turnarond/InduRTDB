@@ -4,6 +4,27 @@ All notable changes to InduRTDB.
 
 ---
 
+## [未发布] — v3.4.0「布局 v2 与 API v2」(路线乙，方案见 `docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md`)
+
+**⚠️ ABI / 布局变更**：v3.4 段格式版本由 1 升至 2，Header 由 64B 扩至 128B。
+**v1 段一律拒绝挂载**（返回 `IRT_SHM_ERR_VERSION`），需经迁移工具或停机清理后重建；**不支持新旧进程混跑**。详见方案 §6。
+
+### Added（T1 — Header v2）
+- 共享内存 Header 扩至 **128 字节**：新增 `crc32`(44)、`flags`(48)、`scan_skipped`(52)、四个区段偏移 `off_points/off_index/off_meta/off_subs`(56–68) 与保留区。前 44 字节（magic / version / max_points / max_subscribers / write_seq / owner_pid / stats）**偏移与语义不变**，便于迁移工具定位。
+- **Header CRC32**（位运算实现，无查表、无静态存储）：覆盖**布局描述字段**（magic/version/容量 + flags/区段偏移），**刻意排除**易变字段（write_seq / owner_pid / stats / scan_skipped）——否则段一旦被写过 CRC 即失效，attach 将永远失败（T1 绿阶段实测踩到）。
+- **版本协商**：段版本与布局不匹配即拒绝挂载并返回独立错误码 `IRT_SHM_ERR_VERSION`（-2），另区分 `IRT_SHM_ERR_ARG`(-1) 与 `IRT_SHM_ERR_CRC`(-3)。绝不按新布局解释旧段。
+- **区段偏移写进 Header**：`irt_shm_points()` / `irt_shm_subscribers()` 改读 `hdr->off_*`，不再按 `sizeof(irt_header_t)` 硬算；布局计算集中于 `irt_layout_*()` 内联函数，为 T2（索引区）/ T3（元数据区）预留。
+
+### Changed
+- 段格式版本 `IRT_SHM_VERSION` 1 → 2。
+- 既有布局测试随之上移：`test_c_layout_seqlock` 期望 Header 128B / version 2；`test_c_shm` 总大小公式改为 `128 + N*128 + M*16`。
+
+### Notes
+- 点位 `sizeof(indurtdb_point_t)` 仍为 **128**、既有字段偏移不变；bench 回归无退化（P99 peek / read / write 均 PASS）。
+- 升级流程：停机 → 迁移（T5 工具）或清理 `/dev/shm/indurtdb_*` → 全进程同时升级。回退：重新部署 v3.3.x + 清理段。
+
+---
+
 ## [3.3.0] — 2026-10-02「读写分离与双通道」
 
 ### Added

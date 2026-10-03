@@ -10,14 +10,67 @@
 
 #include "core/irt_shm.h"
 #include <string.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <signal.h>
 
+/* ---- v3.4 布局 v2：Header CRC32 ----
+ * 位运算实现（无查表、无静态存储），避免共享内存库引入额外内存占用。
+ * 多项式 0xEDB88320（IEEE 802.3），初值/结果异或 0xFFFFFFFF。 */
+static uint32_t irt_crc32_update(uint32_t crc, const void* data, size_t len)
+{
+    const uint8_t* p = (const uint8_t*)data;
+    for (size_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (int b = 0; b < 8; b++) {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return crc;
+}
+
+/* 计算 Header 的 CRC。
+ *
+ * **覆盖范围：仅布局描述字段**，即创建后不再变化的部分：
+ *   magic / version / max_points / max_subscribers  (0..15)
+ *   flags / off_points / off_index / off_meta / off_subs (48..71)
+ *
+ * 刻意**排除**易变字段：write_seq（seqlock 每写递增）、owner_pid（崩溃接管会改）、
+ * stats（每次读写累加）、scan_skipped。若把它们纳入，段一旦被写过 CRC 即失效，
+ * attach 会永远失败 —— 这是 T1 绿阶段实测踩到的真实错误。
+ *
+ * 约束：任何修改布局描述字段的路径，修改后必须重新 irt_header_seal()，
+ * 否则 attach 侧会以 CRC 失败拒绝挂载。 */
+static uint32_t irt_header_crc32_of(const irt_header_t* h)
+{
+    const uint8_t* raw = (const uint8_t*)h;
+    uint32_t crc = 0xFFFFFFFFu;
+
+    crc = irt_crc32_update(crc, raw + offsetof(irt_header_t, magic), 16u);
+    crc = irt_crc32_update(crc, raw + offsetof(irt_header_t, flags), 24u);
+    return crc ^ 0xFFFFFFFFu;
+}
+
+int irt_header_seal(irt_header_t* h)
+{
+    if (!h) return -1;
+    h->crc32 = 0u;
+    h->crc32 = irt_header_crc32_of(h);
+    return 0;
+}
+
+int irt_header_verify(const irt_header_t* h)
+{
+    if (!h) return 0;
+    if (h->magic != IRT_MAGIC) return 0;
+    return irt_header_crc32_of(h) == h->crc32 ? 1 : 0;
+}
+
 int irt_shm_init(irt_shm_t* s, const char* instance_id,
                  uint32_t max_points, uint32_t max_subscribers) {
     if (!s || !instance_id || instance_id[0] == '\0'
-        || max_points == 0) return -1;
+        || max_points == 0) return IRT_SHM_ERR_ARG;
 
     memset(s, 0, sizeof(*s));
     s->max_points      = max_points;
@@ -41,15 +94,32 @@ int irt_shm_init(irt_shm_t* s, const char* instance_id,
         hdr->max_points     = max_points;
         hdr->max_subscribers = max_subscribers;
         hdr->owner_pid      = (int32_t)getpid();
+        /* 布局 v2：区段偏移写进 Header，访问点一律读 off_* */
+        hdr->off_points = irt_layout_off_points();
+        hdr->off_index  = irt_layout_off_index(max_points);
+        hdr->off_meta   = irt_layout_off_meta(max_points);
+        hdr->off_subs   = irt_layout_off_subs(max_points);
+        irt_header_seal(hdr);
     } else {
-        /* attach: 校验段兼容性 */
-        if (hdr->magic    != IRT_MAGIC
-         || hdr->version  != IRT_SHM_VERSION
-         || hdr->max_points     < max_points
+        /* attach: 先判版本/布局兼容性。
+         * 版本不匹配必须**拒绝挂载**：旧段按新布局解释会读到错误偏移，
+         * 属于静默数据错乱。调用方据此走迁移流程（v3.4 迁移工具）。 */
+        if (hdr->magic   != IRT_MAGIC
+         || hdr->version != IRT_SHM_VERSION) {
+            irt_shm_os_unmap(&s->os);
+            memset(s, 0, sizeof(*s));
+            return IRT_SHM_ERR_VERSION;
+        }
+        if (hdr->max_points     < max_points
          || hdr->max_subscribers < max_subscribers) {
             irt_shm_os_unmap(&s->os);
             memset(s, 0, sizeof(*s));
-            return -1;
+            return IRT_SHM_ERR_ARG;
+        }
+        if (!irt_header_verify(hdr)) {
+            irt_shm_os_unmap(&s->os);
+            memset(s, 0, sizeof(*s));
+            return IRT_SHM_ERR_CRC;
         }
 
         /* ---- v3.1 崩溃恢复 ---- */
@@ -92,13 +162,15 @@ irt_header_t* irt_shm_header(const irt_shm_t* s) {
 
 indurtdb_point_t* irt_shm_points(const irt_shm_t* s) {
     irt_header_t* hdr = irt_shm_header(s);
-    return hdr ? (indurtdb_point_t*)((char*)hdr + sizeof(irt_header_t)) : NULL;
+    if (!hdr) return NULL;
+    /* 布局 v2：按 Header 中的 off_points，不再按 sizeof(header) 硬算 */
+    if (hdr->off_points == 0) return NULL;   /* 未 seal 的裸段，拒绝解释 */
+    return (indurtdb_point_t*)((char*)hdr + hdr->off_points);
 }
 
 irt_subscriber_entry_t* irt_shm_subscribers(const irt_shm_t* s) {
-    if (!s || s->max_subscribers == 0) return NULL;
-    indurtdb_point_t* pts = irt_shm_points(s);
-    if (!pts) return NULL;
-    return (irt_subscriber_entry_t*)((char*)pts
-           + (size_t)s->max_points * sizeof(indurtdb_point_t));
+    irt_header_t* hdr = irt_shm_header(s);
+    if (!hdr || s->max_subscribers == 0) return NULL;
+    if (hdr->off_subs == 0) return NULL;
+    return (irt_subscriber_entry_t*)((char*)hdr + hdr->off_subs);
 }

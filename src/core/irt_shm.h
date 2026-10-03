@@ -15,11 +15,52 @@
 /* 段名前缀 */
 #define IRT_SHM_PREFIX  "/indurtdb_"
 
-/* 总大小: header(64) + N*128(point) + M*16(subscriber) */
+/* irt_shm_init 错误码（负值）：区分"参数/通用失败"与"布局不兼容"，
+ * 使调用方能明确提示"需迁移"而非笼统失败。 */
+#define IRT_SHM_ERR_ARG     (-1)   /* 参数非法 / 容量不足 */
+#define IRT_SHM_ERR_VERSION (-2)   /* 段版本与布局不兼容，拒绝挂载 */
+#define IRT_SHM_ERR_CRC     (-3)   /* Header 完整性校验失败 */
+
+/* ---- 布局 v2：区段大小与偏移集中计算 ----
+ * 索引区（T2）与元数据区（T3）在 v3.4 后续任务启用；当前为 0。
+ * 所有访问点一律走这里的偏移/Header 中的 off_*，禁止按 sizeof 硬算。 */
+
+static inline size_t irt_layout_index_size(uint32_t max_points) {
+    (void)max_points;
+    return 0u;   /* v3.4 T2 起启用 */
+}
+
+static inline size_t irt_layout_meta_size(uint32_t max_points) {
+    (void)max_points;
+    return 0u;   /* v3.4 T3 起启用 */
+}
+
+static inline uint32_t irt_layout_off_points(void) {
+    return (uint32_t)sizeof(irt_header_t);
+}
+
+static inline uint32_t irt_layout_off_index(uint32_t max_points) {
+    return irt_layout_off_points()
+         + (uint32_t)((size_t)max_points * sizeof(indurtdb_point_t));
+}
+
+static inline uint32_t irt_layout_off_meta(uint32_t max_points) {
+    return irt_layout_off_index(max_points)
+         + (uint32_t)irt_layout_index_size(max_points);
+}
+
+static inline uint32_t irt_layout_off_subs(uint32_t max_points) {
+    return irt_layout_off_meta(max_points)
+         + (uint32_t)irt_layout_meta_size(max_points);
+}
+
+/* 总大小: header(128) + N*128(point) + index + meta + M*16(subscriber) */
 static inline size_t irt_shm_total_size(uint32_t max_points,
                                          uint32_t max_subscribers) {
     return sizeof(irt_header_t)
          + (size_t)max_points    * sizeof(indurtdb_point_t)
+         + irt_layout_index_size(max_points)
+         + irt_layout_meta_size(max_points)
          + (size_t)max_subscribers * sizeof(irt_subscriber_entry_t);
 }
 
@@ -39,6 +80,12 @@ int  irt_shm_init(irt_shm_t* s, const char* instance_id,
 void irt_shm_shutdown(irt_shm_t* s);
 
 bool irt_shm_is_owner(const irt_shm_t* s);
+
+/* Header 完整性：计算并写入 CRC（seal）/ 校验 magic+CRC（verify）。
+ * verify 返回 1 表示完整，0 表示被篡改或 magic 不符。
+ * CRC 覆盖整个 Header，但跳过 crc32 字段自身。 */
+int irt_header_seal(irt_header_t* h);
+int irt_header_verify(const irt_header_t* h);
 
 /* 直接返回共享内存中的子区域指针 */
 irt_header_t*           irt_shm_header(const irt_shm_t* s);

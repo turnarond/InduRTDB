@@ -18,24 +18,51 @@
 #endif
 
 #define IRT_MAGIC        0x1DBA1DBAu
-#define IRT_SHM_VERSION  1u
+/* v3.3 及以前为 1；v3.4 布局 v2 起为 2。
+ * 版本不匹配一律拒绝挂载，绝不按新布局解释旧段。 */
+#define IRT_SHM_VERSION  2u
 
-/* 共享内存头部 (64 字节, == v2.x InduRTDBHeader)
- * v3.1: 在填充区添加 owner_pid 用于崩溃恢复; 保持 64 字节不变 */
+/* 共享内存头部 (v3.4 布局 v2: 128 字节)
+ *
+ * 兼容约束：前 44 字节（magic / version / max_points / max_subscribers /
+ * write_seq / owner_pid / stats）与 v1 逐字节同偏移，旧字段语义不变。
+ * v2 新增：crc32、flags、scan_skipped、四个区段偏移 + 保留区。
+ *
+ * 区段偏移写进 Header 而非按 sizeof 硬算：后续新增/调整区段时
+ * 只需改布局计算，不再牵动所有访问点。
+ */
 typedef struct {
-    uint32_t magic;
-    uint32_t version;
-    uint32_t max_points;
-    uint32_t max_subscribers;
-    uint64_t write_seq;          /* Seqlock 序列号 */
-    int32_t  owner_pid;          /* 创建进程 PID (0=未知, 填充区复用) */
+    uint32_t magic;                 /* 0   */
+    uint32_t version;               /* 4   */
+    uint32_t max_points;            /* 8   */
+    uint32_t max_subscribers;       /* 12  */
+    uint64_t write_seq;             /* 16  Seqlock 序列号 */
+    int32_t  owner_pid;             /* 24  创建进程 PID (0=未知) */
     struct {
-        uint64_t writes;
-        uint64_t timeouts;
+        uint64_t writes;            /* 28  */
+        uint64_t timeouts;          /* 36  */
     } stats;
+    uint32_t crc32;                 /* 44  Header 完整性校验（不含本字段） */
+    uint32_t flags;                 /* 48  预留特性位 */
+    uint32_t scan_skipped;          /* 52  v3.4 T7: 超时扫描被跳过的点数 */
+    uint32_t off_points;            /* 56  点位区段内偏移 */
+    uint32_t off_index;             /* 60  name→id 索引区段内偏移（T2 启用） */
+    uint32_t off_meta;              /* 64  元数据区段内偏移（T3 启用） */
+    uint32_t off_subs;              /* 68  订阅者心跳区段内偏移 */
+    uint8_t  reserved[56];          /* 72..127 */
 } __attribute__((packed, aligned(64))) irt_header_t;
 
-IRT_STATIC_ASSERT(sizeof(irt_header_t) == 64, "header must be 64 bytes");
+IRT_STATIC_ASSERT(sizeof(irt_header_t) == 128, "v3.4 layout v2: header must be 128 bytes");
+
+/* 前 44 字节与 v1 同偏移 —— 迁移工具与旧版读取代码可据此定位 */
+IRT_STATIC_ASSERT(offsetof(irt_header_t, magic)            == 0,  "magic offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, version)          == 4,  "version offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, max_points)       == 8,  "max_points offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, max_subscribers)  == 12, "max_subscribers offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, write_seq)        == 16, "write_seq offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, owner_pid)        == 24, "owner_pid offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, stats)            == 28, "stats offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, crc32)            == 44, "crc32 offset");
 
 /* 订阅者心跳条目 (16 字节, == v2.x SubscriberEntry) */
 typedef struct {
