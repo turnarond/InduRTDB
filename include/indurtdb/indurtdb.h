@@ -81,6 +81,17 @@ typedef struct {
 #define INDURTDB_QUALITY_MAKE(base, limit) \
         ((uint8_t)(((base) & 0x0Fu) | (((limit) & 0x03u) << 4)))
 
+/* ==== 错误码 (v3.4 起新增接口返回语义化负值) ====
+ * 既有接口仍返回 -1（= INDURTDB_ERR_ARG 语义），新增接口使用下列码，
+ * 便于调用方区分"参数错 / 没找到 / 空间满 / 未初始化 / 忙"。
+ * 向前兼容：旧代码只判 < 0 或 != 0 的行为完全不变。 */
+#define INDURTDB_OK          0
+#define INDURTDB_ERR_ARG     (-1)   /* 参数非法（空指针、空名、越界 id） */
+#define INDURTDB_ERR_NOT_FOUND (-2) /* 按名未找到点位 */
+#define INDURTDB_ERR_FULL    (-3)   /* 索引/表已满，无法注册 */
+#define INDURTDB_ERR_NOT_INIT (-4)  /* 未初始化 */
+#define INDURTDB_ERR_BUSY    (-5)   /* 并发写冲突，重试耗尽 */
+
 /* ==== 订阅回调 ==== */
 typedef void (*indurtdb_callback_t)(uint32_t id,
     const indurtdb_point_t* data, void* user_data);
@@ -140,6 +151,12 @@ void indurtdb_update_heartbeat(void);
 
 /* ==== 校验/统计/错误 ==== */
 int indurtdb_validate_id(uint32_t id);
+
+/* v3.4: 按点位名查找 id（共享内存内 name→id 索引，全局一致）。
+ * 成功返回 INDURTDB_OK(0) 并写 *out_id；未找到返回 INDURTDB_ERR_NOT_FOUND；
+ * 参数非法 INDURTDB_ERR_ARG；并发冲突重试耗尽 INDURTDB_ERR_BUSY。
+ * 点位名须先经 indurtdb_load_config() 注册（或由 rtdbd 注册，T9）。 */
+int indurtdb_find_by_name(const char* name, uint32_t* out_id);
 int  indurtdb_check_timeouts(uint64_t timeout_ns);
 uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);

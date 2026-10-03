@@ -28,6 +28,7 @@ set(IRT_CORE_SRC
     src/core/irt_point_manager.c
     src/core/irt_subscription.c
     src/core/irt_config.c
+    src/core/irt_index.c
     src/api/indurtdb.c
     ${IRT_OSAL_SRC}
 )

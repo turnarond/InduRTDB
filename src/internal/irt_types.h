@@ -49,7 +49,8 @@ typedef struct {
     uint32_t off_index;             /* 60  name→id 索引区段内偏移（T2 启用） */
     uint32_t off_meta;              /* 64  元数据区段内偏移（T3 启用） */
     uint32_t off_subs;              /* 68  订阅者心跳区段内偏移 */
-    uint8_t  reserved[56];          /* 72..127 */
+    uint32_t index_count;           /* 72  T2: 索引当前装载条目数（易变, 不入 CRC） */
+    uint8_t  reserved[52];          /* 76..127 */
 } __attribute__((packed, aligned(64))) irt_header_t;
 
 IRT_STATIC_ASSERT(sizeof(irt_header_t) == 128, "v3.4 layout v2: header must be 128 bytes");
@@ -63,6 +64,7 @@ IRT_STATIC_ASSERT(offsetof(irt_header_t, write_seq)        == 16, "write_seq off
 IRT_STATIC_ASSERT(offsetof(irt_header_t, owner_pid)        == 24, "owner_pid offset");
 IRT_STATIC_ASSERT(offsetof(irt_header_t, stats)            == 28, "stats offset");
 IRT_STATIC_ASSERT(offsetof(irt_header_t, crc32)            == 44, "crc32 offset");
+IRT_STATIC_ASSERT(offsetof(irt_header_t, index_count)      == 72, "index_count offset");
 
 /* 订阅者心跳条目 (16 字节, == v2.x SubscriberEntry) */
 typedef struct {

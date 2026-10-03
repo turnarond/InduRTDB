@@ -9,6 +9,7 @@
  */
 
 #include "core/irt_shm.h"
+#include "core/irt_index.h"
 #include <string.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -100,6 +101,8 @@ int irt_shm_init(irt_shm_t* s, const char* instance_id,
         hdr->off_meta   = irt_layout_off_meta(max_points);
         hdr->off_subs   = irt_layout_off_subs(max_points);
         irt_header_seal(hdr);
+        /* 索引区置空 (EMPTY = UINT32_MAX), 随段一起交付给 attacher */
+        irt_index_clear(s);
     } else {
         /* attach: 先判版本/布局兼容性。
          * 版本不匹配必须**拒绝挂载**：旧段按新布局解释会读到错误偏移，

@@ -290,6 +290,30 @@ int indurtdb_validate_id(uint32_t id);
 
 检查 id 是否在 `[0, max_points)` 范围内。返回 1 有效, 0 无效。
 
+### indurtdb_find_by_name
+
+```c
+int indurtdb_find_by_name(const char* name, uint32_t* out_id);
+```
+
+**v3.4 新增**。按点位名查找 id —— 索引位于共享内存内, 对同段的所有进程**全局一致**, 集成方无需各自维护"名字→id"映射层。
+
+| 返回值 | 含义 |
+|---|---|
+| `INDURTDB_OK` (0) | 找到, `*out_id` 为点位 id |
+| `INDURTDB_ERR_NOT_FOUND` (-2) | 该名字未注册 |
+| `INDURTDB_ERR_ARG` (-1) | 参数非法（空指针 / 空名） |
+| `INDURTDB_ERR_NOT_INIT` (-4) | 未 `indurtdb_initialize` |
+| `INDURTDB_ERR_BUSY` (-5) | 并发写冲突且重试耗尽（重试即可） |
+
+**约束**:
+- 点位名须先注册才会被索引 —— 当前注册途径为 `indurtdb_load_config()`（v3.4 T9 起 `rtdbd` 亦负责注册）。
+- 索引为**定长开放寻址表**（桶数 = `roundup_pow2(max_points × 2)`, 8B/槽, 负载因子 ≤ 0.5）, 随段一次性预分配, **无堆分配**; 段内内存开销约为 `8B × 桶数`（如 10000 点约 256KB）。
+- 注册/注销走既有全局 seqlock（**注册期集中写**）, 查找走无锁读重试, **不进入读写热路径**。
+- 未初始化时查找返回 `INDURTDB_ERR_NOT_INIT`, 不会创建段。
+
+---
+
 ### indurtdb_check_timeouts
 
 ```c

@@ -11,6 +11,7 @@
 #include "core/irt_point_manager.h"
 #include "core/irt_subscription.h"
 #include "core/irt_config.h"
+#include "core/irt_index.h"
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
@@ -260,10 +261,29 @@ int indurtdb_load_config(const char* config_path) {
 
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
+
+        /* 注册进 name→id 索引 (写锁已释放后再单独取锁, 避免嵌套 write_begin 自锁)。
+         * 注册期集中写, 不进入热路径; 索引失败不影响点位本身可用。 */
+        irt_index_insert(&g_rtdb.shm, p->name, pm->id);
     }
 
     irt_point_config_free(&batch);
     return 0;
+}
+
+int indurtdb_find_by_name(const char* name, uint32_t* out_id) {
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) {
+        set_error("not initialized"); return INDURTDB_ERR_NOT_INIT;
+    }
+    if (!name || name[0] == '\0' || !out_id) {
+        set_error("invalid argument"); return INDURTDB_ERR_ARG;
+    }
+
+    int rc = irt_index_lookup(&g_rtdb.shm, name, out_id);
+    if (rc == INDURTDB_ERR_NOT_FOUND) set_error("point name not found");
+    else if (rc == INDURTDB_ERR_BUSY) set_error("index busy, retry");
+    else if (rc != INDURTDB_OK)       set_error("index lookup failed");
+    return rc;
 }
 
 void indurtdb_update_heartbeat(void) {
