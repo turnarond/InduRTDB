@@ -44,8 +44,8 @@ static inline size_t irt_layout_index_size(uint32_t max_points) {
 }
 
 static inline size_t irt_layout_meta_size(uint32_t max_points) {
-    (void)max_points;
-    return 0u;   /* v3.4 T3 起启用 */
+    /* 每点 32B; meta_size 即 max_points × 32 */
+    return (size_t)max_points * 32u;
 }
 
 static inline uint32_t irt_layout_off_points(void) {
@@ -104,5 +104,12 @@ int irt_header_verify(const irt_header_t* h);
 irt_header_t*           irt_shm_header(const irt_shm_t* s);
 indurtdb_point_t*       irt_shm_points(const irt_shm_t* s);
 irt_subscriber_entry_t* irt_shm_subscribers(const irt_shm_t* s);
+indurtdb_meta_t*        irt_shm_meta(const irt_shm_t* s);   /* v3.4 T3 */
+
+/* 元数据 (v3.4 T3): 每点 32B, 冷数据, 按 point_id O(1) 索引。
+ * set 走写锁 (注册/配置期), get 走无锁读重试; 两者都不进读写热路径。
+ * 返回 0 / INDURTDB_ERR_ARG(越界 id 或空指针) / INDURTDB_ERR_BUSY(写冲突)。 */
+int irt_meta_set(irt_shm_t* s, uint32_t id, const indurtdb_meta_t* m);
+int irt_meta_get(irt_shm_t* s, uint32_t id, indurtdb_meta_t* out);
 
 #endif /* IRT_CORE_IRT_SHM_H_ */

@@ -286,6 +286,32 @@ int indurtdb_find_by_name(const char* name, uint32_t* out_id) {
     return rc;
 }
 
+int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta) {
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) {
+        set_error("not initialized"); return INDURTDB_ERR_NOT_INIT;
+    }
+    if (!meta) { set_error("null meta"); return INDURTDB_ERR_ARG; }
+
+    int rc = irt_meta_get(&g_rtdb.shm, id, meta);
+    if (rc == INDURTDB_ERR_ARG)       set_error("id out of range");
+    else if (rc == INDURTDB_ERR_BUSY) set_error("meta busy, retry");
+    else if (rc != INDURTDB_OK)       set_error("meta get failed");
+    return rc;
+}
+
+int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta) {
+    if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) {
+        set_error("not initialized"); return INDURTDB_ERR_NOT_INIT;
+    }
+    if (!meta) { set_error("null meta"); return INDURTDB_ERR_ARG; }
+
+    int rc = irt_meta_set(&g_rtdb.shm, id, meta);
+    if (rc == INDURTDB_ERR_ARG)       set_error("id out of range");
+    else if (rc == INDURTDB_ERR_BUSY) set_error("meta busy, retry");
+    else if (rc != INDURTDB_OK)       set_error("meta set failed");
+    return rc;
+}
+
 void indurtdb_update_heartbeat(void) {
     if (!__atomic_load_n(&g_rtdb.initialized, __ATOMIC_ACQUIRE)) return;
     irt_sub_update_heartbeat(&g_rtdb.sub, (int32_t)getpid());

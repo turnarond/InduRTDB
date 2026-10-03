@@ -21,6 +21,20 @@ All notable changes to InduRTDB.
 - **公共 API `indurtdb_find_by_name(const char* name, uint32_t* out_id)`**：索引在共享内存内，对同段所有进程**全局一致**，集成方不必各自维护映射层。
 - **语义化错误码**：`INDURTDB_OK / ERR_ARG(-1) / ERR_NOT_FOUND(-2) / ERR_FULL(-3) / ERR_NOT_INIT(-4) / ERR_BUSY(-5)`。既有接口仍返回 -1，只判 `< 0` 的旧代码行为不变。
 - `indurtdb_load_config()` 在写入点位名后自动注册进索引（注册期集中写，不入热路径）。
+
+### Added（T3 — 元数据区）
+
+- **共享内存内元数据区**（`irt_shm_meta` / `irt_meta_set` / `irt_meta_get`，定义于 `irt_shm.{h,c}`）：每点 **32B** 冷数据，按 `point_id` O(1) 索引，布局与方案 §3.3 一致：`eur_min(8B) / eur_max(8B) / deadband(4B) / flags(4B) / reserved(8B)`。
+- **公共 API** `indurtdb_get_meta(uint32_t id, indurtdb_meta_t*)` / `indurtdb_set_meta(uint32_t id, const indurtdb_meta_t*)`。返回值沿用 T2 语义化错误码（`OK / ERR_ARG(越界 id) / ERR_NOT_INIT / ERR_BUSY`）。
+- **热路径隔离**：`irt_meta_set` 走全局 seqlock 写锁（注册/配置期），`irt_meta_get` 走无锁读重试；元数据区**不进入读写热路径**（用例 `Meta.NotInHotPath` 以字节级探针验证：1000 次点位值写读后元数据区原封不动）。
+- 新增 `indurtdb_meta_t`（32B，`align(32)`），含 `IRT_STATIC_ASSERT(sizeof == 32)` 与字段偏移断言锁死 ABI。
+- owner 建段时元数据区清零（`eur_min/max=0, deadband=0, flags=0`），符合 `Meta.DefaultIsZero`。
+- 段布局新增元数据区：点位区 → 索引区 → **元数据区** → 订阅者心跳区；`off_meta / off_subs` 相应顺延。`test_c_shm` 总大小公式随之加入 `irt_layout_meta_size(max_points)`。
+
+**段内存开销（累计）**：索引 `8B×roundup(2N)` + 元数据 `32B×N`。10000 点约 +256KB（索引）+ **320KB（元数据）** → 段约 **1.86MB**（v3.3 为 1.28MB）。均为一次性定长预分配，运行期不增长。
+
+### Changed
+- 段布局 v2 新增元数据区段（v3.4 T3）。
 - Header 新增 `index_count`（offset 72，取自保留区）：索引当前装载条目数，供巡检/诊断使用（易变，不入 CRC）。
 
 **实测（负载 0.5，桶 1024 / 装载 512）**：平均探测长度 **0.246**，最长 **7**，冲突率 **14.1%** —— 远优于 O(B) 最坏界。满负载（对抗性填满全部桶）查找仍在**有限步内终止**并报 `ERR_FULL`，不死循环、不越界写。
