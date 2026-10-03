@@ -7,6 +7,46 @@
 
 ---
 
+## API v2：句柄化（v3.4 新增）
+
+v3.4 起支持**去单例化**：同一进程可同时持有多个实例，各自读写互不干扰。
+
+- `indurtdb_t`：不透明句柄（定义于库实现）。
+- `indurtdb_h_open(&h, instance_id, &cfg)` / `indurtdb_h_close(h)`：打开 / 关闭实例。
+- v2 函数一律加 `_h_` 前缀（C 无重载），入参首位为 `indurtdb_t* h`，返回**语义化错误码**（见下）。
+- v1 的 26 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
+
+### 多实例示例
+
+```c
+indurtdb_cfg_t cfg = { .max_points = 64, .max_subscribers = 4 };
+indurtdb_t *a = NULL, *b = NULL;
+indurtdb_h_open(&a, "plantA", &cfg);
+indurtdb_h_open(&b, "plantB", &cfg);
+
+indurtdb_h_write_int32(a, 1, 100);   /* 写 A */
+indurtdb_h_write_int32(b, 1, 200);   /* 写 B, 不污染 A */
+int32_t v;
+indurtdb_h_read_int32(a, 1, &v);     /* v == 100 */
+indurtdb_h_close(a);
+indurtdb_h_close(b);
+```
+
+### 语义化错误码（v3.4 起部分接口返回）
+
+| 码 | 值 | 含义 |
+|---|---|---|
+| `INDURTDB_OK` | 0 | 成功 |
+| `INDURTDB_ERR_ARG` | -1 | 参数非法（空指针 / 越界 id / 空名 / max_points=0） |
+| `INDURTDB_ERR_NOT_FOUND` | -2 | 按名未找到 |
+| `INDURTDB_ERR_FULL` | -3 | 索引/表满，或实例槽位耗尽 |
+| `INDURTDB_ERR_NOT_INIT` | -4 | 实例未初始化（仅 v2 `_h_*` 返回；v1 仍返回 -1） |
+| `INDURTDB_ERR_BUSY` | -5 | 并发写冲突，重试耗尽 |
+
+> v1 接口向后兼容：只判 `< 0` 的旧代码行为完全不变；`ERR_NOT_INIT` 对 v1 被映射回 `-1`。
+
+---
+
 ## 类型定义
 
 ### indurtdb_point_t

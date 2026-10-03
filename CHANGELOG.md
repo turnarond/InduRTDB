@@ -33,6 +33,20 @@ All notable changes to InduRTDB.
 
 **段内存开销（累计）**：索引 `8B×roundup(2N)` + 元数据 `32B×N`。10000 点约 +256KB（索引）+ **320KB（元数据）** → 段约 **1.86MB**（v3.3 为 1.28MB）。均为一次性定长预分配，运行期不增长。
 
+### Added（T4 — API v2 句柄化 / 去单例）
+
+- **API v2 句柄化**：同一进程可同时持有多个实例。`indurtdb_t` 为不透明句柄，`indurtdb_h_open(indurtdb_t** out, instance_id, cfg*)` / `indurtdb_h_close(h)`；`indurtdb_cfg_t { max_points, max_subscribers }`。
+- **全量 v2 函数**：`indurtdb_h_*` 覆盖 v1 全部操作（读写 / 区间 / 订阅 / 配置 / 心跳 / 索引 / 元数据 / 校验 / 统计），入参首位是 `indurtdb_t* h`，返回语义化错误码（`OK / ERR_ARG / ERR_NOT_FOUND / ERR_FULL / ERR_NOT_INIT / ERR_BUSY`）。
+- **v1 保留为薄封装**：v1 全局函数 = 默认句柄 `g_default` 的转发，行为**完全不变**（既有调用方零改动）。`g_default` 仍走原 fork 检测逻辑（子进程自动重置 owner）。
+- **实例表定长零堆**：`static indurtdb_t g_registry[64]` + 位图 `g_used_mask`，满足"核心层无堆"不变式；槽位耗尽管 `indurtdb_h_open` 返回 `ERR_FULL`。
+- 公共头引入 `INDURTDB_DEPRECATED` 预留宏（本期**未**标注 v1，因 -Werror 会使调用 v1 的既存测试/示例编译失败）；v1 标注 `deprecated` 并移除推迟到 v3.5（届时同步迁移测试与调用方）。
+
+**实测 / 验证**：
+- 用例 `ApiV2.MultipleInstancesInOneProcess`：同进程两实例写同一 id 互不污染。
+- `ApiV2.FindByNameIsPerInstance`：同名 `sensor.x` 在两实例注册到不同 id，各自只解析到自己（索引按实例隔离）。
+- `ApiV2.SingletonRegression`：旧 `indurtdb_initialize` 仍可用。
+- 22 个既有 v1 测试全量无回归。
+
 ### Changed
 - 段布局 v2 新增元数据区段（v3.4 T3）。
 - Header 新增 `index_count`（offset 72，取自保留区）：索引当前装载条目数，供巡检/诊断使用（易变，不入 CRC）。

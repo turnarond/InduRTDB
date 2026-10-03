@@ -180,6 +180,67 @@ uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);
 const char* indurtdb_get_last_error(void);
 
+/* ==== API v2: 句柄化 (v3.4 新增) ====
+ * 去单例化: 同一进程可同时持有多个实例 (indurtdb_t* 不透明句柄),
+ * 各自读写互不干扰。v1 的全局函数保留为默认句柄的薄封装 (见下), 不破既有调用方。
+ *
+ * 命名: v2 一律加 `_h_` 前缀 (C 无重载); 与内部 `irt_` 前缀不冲突。 */
+typedef struct indurtdb indurtdb_t;   /* 不透明句柄, 定义见库实现 */
+
+typedef struct {
+    uint32_t max_points;        /* 必填 > 0 */
+    uint32_t max_subscribers;   /* 0 表示不订阅 */
+} indurtdb_cfg_t;
+
+/* 打开/创建一个实例。成功返回 0 并把实例写入 *out;
+ * 参数非法 INDURTDB_ERR_ARG; 实例槽位耗尽 INDURTDB_ERR_FULL。
+ * 同 instance_id 跨进程仍共享同一段 (与 v1 行为一致)。 */
+int indurtdb_h_open(indurtdb_t** out, const char* instance_id,
+                    const indurtdb_cfg_t* cfg);
+/* 关闭实例 (进程本地 detach; owner 进程负责 shm_unlink)。
+ * 对同一句柄多次调用安全 (幂等)。 */
+void indurtdb_h_close(indurtdb_t* h);
+bool indurtdb_h_is_initialized(const indurtdb_t* h);
+
+int indurtdb_h_write_bool(indurtdb_t* h, uint32_t id, bool value);
+int indurtdb_h_write_int32(indurtdb_t* h, uint32_t id, int32_t value);
+int indurtdb_h_write_double(indurtdb_t* h, uint32_t id, double value);
+int indurtdb_h_write_string(indurtdb_t* h, uint32_t id, const char* value);
+int indurtdb_h_write_bool_ts(indurtdb_t* h, uint32_t id, bool value, uint64_t source_ts_ns);
+int indurtdb_h_write_int32_ts(indurtdb_t* h, uint32_t id, int32_t value, uint64_t source_ts_ns);
+int indurtdb_h_write_double_ts(indurtdb_t* h, uint32_t id, double value, uint64_t source_ts_ns);
+int indurtdb_h_write_string_ts(indurtdb_t* h, uint32_t id, const char* value, uint64_t source_ts_ns);
+
+int indurtdb_h_read_bool(indurtdb_t* h, uint32_t id, bool* value);
+int indurtdb_h_read_int32(indurtdb_t* h, uint32_t id, int32_t* value);
+int indurtdb_h_read_double(indurtdb_t* h, uint32_t id, double* value);
+int indurtdb_h_read_string(indurtdb_t* h, uint32_t id, char* buffer, size_t buffer_size);
+int indurtdb_h_read_point(indurtdb_t* h, uint32_t id, indurtdb_point_t* point_data);
+const indurtdb_point_t* indurtdb_h_peek(indurtdb_t* h, uint32_t id);
+int indurtdb_h_read_range(indurtdb_t* h, uint32_t start_id, uint16_t count,
+                          indurtdb_point_t* out_buf, uint16_t out_cap);
+int indurtdb_h_write_range_bool(indurtdb_t* h, uint32_t start_id, const bool* values, uint16_t count);
+int indurtdb_h_write_range_int32(indurtdb_t* h, uint32_t start_id, const int32_t* values, uint16_t count);
+int indurtdb_h_write_range_double(indurtdb_t* h, uint32_t start_id, const double* values, uint16_t count);
+
+int indurtdb_h_subscribe(indurtdb_t* h, uint32_t id, indurtdb_callback_t cb, void* user_data);
+int indurtdb_h_unsubscribe(indurtdb_t* h, uint32_t id);
+int indurtdb_h_load_config(indurtdb_t* h, const char* config_path);
+int indurtdb_h_set_quality(indurtdb_t* h, uint32_t id, uint8_t quality);
+void indurtdb_h_update_heartbeat(indurtdb_t* h);
+
+int indurtdb_h_find_by_name(indurtdb_t* h, const char* name, uint32_t* out_id);
+int indurtdb_h_get_meta(indurtdb_t* h, uint32_t id, indurtdb_meta_t* meta);
+int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta);
+
+int indurtdb_h_check_timeouts(indurtdb_t* h, uint64_t timeout_ns);
+uint64_t indurtdb_h_get_write_count(indurtdb_t* h);
+uint64_t indurtdb_h_get_timeout_count(indurtdb_t* h);
+int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id);
+
+/* v1 全局函数 (= 默认句柄的薄封装) 仍全部保留, 行为不变 ——
+ * 仅在 v3.5 起标注 INDURTDB_DEPRECATED 并移除 (届时同步迁移测试/调用方)。 */
+
 #ifdef __cplusplus
 }
 #endif
