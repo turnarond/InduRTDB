@@ -292,3 +292,116 @@ uint32_t irtcli_queue_count(const irtcli_t* c)
 {
     return c ? c->count : 0u;
 }
+
+/* ---- v3.4 T9：协议 v2 管控通道（同步请求-响应） ---- */
+
+/* 通用请求-响应：发送请求头 + 可选请求负载，读取响应头，
+ * 若 status==OK 且 resp_len>0 再读响应负载。
+ * 返回 IRTCLI_OK 表示收发成功（*status_out 为服务端状态码）；
+ * 否则返回 IRTCLI_ERR_IO / IRTCLI_ERR_PROTO，连接失效时已重置 c->connected。 */
+static int rt_submit(irtcli_t* c, uint16_t opcode,
+                     const void* req_payload, uint32_t req_len,
+                     void* resp_payload, uint32_t resp_len,
+                     uint16_t* status_out)
+{
+    if (!c || !status_out) return IRTCLI_ERR_ARG;
+    *status_out = RTDBD_ST_INTERNAL;
+
+    if (!c->connected && irtcli_connect(c) != IRTCLI_OK) return IRTCLI_ERR_IO;
+
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic       = RTDBD_MAGIC;
+    req.version     = RTDBD_PROTO_VERSION;
+    req.opcode      = opcode;
+    req.payload_len = req_len;
+
+    if (send_all(c->fd, &req, sizeof(req)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (req_len > 0 && send_all(c->fd, req_payload, req_len) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+
+    rtdbd_resp_hdr_t resp;
+    if (recv_all(c->fd, &resp, sizeof(resp)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (resp.magic != RTDBD_MAGIC || resp.version != RTDBD_PROTO_VERSION) {
+        return IRTCLI_ERR_PROTO;
+    }
+
+    if (resp.status == RTDBD_ST_OK && resp_len > 0) {
+        if (recv_all(c->fd, resp_payload, resp_len) != 0) {
+            c->connected = false;
+            return IRTCLI_ERR_IO;
+        }
+    }
+
+    *status_out = resp.status;
+    return IRTCLI_OK;
+}
+
+/* 把服务端状态映射为客户端返回码 */
+static int status_to_cli(uint16_t st)
+{
+    switch (st) {
+    case RTDBD_ST_OK:        return IRTCLI_OK;
+    case RTDBD_ST_DENIED:    return IRTCLI_ERR_DENIED;
+    case RTDBD_ST_NOT_FOUND: return IRTCLI_ERR_NOT_FOUND;
+    default:                 return IRTCLI_ERR_PROTO;
+    }
+}
+
+int irtcli_find_by_name(irtcli_t* c, const char* name, uint32_t* out_id)
+{
+    if (!c || !name || !out_id) return IRTCLI_ERR_ARG;
+
+    rtdbd_find_req_t f;
+    memset(&f, 0, sizeof(f));
+    strncpy(f.name, name, sizeof(f.name) - 1);
+
+    uint16_t st = RTDBD_ST_INTERNAL;
+    rtdbd_find_resp_t r;
+    memset(&r, 0, sizeof(r));
+    int rc = rt_submit(c, RTDBD_OP_FIND_BY_NAME, &f, sizeof(f), &r, sizeof(r), &st);
+    if (rc != IRTCLI_OK) return rc;
+
+    if (st == RTDBD_ST_OK) *out_id = r.point_id;
+    return status_to_cli(st);
+}
+
+int irtcli_get_meta(irtcli_t* c, uint32_t id, indurtdb_meta_t* out)
+{
+    if (!c || !out) return IRTCLI_ERR_ARG;
+
+    rtdbd_meta_req_t m;
+    memset(&m, 0, sizeof(m));
+    m.point_id = id;
+
+    uint16_t st = RTDBD_ST_INTERNAL;
+    rtdbd_meta_payload_t p;
+    memset(&p, 0, sizeof(p));
+    int rc = rt_submit(c, RTDBD_OP_GET_META, &m, sizeof(m), &p, sizeof(p), &st);
+    if (rc != IRTCLI_OK) return rc;
+    if (st == RTDBD_ST_OK) memcpy(out, &p, sizeof(*out));
+    return status_to_cli(st);
+}
+
+int irtcli_set_meta(irtcli_t* c, uint32_t id, const indurtdb_meta_t* m)
+{
+    if (!c || !m) return IRTCLI_ERR_ARG;
+
+    rtdbd_set_meta_req_t s;
+    memset(&s, 0, sizeof(s));
+    s.point_id = id;
+    memcpy(&s.meta, m, sizeof(s.meta));
+
+    uint16_t st = RTDBD_ST_INTERNAL;
+    int rc = rt_submit(c, RTDBD_OP_SET_META, &s, sizeof(s), NULL, 0, &st);
+    if (rc != IRTCLI_OK) return rc;
+    return status_to_cli(st);
+}

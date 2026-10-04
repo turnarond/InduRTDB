@@ -286,6 +286,114 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         return send_all(fd, &resp, sizeof(resp));
     }
 
+    /* ---- v3.4 T9：按名查找（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_FIND_BY_NAME) {
+        rtdbd_find_req_t f;
+        if (req.payload_len != sizeof(f) || recv_all(fd, &f, sizeof(f)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+        f.name[sizeof(f.name) - 1] = '\0';
+
+        uint32_t found_id = 0;
+        int rc = indurtdb_find_by_name(f.name, &found_id);
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        rtdbd_find_resp_t r;
+        memset(&r, 0, sizeof(r));
+        r.point_id = found_id;
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(r);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &r, sizeof(r));
+    }
+
+    /* ---- v3.4 T9：读取元数据（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET_META) {
+        rtdbd_meta_req_t m;
+        if (req.payload_len != sizeof(m) || recv_all(fd, &m, sizeof(m)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        indurtdb_meta_t meta;
+        memset(&meta, 0, sizeof(meta));
+        int rc = indurtdb_get_meta(m.point_id, &meta);
+        if (rc == INDURTDB_ERR_NOT_FOUND || rc == INDURTDB_ERR_ARG) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(meta);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &meta, sizeof(meta));
+    }
+
+    /* ---- v3.4 T9：写入元数据（管控写，须鉴权） ---- */
+    if (req.opcode == RTDBD_OP_SET_META) {
+        rtdbd_set_meta_req_t s;
+        if (req.payload_len != sizeof(s) || recv_all(fd, &s, sizeof(s)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        /* 鉴权：deny by default；元数据写入属管控操作 */
+        if (!irt_policy_allows(policy, uid, s.point_id)) {
+            resp.status      = RTDBD_ST_DENIED;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        indurtdb_meta_t m;
+        memcpy(&m, &s.meta, sizeof(m)); /* 线结构 → 库结构（布局一致） */
+        int rc = indurtdb_set_meta(s.point_id, &m);
+        if (rc == INDURTDB_ERR_NOT_FOUND || rc == INDURTDB_ERR_ARG) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        irt_audit_record(audit, pid, uid, s.point_id, now_ns());
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
     resp.status      = RTDBD_ST_BAD_REQUEST;
     resp.payload_len = 0;
     (void)send_all(fd, &resp, sizeof(resp));
@@ -374,6 +482,7 @@ int main(int argc, char** argv)
     const char* sock_path  = "/run/indurtdb/default.sock";
     const char* instance   = "default";
     const char* policy_path = NULL;
+    const char* config_path = NULL;
     uint32_t    max_points = 10000;
     uint32_t    max_subs   = 32;
     bool        supervise  = false;
@@ -383,6 +492,7 @@ int main(int argc, char** argv)
         {"socket",     required_argument, 0, 's'},
         {"instance",   required_argument, 0, 'i'},
         {"policy",     required_argument, 0, 'p'},
+        {"config",     required_argument, 0, 'c'},
         {"max-points", required_argument, 0, 'm'},
         {"max-subs",   required_argument, 0, 'b'},
         {"supervise",  no_argument,       0, 'S'},
@@ -391,11 +501,12 @@ int main(int argc, char** argv)
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "s:i:p:m:b:SP:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:SP:", long_opts, NULL)) != -1) {
         switch (c) {
         case 's': sock_path = optarg; break;
         case 'i': instance = optarg; break;
         case 'p': policy_path = optarg; break;
+        case 'c': config_path = optarg; break;
         case 'm': max_points = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'b': max_subs = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'S': supervise = true; break;
@@ -425,6 +536,14 @@ int main(int argc, char** argv)
     if (indurtdb_initialize(instance, max_points, max_subs) != 0) {
         fprintf(stderr, "rtdbd: indurtdb_initialize failed: %s\n", indurtdb_get_last_error());
         return 1;
+    }
+
+    /* 注册点位名 / 元数据区初始化（写入共享索引，供 FIND_BY_NAME 端到端可用）。
+     * 失败不致命：仅告警，守护进程继续提供写/读能力。 */
+    if (config_path) {
+        if (indurtdb_load_config(config_path) != 0) {
+            fprintf(stderr, "rtdbd: load config failed: %s\n", indurtdb_get_last_error());
+        }
     }
 
     unlink(sock_path);

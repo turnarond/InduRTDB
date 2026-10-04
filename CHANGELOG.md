@@ -105,6 +105,13 @@ All notable changes to InduRTDB.
 - **覆盖率插桩**（TDD 红→绿的基础设施）：顶层 `INDURTDB_ENABLE_COVERAGE=ON` 以 `--coverage -O0 -g` 构建库；`coverage` 自定义目标运行 `ctest` 并（若 `gcovr` 可用）生成 `coverage.xml` / `coverage.html`。
 - **测试** `tests/unit/test_c_diag.cpp`（4 例）：`Tools.InspectReportsHealth`（巡检输出版本/点数/CRC/owner 且 crc_ok）、`Tools.SmokeEndToEnd`（harness 全流程退出 0）、`Tools.DetectsFdLeak`（反复启停无 fd 增长）、`Coverage.TargetBuildsAndRuns`（coverage 配置+构建库通过并产出 `.gcno`）。
 
+### Added（T9 — rtdbd / irtcli 协议 v2）
+
+- **协议版本 `RTDBD_PROTO_VERSION` 1 → 2**：新增 opcode `OP_FIND_BY_NAME`(7) / `OP_GET_META`(8) / `OP_SET_META`(9)，及状态 `RTDBD_ST_NOT_FOUND`(4)。线结构 `rtdbd_find_req_t`(name[64]) / `rtdbd_find_resp_t`(point_id) / `rtdbd_meta_payload_t`(32B，与 `indurtdb_meta_t` 逐字段布局一致，服务端零转换 `memcpy`) / `rtdbd_meta_req_t` / `rtdbd_set_meta_req_t`。版本不匹配仍**立即关闭连接**（不静默），新旧客户端不混跑。
+- **服务端 `rtdbd`**：`FIND_BY_NAME` / `GET_META` 为只读、无需鉴权；`SET_META` 为**管控写**，复用 `SO_PEERCRED` 取对端 uid，经 `irt_policy_allows`（`deny by default`）鉴权，失败返回 `RTDBD_ST_DENIED`，成功记录审计。新增 `--config <path>` 在启动时调用 `indurtdb_load_config` 注册点位名进共享索引（rtdbd 作为索引注册方，使 FIND_BY_NAME 端到端可用）。
+- **客户端 `irtcli`**（同步请求-响应，绕过异步写队列）：`irtcli_find_by_name` / `irtcli_get_meta` / `irtcli_set_meta`；返回码新增 `IRTCLI_ERR_NOT_FOUND`(-6)，服务端状态 `DENIED/NOT_FOUND` 映射为对应客户端码。通用 `rt_submit` 助手处理连接/收发/重连。
+- **测试** `tests/integration/test_rtdbd_proto_v2.cpp`（4 例）：`ProtoV2.FindByName`（按名查到 id，未注册返回 NOT_FOUND）、`ProtoV2.MetaWriteRequiresAuth`（默认策略拒写元数据）、`ProtoV2.MetaWriteAuthorizedSucceeds`（授权 uid 写成功且读回 round-trip）、`ProtoV2.RejectsV1Client`（v1 客户端被断连）。
+
 ---
 
 ## [3.3.0] — 2026-10-02「读写分离与双通道」

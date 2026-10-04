@@ -97,3 +97,21 @@ if(TARGET rtdbd AND TARGET irtcli)
     add_dependencies(test_e2e_mixed rtdbd irtcli)
     add_test(NAME test_e2e_mixed COMMAND test_e2e_mixed)
 endif()
+
+# ---- rtdbd / irtcli 协议 v2（v3.4 T9） ----
+if(TARGET rtdbd AND TARGET irtcli)
+    add_executable(test_rtdbd_proto_v2 test_rtdbd_proto_v2.cpp)
+    target_link_libraries(test_rtdbd_proto_v2 PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_rtdbd_proto_v2 PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_rtdbd_proto_v2 PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_proto_v2 PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_proto_v2 rtdbd irtcli)
+    add_test(NAME test_rtdbd_proto_v2 COMMAND test_rtdbd_proto_v2)
+endif()
