@@ -15,7 +15,7 @@
 
 **与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。
 
-### x86 实测性能 (v3.3.0, Release -O2)
+### x86 实测性能 (v3.4.0, Release -O2)
 
 | 操作 | P50 | P99 | 吞吐 |
 |------|-----|-----|------|

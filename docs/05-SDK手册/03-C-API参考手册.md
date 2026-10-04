@@ -1,6 +1,6 @@
 # InduRTDB C API 参考手册
 
-**版本**: 3.1.0 | **更新日期**: 2026-08-09 | **变更**: 对齐 v3.1.0 (26 函数 API 不变)
+**版本**: 3.4.0 | **更新日期**: 2026-10-04 | **变更**: v3.4 布局 v2 + API v2（句柄化 / 按名查找 / 元数据 / 类型扩展 / 质量 OPC UA 映射）。公开 API 共 **88 个**：v1 全局函数 46 + v2 句柄函数 42。
 
 **头文件**: `<indurtdb/indurtdb.h>`
 **链接**: `-lindurtdb -lpthread -lrt`
@@ -14,7 +14,7 @@ v3.4 起支持**去单例化**：同一进程可同时持有多个实例，各�
 - `indurtdb_t`：不透明句柄（定义于库实现）。
 - `indurtdb_h_open(&h, instance_id, &cfg)` / `indurtdb_h_close(h)`：打开 / 关闭实例。
 - v2 函数一律加 `_h_` 前缀（C 无重载），入参首位为 `indurtdb_t* h`，返回**语义化错误码**（见下）。
-- v1 的 26 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
+- v1 的 46 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
 
 ### 多实例示例
 
@@ -44,6 +44,31 @@ indurtdb_h_close(b);
 | `INDURTDB_ERR_BUSY` | -5 | 并发写冲突，重试耗尽 |
 
 > v1 接口向后兼容：只判 `< 0` 的旧代码行为完全不变；`ERR_NOT_INIT` 对 v1 被映射回 `-1`。
+
+### v2 句柄函数完整清单（共 42 个）
+
+所有 `indurtdb_h_*` 与对应 v1 全局函数**签名同构**（仅入参首位多 `indurtdb_t* h`），返回**语义化错误码**（见上方错误码表）。下表为全量收录，与 `indurtdb.h` 公开 API 一一对应。
+
+| v2 句柄函数 | 对应 v1 | 类别 |
+|---|---|---|
+| `indurtdb_h_open` / `indurtdb_h_close` / `indurtdb_h_is_initialized` | `indurtdb_initialize` / `indurtdb_shutdown` / `indurtdb_is_initialized` | 生命周期 |
+| `indurtdb_h_write_bool` / `h_write_int32` / `h_write_double` / `h_write_string` | `indurtdb_write_bool/int32/double/string` | 写·单点 |
+| `indurtdb_h_write_int64` / `h_write_uint32` / `h_write_float` | `indurtdb_write_int64/uint32/float` | 写·单点（v3.4 类型扩展） |
+| `indurtdb_h_write_bool_ts` / `h_write_int32_ts` / `h_write_double_ts` / `h_write_string_ts` | `indurtdb_write_*_ts` | 写·携带采集时刻 |
+| `indurtdb_h_write_int64_ts` / `h_write_uint32_ts` / `h_write_float_ts` | `indurtdb_write_int64_ts/uint32_ts/float_ts` | 写·携带采集时刻（v3.4 类型扩展） |
+| `indurtdb_h_read_bool` / `h_read_int32` / `h_read_double` / `h_read_string` / `h_read_point` | `indurtdb_read_bool/int32/double/string/read_point` | 读·单点 |
+| `indurtdb_h_read_int64` / `h_read_uint32` / `h_read_float` | `indurtdb_read_int64/uint32/float` | 读·单点（v3.4 类型扩展） |
+| `indurtdb_h_read_range` | `indurtdb_read_range` | 批量读 |
+| `indurtdb_h_write_range_bool` / `h_write_range_int32` / `h_write_range_double` | `indurtdb_write_range_bool/int32/double` | 批量写 |
+| `indurtdb_h_subscribe` / `h_unsubscribe` | `indurtdb_subscribe` / `indurtdb_unsubscribe` | 订阅 |
+| `indurtdb_h_load_config` / `h_set_quality` / `h_update_heartbeat` | `indurtdb_load_config` / `indurtdb_set_quality` / `indurtdb_update_heartbeat` | 配置/心跳 |
+| `indurtdb_h_find_by_name` | `indurtdb_find_by_name` | 索引（v3.4） |
+| `indurtdb_h_get_meta` / `h_set_meta` | `indurtdb_get_meta` / `indurtdb_set_meta` | 元数据（v3.4） |
+| `indurtdb_h_check_timeouts` | `indurtdb_check_timeouts` | 校验 |
+| `indurtdb_h_get_write_count` / `h_get_timeout_count` / `h_get_scan_skipped` | `indurtdb_get_write_count` / `get_timeout_count` / `get_scan_skipped` | 统计 |
+| `indurtdb_h_validate_id` | `indurtdb_validate_id` | 校验 |
+
+> v2 句柄函数同样支持 `indurtdb_cfg_t { max_points, max_subscribers }`（`indurtdb_h_open` 第三参）。多实例下 `g_default` 与 `h_open` 创建的句柄互不干扰。
 
 ---
 
@@ -106,7 +131,7 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
 | 3 | **写冲突不重试** | 多写者并发时，若 Seqlock 处于写中状态，`write_*` 立即返回 `-2`（busy），**不阻塞、不自旋重试**；只读点位返回 `-3`。调用方需按业务策略自行重试（该语义将在 v3.3 确定化）。 |
 | 4 | **超时检测 best-effort** | `indurtdb_check_timeouts()` 扫描时若遇写冲突会跳过该点位, 单次调用不保证覆盖全部点位; 周期性调用即可收敛。**严苛边界**: 写入者以最大速率**自旋**(无间隙连续写)时, 全局单 seqlock 的可用窗口极短, 扫描可能整轮取不到写锁而返回 `0`; 真实采集周期(ms 级)下不会触发, 见 [issue #19](https://github.com/turnarond/InduRTDB/issues/19)。 |
 | 5 | **订阅为进程内回调** | 回调仅在**本进程**内注册的订阅者上触发，**不支持跨进程变更通知**（v3.3 规划）。跨进程感知当前需轮询。 |
-| 6 | **无鉴权/加密/持久化** | 库不提供网络服务、认证、加密与持久化；`access` 字段是静态只读标记，不是访问控制机制。这些能力由 node-server / 上层 Bridge 承担。 |
+| 6 | **无鉴权/加密/持久化（库级）** | 核心库不提供网络服务、认证、加密与持久化；`access` 字段是静态只读标记，不是访问控制机制。这些能力由 node-server / 上层 Bridge 承担。v3.4 起 `rtdbd` 守护进程的**管控通道**（`SET_META` 元数据写）走本机 `SO_PEERCRED` 的 UID 级鉴权（deny by default），属**进程级**管控，非库级网络鉴权；跨主机 / 传输加密仍不在范围内。 |
 
 ---
 
@@ -185,6 +210,26 @@ int indurtdb_write_string(uint32_t id, const char* value);
 
 `type` 自动设为 `INDURTDB_TYPE_STRING(3)`。字符串截断至 31 字符。
 
+### indurtdb_write_int64 / write_uint32 / write_float（v3.4 类型扩展）
+
+```c
+int indurtdb_write_int64(uint32_t id, int64_t value);
+int indurtdb_write_uint32(uint32_t id, uint32_t value);
+int indurtdb_write_float(uint32_t id, float value);
+```
+
+新增整型 / 浮点类型写入（`INDURTDB_TYPE_INT64(4) / UINT32(5) / FLOAT(6)`），复用既有 32B 联合体，**布局不变**（结构体仍为 128B / `align(128)`）。
+
+### indurtdb_write_int64_ts / write_uint32_ts / write_float_ts（v3.4 类型扩展）
+
+```c
+int indurtdb_write_int64_ts(uint32_t id, int64_t value, uint64_t source_ts_ns);
+int indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t source_ts_ns);
+int indurtdb_write_float_ts(uint32_t id, float value, uint64_t source_ts_ns);
+```
+
+同上三类类型的「携带采集时刻」变体，`source_ts_ns` 语义与 `write_*_ts` 一致。
+
 ---
 
 ## 读取函数 (单点)
@@ -217,6 +262,16 @@ int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
 |------|------|
 | `buffer` | 用户提供的输出缓冲区 |
 | `buffer_size` | 缓冲区大小 (建议 >= 32) |
+
+### indurtdb_read_int64 / read_uint32 / read_float（v3.4 类型扩展）
+
+```c
+int indurtdb_read_int64(uint32_t id, int64_t* value);
+int indurtdb_read_uint32(uint32_t id, uint32_t* value);
+int indurtdb_read_float(uint32_t id, float* value);
+```
+
+对应 `INDURTDB_TYPE_INT64(4) / UINT32(5) / FLOAT(6)` 的读取。
 
 ### indurtdb_read_point
 
@@ -405,6 +460,28 @@ uint64_t indurtdb_get_timeout_count(void);
 ```
 
 返回超时点位计数 (从共享内存 stats 读取)。
+
+### indurtdb_get_scan_skipped（v3.4 T7）
+
+```c
+uint64_t indurtdb_get_scan_skipped(void);
+```
+
+返回超时扫描因写锁冲突被**跳过**的点数累计（可观测「饿死」）。Header 该字段位于保留区，**不计入 CRC**，运行时自增不会使 attach 校验失败。
+
+---
+
+## 质量 OPC UA 映射（v3.4 新增）
+
+库内置 `quality` ↔ OPC UA `StatusCode` 的双向纯函数映射（无状态、零依赖），便于北向上送时保留工业语义。
+
+| 函数 | 说明 |
+|------|------|
+| `indurtdb_quality_to_status_code(uint8_t quality)` | 点位质量 → OPC UA `StatusCode`（uint32） |
+| `indurtdb_status_code_to_quality(uint32_t status_code)` | OPC UA `StatusCode` → 点位质量；未知码回退 `BAD` |
+| `indurtdb_quality_is_usable(uint8_t quality)` | 「值是否可用」只看基础码（量程位正交），返回 1/0 |
+
+**映射约定**：base 码决定 severity（bit30-31）+ 子状态（code, bit0-15）；**量程位映射到 StatusCode 保留位（bit28-29）**（远离 severity、避开 OPC UA 已定义位 bit24/25，仅用于本库产物回读，不得原样投递第三方 OPC UA 栈），与 severity/code 正交。`write_*` 将 quality 置为纯 `GOOD`（量程位清零）；如需量程位，应在写之后调用 `indurtdb_set_quality`。`check_timeouts` 超时刻**保留**量程位（基础码改为 `TIMEOUT`，量程位不丢）。
 
 ---
 

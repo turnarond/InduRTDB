@@ -127,18 +127,22 @@ TEST(Coverage, TargetBuildsAndRuns) {
                       + " -DINDURTDB_BUILD_DIAG=OFF"
                       + " >/dev/null 2>&1";
     int rc = ::system(cfg.c_str());
+    ASSERT_GE(rc, 0) << "coverage 配置失败(system)";
     ASSERT_EQ(WEXITSTATUS(rc), 0) << "coverage 配置失败";
 
     std::string build = std::string("cmake --build \"") + dir
                         + "\" --target indurtdb -j4 >/dev/null 2>&1";
     rc = ::system(build.c_str());
+    ASSERT_GE(rc, 0) << "coverage 构建库失败(system)";
     ASSERT_EQ(WEXITSTATUS(rc), 0) << "coverage 构建库失败";
 
     std::string check = std::string("test -n \"$(find \"") + dir
                         + "\" -name '*.gcno')\"";
     rc = ::system(check.c_str());
+    ASSERT_GE(rc, 0) << "coverage 检查失败(system)";
     EXPECT_EQ(WEXITSTATUS(rc), 0) << "未产出 .gcno（覆盖率插桩未生效）";
 
     std::string clean = std::string("rm -rf \"") + dir + "\"";
-    (void)::system(clean.c_str());
+    rc = ::system(clean.c_str());
+    (void)rc; /* 清理失败不致命 */
 }

@@ -4,7 +4,7 @@ All notable changes to InduRTDB.
 
 ---
 
-## [未发布] — v3.4.0「布局 v2 与 API v2」(路线乙，方案见 `docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md`)
+## [3.4.0] — 2026-10-04「布局 v2 与 API v2」(路线乙，方案见 `docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md`)
 
 **⚠️ ABI / 布局变更**：v3.4 段格式版本由 1 升至 2，Header 由 64B 扩至 128B。
 **v1 段一律拒绝挂载**（返回 `IRT_SHM_ERR_VERSION`），需经迁移工具或停机清理后重建；**不支持新旧进程混跑**。详见方案 §6。
@@ -111,6 +111,12 @@ All notable changes to InduRTDB.
 - **服务端 `rtdbd`**：`FIND_BY_NAME` / `GET_META` 为只读、无需鉴权；`SET_META` 为**管控写**，复用 `SO_PEERCRED` 取对端 uid，经 `irt_policy_allows`（`deny by default`）鉴权，失败返回 `RTDBD_ST_DENIED`，成功记录审计。新增 `--config <path>` 在启动时调用 `indurtdb_load_config` 注册点位名进共享索引（rtdbd 作为索引注册方，使 FIND_BY_NAME 端到端可用）。
 - **客户端 `irtcli`**（同步请求-响应，绕过异步写队列）：`irtcli_find_by_name` / `irtcli_get_meta` / `irtcli_set_meta`；返回码新增 `IRTCLI_ERR_NOT_FOUND`(-6)，服务端状态 `DENIED/NOT_FOUND` 映射为对应客户端码。通用 `rt_submit` 助手处理连接/收发/重连。
 - **测试** `tests/integration/test_rtdbd_proto_v2.cpp`（4 例）：`ProtoV2.FindByName`（按名查到 id，未注册返回 NOT_FOUND）、`ProtoV2.MetaWriteRequiresAuth`（默认策略拒写元数据）、`ProtoV2.MetaWriteAuthorizedSucceeds`（授权 uid 写成功且读回 round-trip）、`ProtoV2.RejectsV1Client`（v1 客户端被断连）。
+
+### Notes（v3.4.0）
+- **ABI 冻结**：共享内存段版本固定为 `IRT_SHM_VERSION = 2`；Header v2（128B）、name→id 索引区、32B 元数据区布局与字段偏移均经静态断言锁死。v1 段被版本协商拒绝挂载，升级需经迁移工具或停机清理后重建。
+- **SylixOS / ARM**：本机 x86_64 实测全绿；**SylixOS / ARM 未实测**，按 T10 风险约定**不阻塞**发布，待硬件到位后补实测数据。
+- **v1 全局 API**：v3.4 仍全部保留且行为不变；计划于 **v3.5** 起标注 `deprecated` 并最终移除（届时同步迁移测试与调用方）。
+- 发布 tag：`v3.4.0`。
 
 ---
 
