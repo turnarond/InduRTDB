@@ -148,3 +148,10 @@ demo/demo
 # 工具产物
 .omc/
 .codegraph/
+
+# Python 工具（tools/irt_migrate 等）字节码缓存，不入库
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irt-migrate"
+version = "1.0.0"
+description = "InduRTDB v1 -> v2 shared-memory segment offline migration tool"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+dependencies = []
+
+[project.scripts]
+irt_migrate = "irt_migrate.cli:main"
+
+[tool.setuptools]
+packages = ["irt_migrate"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
