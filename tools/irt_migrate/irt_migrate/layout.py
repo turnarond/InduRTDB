@@ -104,9 +104,10 @@ def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
     """构造 128B v2 Header（含 CRC32）。
 
     CRC 覆盖 [0:16]（magic/version/max_points/max_subscribers）
-    与 [48:72]（flags/scan_skipped/off_points/off_index/off_meta/off_subs），
+    与 [48:72]（flags/保留/off_points/off_index/off_meta/off_subs），
     与 src/core/irt_shm.c 的 irt_header_crc32_of 逐字节一致
     （zlib.crc32 即标准 CRC-32/IEEE 802.3，初值与末异或均为 0xFFFFFFFF）。
+    scan_skipped 计数是可变字段，置于保留区 [76:80]，不计入 CRC。
     """
     raw = bytearray(HEADER_V2_SIZE)
     op = off_points_v2()
@@ -116,10 +117,12 @@ def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
     # [0:16] magic/version/max_points/max_subscribers
     struct.pack_into("<IIII", raw, 0, MAGIC, SHM_VERSION_V2,
                      max_points, max_subscribers)
-    # [48:56] flags=0, scan_skipped=0
+    # [48:56] flags=0, 保留(原拟 scan_skipped 位, 因在 CRC 范围[48:72]内改为保留)
     struct.pack_into("<II", raw, 48, 0, 0)
     # [56:72] 四个区段偏移
     struct.pack_into("<IIII", raw, 56, op, oi, om, os_)
+    # [76:80] scan_skipped=0（保留区, 不在 CRC 范围 [48:72]）
+    struct.pack_into("<I", raw, 76, 0)
     # [44:48] crc32（先置 0 再算）
     crc = zlib.crc32(raw[0:16] + raw[48:72]) & 0xFFFFFFFF
     struct.pack_into("<I", raw, 44, crc)

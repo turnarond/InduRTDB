@@ -219,7 +219,11 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
 
         /* 获取写锁, 标记 TIMEOUT */
         uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
-        if (seq0 & 1ULL) continue;  /* 写冲突, 跳过 */
+        if (seq0 & 1ULL) {
+            /* 让步退避后仍冲突: 该点本轮被跳过, 计入可观测计数 (issue #19 L2) */
+            __atomic_fetch_add(&hdr->scan_skipped, 1, __ATOMIC_RELAXED);
+            continue;
+        }
 
         indurtdb_point_t* p = &pts[id];
         /* 二次确认: 可能在等待写锁期间被其它线程更新了 */

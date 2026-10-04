@@ -419,6 +419,11 @@ uint64_t indurtdb_h_get_timeout_count(indurtdb_t* h) {
     irt_header_t* hdr = irt_shm_header(&h->shm);
     return hdr ? __atomic_load_n(&hdr->stats.timeouts, __ATOMIC_RELAXED) : 0;
 }
+uint64_t indurtdb_h_get_scan_skipped(indurtdb_t* h) {
+    if (!h || !__atomic_load_n(&h->initialized, __ATOMIC_ACQUIRE)) return 0;
+    irt_header_t* hdr = irt_shm_header(&h->shm);
+    return hdr ? __atomic_load_n(&hdr->scan_skipped, __ATOMIC_RELAXED) : 0;
+}
 int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id) {
     if (!h || !__atomic_load_n(&h->initialized, __ATOMIC_ACQUIRE)) return 0;
     return irt_pm_validate_id(&h->pm, id) ? 1 : 0;
@@ -571,6 +576,9 @@ uint64_t indurtdb_get_write_count(void) {
 }
 uint64_t indurtdb_get_timeout_count(void) {
     return indurtdb_h_get_timeout_count(g_default);
+}
+uint64_t indurtdb_get_scan_skipped(void) {
+    return indurtdb_h_get_scan_skipped(g_default);
 }
 int indurtdb_validate_id(uint32_t id) {
     return v1_int(indurtdb_h_validate_id(g_default, id));

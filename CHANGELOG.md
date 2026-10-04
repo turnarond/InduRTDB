@@ -10,7 +10,7 @@ All notable changes to InduRTDB.
 **v1 段一律拒绝挂载**（返回 `IRT_SHM_ERR_VERSION`），需经迁移工具或停机清理后重建；**不支持新旧进程混跑**。详见方案 §6。
 
 ### Added（T1 — Header v2）
-- 共享内存 Header 扩至 **128 字节**：新增 `crc32`(44)、`flags`(48)、`scan_skipped`(52)、四个区段偏移 `off_points/off_index/off_meta/off_subs`(56–68) 与保留区。前 44 字节（magic / version / max_points / max_subscribers / write_seq / owner_pid / stats）**偏移与语义不变**，便于迁移工具定位。
+- 共享内存 Header 扩至 **128 字节**：新增 `crc32`(44)、`flags`(48)、保留位(52)、四个区段偏移 `off_points/off_index/off_meta/off_subs`(56–68)、`index_count`(72)、`scan_skipped`(76) 与保留区。前 44 字节（magic / version / max_points / max_subscribers / write_seq / owner_pid / stats）**偏移与语义不变**，便于迁移工具定位。`scan_skipped`  deliberately 置于保留区(76)、**不在 CRC 范围[48..71]**——否则运行时自增会使 attach 校验失败（见 T7）。
 - **Header CRC32**（位运算实现，无查表、无静态存储）：覆盖**布局描述字段**（magic/version/容量 + flags/区段偏移），**刻意排除**易变字段（write_seq / owner_pid / stats / scan_skipped）——否则段一旦被写过 CRC 即失效，attach 将永远失败（T1 绿阶段实测踩到）。
 - **版本协商**：段版本与布局不匹配即拒绝挂载并返回独立错误码 `IRT_SHM_ERR_VERSION`（-2），另区分 `IRT_SHM_ERR_ARG`(-1) 与 `IRT_SHM_ERR_CRC`(-3)。绝不按新布局解释旧段。
 - **区段偏移写进 Header**：`irt_shm_points()` / `irt_shm_subscribers()` 改读 `hdr->off_*`，不再按 `sizeof(irt_header_t)` 硬算；布局计算集中于 `irt_layout_*()` 内联函数，为 T2（索引区）/ T3（元数据区）预留。
@@ -85,6 +85,14 @@ All notable changes to InduRTDB.
 - **quality 分层宏**（bit0–3 基础码 + bit4–5 量程位 + bit6–7 预留，`QUALITY_BASE/LIMIT/MAKE` 与 0–10 基础码）已随 v3.4 Header 落地并由 `test_c_point_fields` 覆盖，本任务补齐其北向映射与可用性语义。
 - **质量写契约**：`write_*` 将 quality 置为纯 `GOOD`（量程位清零）；如需量程位，应在写之后调用 `set_quality`。`check_timeouts` 超时刻**保留**量程位（基础码改为 `TIMEOUT`，量程位不丢）。
 - **测试** `tests/unit/test_c_semantics.cpp`（11 例）：类型扩展 v1/v2 往返（int64 负值 / uint32 大值 / float / `_ts` 保采集时刻）、StatusCode 全 base×limit 双向往返、已知常量、未知回退 BAD、量程位存活、is_usable 只看基础码。
+
+### Added（T7 — 可靠性：issue #19 修复，热写者下超时扫描不再饿死）
+
+- **L1 写锁冲突让步退避**：`irt_seqlock_write_begin` 遇他人持锁（seq 奇数）不再立即返回，改为**有限次重试（默认 3 次）+ 指数退避 + `sched_yield()`**，给持锁方完成窗口。修复 issue #19——热写者无间隙自旋时，全局单 seqlock 偶数窗口极短，`check_timeouts()` 整轮取不到写锁而返回 0。写路径无冲突时零开销（首抢即中，不进入退避）。
+- **L2 可观测计数**：Header 新增 `scan_skipped`（offset 76，保留区，**刻意置于 CRC 范围[48..71]之外**——否则运行时自增会使 attach 校验 CRC 失败而拒掉合法段）。超时扫描在让步退避后仍冲突、跳过某点时 `__atomic_fetch_add(&hdr->scan_skipped, 1)`，使"饿死"可被运维观测而非静默。
+- **新 API**：`indurtdb_get_scan_skipped()` / `indurtdb_h_get_scan_skipped(h)`（v2），返回被跳过的点数累计。
+- **测试** `tests/unit/test_c_reliability.cpp`（3 例）：`NotStarvedByHotWriter`（热写者自旋下全部陈旧点仍被检测，修复前 ≈0）、`SkippedIsObservable`（skip 计数 > 0）、`NoRegressionOnIdle`（无并发写时全检测且 scan_skipped 恒 0）。
+- **注意**：`scan_skipped` 布局位从初版的 52 调整为 76（保留区），因 52 落在 CRC 覆盖区[48..71]内，运行时自增会破坏 CRC；既有字段偏移与迁移工具 CRC 字节级兼容保持不变。
 
 ---
 

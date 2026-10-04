@@ -19,9 +19,9 @@ def read_v2_segment(instance_id: str):
         hdr_raw = os.read(fd, L.HEADER_V2_SIZE)
         (magic, version, max_points, max_subscribers,
          write_seq, owner_pid, writes, timeouts,
-         crc32, flags, scan_skipped,
+         crc32, flags, reserved_scan,
          off_points, off_index, off_meta, off_subs,
-         index_count) = struct.unpack_from("<IIIIQiQQIIIIIIII", hdr_raw, 0)
+         index_count, scan_skipped) = struct.unpack_from("<IIIIQiQQIIIIIIIII", hdr_raw, 0)
         if magic != L.MAGIC:
             raise ValueError(f"bad magic: {magic:#x}")
         if version != L.SHM_VERSION_V2:

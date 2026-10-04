@@ -207,6 +207,7 @@ int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
 int  indurtdb_check_timeouts(uint64_t timeout_ns);
 uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);
+uint64_t indurtdb_get_scan_skipped(void);  /* v3.4 T7: 被超时扫描跳过的点数（可观测） */
 const char* indurtdb_get_last_error(void);
 
 /* ==== API v2: 句柄化 (v3.4 新增) ====
@@ -276,6 +277,7 @@ int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta)
 int indurtdb_h_check_timeouts(indurtdb_t* h, uint64_t timeout_ns);
 uint64_t indurtdb_h_get_write_count(indurtdb_t* h);
 uint64_t indurtdb_h_get_timeout_count(indurtdb_t* h);
+uint64_t indurtdb_h_get_scan_skipped(indurtdb_t* h);  /* v3.4 T7 */
 int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id);
 
 /* v1 全局函数 (= 默认句柄的薄封装) 仍全部保留, 行为不变 ——

@@ -44,13 +44,15 @@ typedef struct {
     } stats;
     uint32_t crc32;                 /* 44  Header 完整性校验（不含本字段） */
     uint32_t flags;                 /* 48  预留特性位 */
-    uint32_t scan_skipped;          /* 52  v3.4 T7: 超时扫描被跳过的点数 */
+    uint32_t reserved_scan;         /* 52  保留：曾拟放 scan_skipped，因子在 CRC 范围[48..71]内、
+                                          运行时自增会破坏 CRC 而拒掉合法段，故改为保留（恒 0） */
     uint32_t off_points;            /* 56  点位区段内偏移 */
     uint32_t off_index;             /* 60  name→id 索引区段内偏移（T2 启用） */
     uint32_t off_meta;              /* 64  元数据区段内偏移（T3 启用） */
     uint32_t off_subs;              /* 68  订阅者心跳区段内偏移 */
     uint32_t index_count;           /* 72  T2: 索引当前装载条目数（易变, 不入 CRC） */
-    uint8_t  reserved[52];          /* 76..127 */
+    uint32_t scan_skipped;          /* 76  v3.4 T7: 超时扫描被跳过的点数（保留区, 不在 CRC 范围） */
+    uint8_t  reserved[48];          /* 80..127 */
 } __attribute__((packed, aligned(64))) irt_header_t;
 
 IRT_STATIC_ASSERT(sizeof(irt_header_t) == 128, "v3.4 layout v2: header must be 128 bytes");
@@ -65,6 +67,8 @@ IRT_STATIC_ASSERT(offsetof(irt_header_t, owner_pid)        == 24, "owner_pid off
 IRT_STATIC_ASSERT(offsetof(irt_header_t, stats)            == 28, "stats offset");
 IRT_STATIC_ASSERT(offsetof(irt_header_t, crc32)            == 44, "crc32 offset");
 IRT_STATIC_ASSERT(offsetof(irt_header_t, index_count)      == 72, "index_count offset");
+/* scan_skipped 必须落在 CRC 范围 [48..71] 之外，否则运行时自增会使 attach 校验失败 */
+IRT_STATIC_ASSERT(offsetof(irt_header_t, scan_skipped)      == 76, "scan_skipped must be outside CRC range [48..71]");
 
 /* 订阅者心跳条目 (16 字节, == v2.x SubscriberEntry) */
 typedef struct {
