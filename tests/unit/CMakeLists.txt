@@ -30,3 +30,14 @@ if(TARGET test_c_migration)
     target_compile_definitions(test_c_migration PRIVATE
         INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools")
 endif()
+
+# T8 诊断工具集成测试：告知工具目录、harness 路径与源码根
+if(TARGET test_c_diag)
+    target_compile_definitions(test_c_diag PRIVATE
+        INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools"
+        INDURTDB_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
+    if(TARGET irt_diag_harness)
+        target_compile_definitions(test_c_diag PRIVATE
+            INDURTDB_DIAG_HARNESS="$<TARGET_FILE:irt_diag_harness>")
+    endif()
+endif()

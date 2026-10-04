@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "irt-diag"
+version = "0.1.0"
+description = "InduRTDB 运行时诊断工具（巡检 / 冒烟 / 泄漏检测）"
+requires-python = ">=3.8"
+dependencies = []
+
+[project.scripts]
+irt-diag = "irt_diag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["irt_diag*"]

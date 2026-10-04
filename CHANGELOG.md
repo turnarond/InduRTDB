@@ -94,6 +94,17 @@ All notable changes to InduRTDB.
 - **测试** `tests/unit/test_c_reliability.cpp`（3 例）：`NotStarvedByHotWriter`（热写者自旋下全部陈旧点仍被检测，修复前 ≈0）、`SkippedIsObservable`（skip 计数 > 0）、`NoRegressionOnIdle`（无并发写时全检测且 scan_skipped 恒 0）。
 - **注意**：`scan_skipped` 布局位从初版的 52 调整为 76（保留区），因 52 落在 CRC 覆盖区[48..71]内，运行时自增会破坏 CRC；既有字段偏移与迁移工具 CRC 字节级兼容保持不变。
 
+### Added（T8 — 诊断与工具集：巡检 / 冒烟 / 泄漏检测 / 覆盖率）
+
+- **诊断工具 `tools/irt_diag`**（纯 Python，`stdlib` only，不依赖 C 库；自带 `pyproject.toml` / `README.md` / 模块划分）：
+  - `inspect`：在线读取 `/dev/shm/indurtdb_<id>` Header，输出版本 / 点数 / CRC / owner pid / 段大小，并判定 `healthy`。CRC 覆盖区间（`[0:16]+[48:72]`）与 `irt_header_crc32_of` 逐字节一致；`scan_skipped` 位于保留区[76:80]、不计入 CRC。
+  - `smoke`：驱动 C harness 完成「起服务 → 写 → 读 → 订阅 → 停」全流程，退出码透传。
+  - `leak`：驱动 harness 反复启停，比较 `/proc/self/fd` 计数，**检测 fd 增长**（delta>0 即告警）。
+  - 统一参数 / 退出码 / 日志，可独立运行，可接入 CI。
+- **C harness `tools/irt_diag/c_harness/smoke_leak.c`**（由 CMake 构建为 `irt_diag_harness`，仅 Linux）：复用公共 API，零 C++ 依赖；冒烟逐步骤打印 `SMOKE_*` 标记，泄漏模式打印 `LEAK_INIT_FD` / `LEAK_FINAL_FD`。
+- **覆盖率插桩**（TDD 红→绿的基础设施）：顶层 `INDURTDB_ENABLE_COVERAGE=ON` 以 `--coverage -O0 -g` 构建库；`coverage` 自定义目标运行 `ctest` 并（若 `gcovr` 可用）生成 `coverage.xml` / `coverage.html`。
+- **测试** `tests/unit/test_c_diag.cpp`（4 例）：`Tools.InspectReportsHealth`（巡检输出版本/点数/CRC/owner 且 crc_ok）、`Tools.SmokeEndToEnd`（harness 全流程退出 0）、`Tools.DetectsFdLeak`（反复启停无 fd 增长）、`Coverage.TargetBuildsAndRuns`（coverage 配置+构建库通过并产出 `.gcno`）。
+
 ---
 
 ## [3.3.0] — 2026-10-02「读写分离与双通道」
