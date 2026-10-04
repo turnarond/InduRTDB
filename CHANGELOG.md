@@ -63,6 +63,29 @@ All notable changes to InduRTDB.
 - **段内存开销**：新增 Header 64B + 索引区 `8B × roundup_pow2(2N)`。例：10000 点由 1.28MB → 约 1.54MB（索引 256KB）。索引为一次性的定长预分配，运行期不增长。
 - 升级流程：停机 → 迁移（T5 工具）或清理 `/dev/shm/indurtdb_*` → 全进程同时升级。回退：重新部署 v3.3.x + 清理段。
 
+### Added（T5 — 离线迁移工具 + 双版本共存验证）
+
+- **离线迁移工具 `tools/irt_migrate`**（纯 Python，符合工具集约定，不依赖 C 库）：`v1` 段 → `v2` 段。
+  - 逐字节搬运点位值 / 类型 / 质量 / `timestamp_ns`（入库时刻）；点位名随点位搬运，并在 v2 段内**重建 name→id 索引**（FNV-1a + 开放寻址 + 墓碑，与 `src/core/irt_index.c` 算法逐字节一致）。
+  - `source_timestamp_ns`（采集时刻）默认**置 0**（`--source-ts-mode keep` 可保留）；元数据区清零、订阅者心跳区清零（离线迁移，由新 `rtdbd` 重建）。
+  - Header 按 v2 布局构造并写入 **CRC32**（覆盖 `[0:16]+[48:72]`，与 `irt_header_crc32_of` 逐字节一致，复用标准 CRC-32/IEEE 802.3）。
+  - **版本保护**：源段非 v1（即已是 v2）时拒绝迁移，避免误覆盖。
+  - 子命令：`migrate --src <id> --dst <id> [--source-ts-mode zero|keep] [--force]`、`validate`、`info`；迁移后自动执行独立校验。
+- **独立校验**（与实现语言解耦）：重新解析 v1 源段与 v2 目标段，逐项比对容量 / 点位字节 / 索引一致性 / Header CRC，任一不一致即报错。
+- **双版本共存验证**：`v3.4` 库对 v1 段**版本协商拒绝挂载**（`IRT_SHM_ERR_VERSION`），印证"不支持新旧进程混跑"；迁移工具对 v2 源段拒绝，印证离线工具只认 v1。
+- **集成测试 `tests/unit/test_c_migration.cpp`**（TDD 红→绿）：进程内造 v1 段 → 驱动 Python 工具迁移 → 用**真实库 `indurtdb_h_open` 回挂 v2 段**并逐项校验（点位字段 / `source_ts` 清零 / `find_by_name` 索引）；库能成功 attach 即证明 v2 段字节级兼容。并验证 v3.4 拒绝挂载 v1 段。
+- **工具自测** `tools/irt_migrate/tests/test_migrate.py`：布局尺寸 / CRC / FNV-1a / 索引 / 完整迁移往返 / 版本拒绝，可直接 `python3 tests/test_migrate.py` 运行（无需 pytest）。
+
+### Added（T6 — 语义补齐：类型扩展 + 质量 OPC UA 映射）
+
+- **类型扩展**：点位 `value` union 新增 `int64 / uint32 / float`，复用既有 32B 联合体（**布局不变**，结构体仍为 128B、`align(128)`）。新增枚举 `INDURTDB_TYPE_INT64(4) / UINT32(5) / FLOAT(6)`。
+- **读写 API（v1 + v2 句柄）**：`indurtdb_{h_}write_int64/uint32/float`、`read_int64/uint32/float` 及携带采集时刻的 `write_*_ts`（v1 薄封装指向默认句柄，行为不变）。`irt_point_manager` 的 `pm_write_impl` switch 与 `_ts` 包装补齐三类型；读路径沿用既有模式（直接读 union 成员，与现有 int32/double 一致）。
+- **质量 OPC UA 映射（纯函数，无状态）**：`indurtdb_quality_to_status_code(uint8_t)` / `indurtdb_status_code_to_quality(uint32_t)` 双向可逆。base 码决定 severity(bit30-31)+子状态(code,bit0-15)，**量程位映射到 StatusCode 保留位(bit28-29)**（远离 severity、且避开 OPC UA 已定义位 bit24/25，仅用于本库产物回读，不得原样投递第三方 OPC UA 栈），与 severity/code 正交；未知 StatusCode 回退 `BAD`。映射表参考 OPC UA Part 4（Good/Bad/Uncertain、LocalOverride、OutOfService、NoCommunication、SensorFailure、ConfigurationError、LastUsableValue、InitialValue、SensorNotAccurate），可按现场需求调整。
+- **可用性判定**：`indurtdb_quality_is_usable(uint8_t)`——「值是否可用」只看基础码（量程位正交）。
+- **quality 分层宏**（bit0–3 基础码 + bit4–5 量程位 + bit6–7 预留，`QUALITY_BASE/LIMIT/MAKE` 与 0–10 基础码）已随 v3.4 Header 落地并由 `test_c_point_fields` 覆盖，本任务补齐其北向映射与可用性语义。
+- **质量写契约**：`write_*` 将 quality 置为纯 `GOOD`（量程位清零）；如需量程位，应在写之后调用 `set_quality`。`check_timeouts` 超时刻**保留**量程位（基础码改为 `TIMEOUT`，量程位不丢）。
+- **测试** `tests/unit/test_c_semantics.cpp`（11 例）：类型扩展 v1/v2 往返（int64 负值 / uint32 大值 / float / `_ts` 保采集时刻）、StatusCode 全 base×limit 双向往返、已知常量、未知回退 BAD、量程位存活、is_usable 只看基础码。
+
 ---
 
 ## [3.3.0] — 2026-10-02「读写分离与双通道」

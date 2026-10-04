@@ -24,3 +24,9 @@ if(TARGET test_c_version)
         INDURTDB_EXPECT_VERSION_PATCH=${PROJECT_VERSION_PATCH}
         INDURTDB_EXPECT_VERSION_STRING="${PROJECT_VERSION}")
 endif()
+
+# T5 迁移工具集成测试：告知测试脚本所在目录（驱动 Python 工具）
+if(TARGET test_c_migration)
+    target_compile_definitions(test_c_migration PRIVATE
+        INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools")
+endif()

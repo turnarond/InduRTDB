@@ -45,9 +45,12 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     }
     p->type = type;
     switch (type) {
-    case INDURTDB_TYPE_BOOL:   p->value.b = *(const bool*)value;     break;
-    case INDURTDB_TYPE_INT32:  p->value.i = *(const int32_t*)value;  break;
-    case INDURTDB_TYPE_DOUBLE: p->value.d = *(const double*)value;   break;
+    case INDURTDB_TYPE_BOOL:   p->value.b = *(const bool*)value;        break;
+    case INDURTDB_TYPE_INT32:  p->value.i = *(const int32_t*)value;     break;
+    case INDURTDB_TYPE_INT64:  p->value.i64 = *(const int64_t*)value;   break;
+    case INDURTDB_TYPE_UINT32: p->value.u32 = *(const uint32_t*)value;  break;
+    case INDURTDB_TYPE_FLOAT:  p->value.f = *(const float*)value;       break;
+    case INDURTDB_TYPE_DOUBLE: p->value.d = *(const double*)value;      break;
     case INDURTDB_TYPE_STRING:
         strncpy(p->value.str, (const char*)value, 31);
         p->value.str[31] = '\0';
@@ -78,6 +81,15 @@ int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value) {
 int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, 0);
 }
+int irt_pm_write_int64(irt_pm_t* pm, uint32_t id, int64_t value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT64, &value, 0);
+}
+int irt_pm_write_uint32(irt_pm_t* pm, uint32_t id, uint32_t value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_UINT32, &value, 0);
+}
+int irt_pm_write_float(irt_pm_t* pm, uint32_t id, float value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_FLOAT, &value, 0);
+}
 int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, 0);
 }
@@ -91,6 +103,15 @@ int irt_pm_write_int32_ts(irt_pm_t* pm, uint32_t id, int32_t value, uint64_t sou
 }
 int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, source_ts_ns);
+}
+int irt_pm_write_int64_ts(irt_pm_t* pm, uint32_t id, int64_t value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT64, &value, source_ts_ns);
+}
+int irt_pm_write_uint32_ts(irt_pm_t* pm, uint32_t id, uint32_t value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_UINT32, &value, source_ts_ns);
+}
+int irt_pm_write_float_ts(irt_pm_t* pm, uint32_t id, float value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_FLOAT, &value, source_ts_ns);
 }
 int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, source_ts_ns);
@@ -210,7 +231,9 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
             continue;
         }
 
-        p->quality = INDURTDB_QUALITY_TIMEOUT;
+        /* 超时刻保留量程位（T6：量程位与可用性正交，不得被基础码覆盖） */
+        p->quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_TIMEOUT,
+                                           INDURTDB_QUALITY_LIMIT(p->quality));
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
         __atomic_fetch_add(&hdr->stats.timeouts, 1, __ATOMIC_RELAXED);

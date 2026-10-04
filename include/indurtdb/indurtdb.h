@@ -28,6 +28,10 @@ extern "C" {
 #define INDURTDB_TYPE_INT32    1
 #define INDURTDB_TYPE_DOUBLE   2
 #define INDURTDB_TYPE_STRING   3
+/* v3.4 T6 类型扩展：复用 value union 已有 32B，布局不变 */
+#define INDURTDB_TYPE_INT64    4
+#define INDURTDB_TYPE_UINT32   5
+#define INDURTDB_TYPE_FLOAT    6
 
 #define INDURTDB_QUALITY_GOOD        0
 #define INDURTDB_QUALITY_BAD         1
@@ -42,6 +46,9 @@ typedef struct {
     union {
         bool    b;
         int32_t i;
+        int64_t i64;
+        uint32_t u32;
+        float   f;
         double  d;
         char    str[32];
     } value;
@@ -91,6 +98,17 @@ typedef struct {
 #define INDURTDB_QUALITY_MAKE(base, limit) \
         ((uint8_t)(((base) & 0x0Fu) | (((limit) & 0x03u) << 4)))
 
+/* ==== v3.4 T6: 质量语义与 OPC UA 映射（纯函数，无状态） ====
+ * 将分层质量码映射为 OPC UA StatusCode（供北向上送）。
+ * - base 码决定 severity(bit30-31) + 子状态(code, bit0-15)；
+ * - limit 位映射到 StatusCode 的保留位(bit28-29)——远离 severity(bit30-31)，且避开
+ *   OPC UA 已定义位(bit24 StructureChanged / bit25 SemanticsChanged)，不污染 severity 与 code；
+ * - 双向可逆（见 indurtdb.c 映射表），未知 StatusCode 回退为 BAD。 */
+uint32_t indurtdb_quality_to_status_code(uint8_t quality);
+uint8_t  indurtdb_status_code_to_quality(uint32_t status_code);
+/* 「值是否可用」只看基础码（量程位是与可用性正交的附加信息） */
+bool     indurtdb_quality_is_usable(uint8_t quality);
+
 /* ==== 错误码 (v3.4 起新增接口返回语义化负值) ====
  * 既有接口仍返回 -1（= INDURTDB_ERR_ARG 语义），新增接口使用下列码，
  * 便于调用方区分"参数错 / 没找到 / 空间满 / 未初始化 / 忙"。
@@ -139,6 +157,17 @@ int indurtdb_read_int32(uint32_t id, int32_t* value);
 int indurtdb_read_double(uint32_t id, double* value);
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
+
+/* ==== v3.4 T6: 类型扩展（int64 / uint32 / float，复用 value union 32B，布局不变） ==== */
+int indurtdb_write_int64(uint32_t id, int64_t value);
+int indurtdb_write_uint32(uint32_t id, uint32_t value);
+int indurtdb_write_float(uint32_t id, float value);
+int indurtdb_read_int64(uint32_t id, int64_t* value);
+int indurtdb_read_uint32(uint32_t id, uint32_t* value);
+int indurtdb_read_float(uint32_t id, float* value);
+int indurtdb_write_int64_ts(uint32_t id, int64_t value, uint64_t source_ts_ns);
+int indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t source_ts_ns);
+int indurtdb_write_float_ts(uint32_t id, float value, uint64_t source_ts_ns);
 /** 单拷贝快速读取点位数据 (seqlock 保护, 拷贝到线程本地缓冲后返回其指针).
  * 返回的指针在下一次 indurtdb_peek() 调用时被覆盖 (同线程).
  * 如需长期持有数据, 请用 indurtdb_read_point() 拷贝到自管理的缓冲区. */
@@ -222,6 +251,17 @@ int indurtdb_h_read_range(indurtdb_t* h, uint32_t start_id, uint16_t count,
 int indurtdb_h_write_range_bool(indurtdb_t* h, uint32_t start_id, const bool* values, uint16_t count);
 int indurtdb_h_write_range_int32(indurtdb_t* h, uint32_t start_id, const int32_t* values, uint16_t count);
 int indurtdb_h_write_range_double(indurtdb_t* h, uint32_t start_id, const double* values, uint16_t count);
+
+/* v3.4 T6: 类型扩展（int64 / uint32 / float，复用 value union 32B，布局不变） */
+int indurtdb_h_write_int64(indurtdb_t* h, uint32_t id, int64_t value);
+int indurtdb_h_write_uint32(indurtdb_t* h, uint32_t id, uint32_t value);
+int indurtdb_h_write_float(indurtdb_t* h, uint32_t id, float value);
+int indurtdb_h_read_int64(indurtdb_t* h, uint32_t id, int64_t* value);
+int indurtdb_h_read_uint32(indurtdb_t* h, uint32_t id, uint32_t* value);
+int indurtdb_h_read_float(indurtdb_t* h, uint32_t id, float* value);
+int indurtdb_h_write_int64_ts(indurtdb_t* h, uint32_t id, int64_t value, uint64_t source_ts_ns);
+int indurtdb_h_write_uint32_ts(indurtdb_t* h, uint32_t id, uint32_t value, uint64_t source_ts_ns);
+int indurtdb_h_write_float_ts(indurtdb_t* h, uint32_t id, float value, uint64_t source_ts_ns);
 
 int indurtdb_h_subscribe(indurtdb_t* h, uint32_t id, indurtdb_callback_t cb, void* user_data);
 int indurtdb_h_unsubscribe(indurtdb_t* h, uint32_t id);

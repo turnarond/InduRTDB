@@ -182,6 +182,30 @@ int indurtdb_h_write_string_ts(indurtdb_t* h, uint32_t id, const char* value, ui
     ENSURE_H(h);
     return h_write_and_notify(h, irt_pm_write_string_ts(&h->pm, id, value, ts), id);
 }
+int indurtdb_h_write_int64(indurtdb_t* h, uint32_t id, int64_t value) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_int64(&h->pm, id, value), id);
+}
+int indurtdb_h_write_uint32(indurtdb_t* h, uint32_t id, uint32_t value) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_uint32(&h->pm, id, value), id);
+}
+int indurtdb_h_write_float(indurtdb_t* h, uint32_t id, float value) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_float(&h->pm, id, value), id);
+}
+int indurtdb_h_write_int64_ts(indurtdb_t* h, uint32_t id, int64_t value, uint64_t ts) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_int64_ts(&h->pm, id, value, ts), id);
+}
+int indurtdb_h_write_uint32_ts(indurtdb_t* h, uint32_t id, uint32_t value, uint64_t ts) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_uint32_ts(&h->pm, id, value, ts), id);
+}
+int indurtdb_h_write_float_ts(indurtdb_t* h, uint32_t id, float value, uint64_t ts) {
+    ENSURE_H(h);
+    return h_write_and_notify(h, irt_pm_write_float_ts(&h->pm, id, value, ts), id);
+}
 
 /* ---- 读取 ---- */
 int indurtdb_h_read_bool(indurtdb_t* h, uint32_t id, bool* value) {
@@ -214,6 +238,30 @@ int indurtdb_h_read_string(indurtdb_t* h, uint32_t id, char* buffer, size_t buff
     indurtdb_point_t pt;
     if (irt_pm_read(&h->pm, id, &pt) != 0) { set_error("read failed"); return INDURTDB_ERR_ARG; }
     snprintf(buffer, buffer_size, "%s", pt.value.str);
+    return 0;
+}
+int indurtdb_h_read_int64(indurtdb_t* h, uint32_t id, int64_t* value) {
+    ENSURE_H(h);
+    if (!value) { set_error("null output pointer"); return INDURTDB_ERR_ARG; }
+    indurtdb_point_t pt;
+    if (irt_pm_read(&h->pm, id, &pt) != 0) { set_error("read failed"); return INDURTDB_ERR_ARG; }
+    *value = pt.value.i64;
+    return 0;
+}
+int indurtdb_h_read_uint32(indurtdb_t* h, uint32_t id, uint32_t* value) {
+    ENSURE_H(h);
+    if (!value) { set_error("null output pointer"); return INDURTDB_ERR_ARG; }
+    indurtdb_point_t pt;
+    if (irt_pm_read(&h->pm, id, &pt) != 0) { set_error("read failed"); return INDURTDB_ERR_ARG; }
+    *value = pt.value.u32;
+    return 0;
+}
+int indurtdb_h_read_float(indurtdb_t* h, uint32_t id, float* value) {
+    ENSURE_H(h);
+    if (!value) { set_error("null output pointer"); return INDURTDB_ERR_ARG; }
+    indurtdb_point_t pt;
+    if (irt_pm_read(&h->pm, id, &pt) != 0) { set_error("read failed"); return INDURTDB_ERR_ARG; }
+    *value = pt.value.f;
     return 0;
 }
 int indurtdb_h_read_point(indurtdb_t* h, uint32_t id, indurtdb_point_t* out) {
@@ -421,6 +469,15 @@ int indurtdb_write_double(uint32_t id, double value) {
 int indurtdb_write_string(uint32_t id, const char* value) {
     return v1_int(indurtdb_h_write_string(g_default, id, value));
 }
+int indurtdb_write_int64(uint32_t id, int64_t value) {
+    return v1_int(indurtdb_h_write_int64(g_default, id, value));
+}
+int indurtdb_write_uint32(uint32_t id, uint32_t value) {
+    return v1_int(indurtdb_h_write_uint32(g_default, id, value));
+}
+int indurtdb_write_float(uint32_t id, float value) {
+    return v1_int(indurtdb_h_write_float(g_default, id, value));
+}
 int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t ts) {
     return v1_int(indurtdb_h_write_bool_ts(g_default, id, value, ts));
 }
@@ -433,6 +490,15 @@ int indurtdb_write_double_ts(uint32_t id, double value, uint64_t ts) {
 int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t ts) {
     return v1_int(indurtdb_h_write_string_ts(g_default, id, value, ts));
 }
+int indurtdb_write_int64_ts(uint32_t id, int64_t value, uint64_t ts) {
+    return v1_int(indurtdb_h_write_int64_ts(g_default, id, value, ts));
+}
+int indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t ts) {
+    return v1_int(indurtdb_h_write_uint32_ts(g_default, id, value, ts));
+}
+int indurtdb_write_float_ts(uint32_t id, float value, uint64_t ts) {
+    return v1_int(indurtdb_h_write_float_ts(g_default, id, value, ts));
+}
 int indurtdb_read_bool(uint32_t id, bool* value) {
     return v1_int(indurtdb_h_read_bool(g_default, id, value));
 }
@@ -444,6 +510,15 @@ int indurtdb_read_double(uint32_t id, double* value) {
 }
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size) {
     return v1_int(indurtdb_h_read_string(g_default, id, buffer, buffer_size));
+}
+int indurtdb_read_int64(uint32_t id, int64_t* value) {
+    return v1_int(indurtdb_h_read_int64(g_default, id, value));
+}
+int indurtdb_read_uint32(uint32_t id, uint32_t* value) {
+    return v1_int(indurtdb_h_read_uint32(g_default, id, value));
+}
+int indurtdb_read_float(uint32_t id, float* value) {
+    return v1_int(indurtdb_h_read_float(g_default, id, value));
 }
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* out) {
     return v1_int(indurtdb_h_read_point(g_default, id, out));
@@ -502,4 +577,52 @@ int indurtdb_validate_id(uint32_t id) {
 }
 const char* indurtdb_get_last_error(void) {
     return g_last_error;
+}
+
+/* ==== v3.4 T6: 质量语义与 OPC UA 映射（纯函数，无状态） ====
+ * 映射表参考 OPC UA Part 4 的 StatusCode；base 码决定 severity + 子状态，
+ * limit 位映射到 StatusCode 保留位(bit28-29)——远离 severity(bit30-31)，且避开
+ * OPC UA 已定义位(bit24 StructureChanged / bit25 SemanticsChanged)，不污染 severity 与
+ * code(bit0-15)。未知 StatusCode 回退为 BAD。映射表可按现场需求调整。 */
+static const struct {
+    uint8_t  base;
+    uint32_t sc;
+} k_quality_to_sc[] = {
+    { INDURTDB_QUALITY_GOOD,           0x00000000u }, /* Good */
+    { INDURTDB_QUALITY_BAD,            0x80000000u }, /* Bad */
+    { INDURTDB_QUALITY_TIMEOUT,        0x408F0000u }, /* Uncertain_SensorNotAccurate */
+    { INDURTDB_QUALITY_SUBSTITUTED,    0x00D90000u }, /* Good_LocalOverride */
+    { INDURTDB_QUALITY_UNCERTAIN,      0x40000000u }, /* Uncertain */
+    { INDURTDB_QUALITY_NOT_INITIALIZED,0x408D0000u }, /* Uncertain_InitialValue */
+    { INDURTDB_QUALITY_OUT_OF_SERVICE, 0x808D0000u }, /* Bad_OutOfService */
+    { INDURTDB_QUALITY_COMM_FAILURE,   0x80870000u }, /* Bad_NoCommunication */
+    { INDURTDB_QUALITY_SENSOR_FAILURE, 0x808A0000u }, /* Bad_SensorFailure */
+    { INDURTDB_QUALITY_LAST_KNOWN,     0x40900000u }, /* Uncertain_LastUsableValue */
+    { INDURTDB_QUALITY_CONFIG_ERROR,   0x80A10000u }, /* Bad_ConfigurationError */
+};
+
+uint32_t indurtdb_quality_to_status_code(uint8_t quality) {
+    uint8_t  base  = INDURTDB_QUALITY_BASE(quality);
+    uint8_t  limit = INDURTDB_QUALITY_LIMIT(quality);
+    uint32_t sc    = 0x80000000u; /* 默认 Bad */
+    for (size_t i = 0; i < sizeof(k_quality_to_sc) / sizeof(k_quality_to_sc[0]); i++) {
+        if (k_quality_to_sc[i].base == base) { sc = k_quality_to_sc[i].sc; break; }
+    }
+    /* 量程位放进 StatusCode 保留位(bit28-29)，与 severity(bit30-31)/code(bit0-15) 正交 */
+    sc |= ((uint32_t)limit & 0x3u) << 28;
+    return sc;
+}
+
+uint8_t indurtdb_status_code_to_quality(uint32_t status_code) {
+    uint8_t  limit = (uint8_t)((status_code >> 28) & 0x3u);
+    uint32_t raw   = status_code & ~((uint32_t)0x3u << 28);  /* 抹去我们的 limit 位(bit28-29) */
+    uint8_t  base  = INDURTDB_QUALITY_BAD;                    /* 默认 Bad */
+    for (size_t i = 0; i < sizeof(k_quality_to_sc) / sizeof(k_quality_to_sc[0]); i++) {
+        if (k_quality_to_sc[i].sc == raw) { base = k_quality_to_sc[i].base; break; }
+    }
+    return INDURTDB_QUALITY_MAKE(base, limit);
+}
+
+bool indurtdb_quality_is_usable(uint8_t quality) {
+    return INDURTDB_QUALITY_BASE(quality) == INDURTDB_QUALITY_GOOD;
 }
