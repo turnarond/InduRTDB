@@ -124,7 +124,39 @@ def main() -> None:
                 assert update["value"] == "123", update                   # value 字符串化对齐
                 assert update["quality"] == "0", update                  # quality 字符串化对齐
 
-        print("E2E OK: REST(list/get/set/meta) + WebSocket(list/update) all passed")
+            # ---- v3.6 点位 CRUD（REST）----
+            r = client.post("/api/points", json={
+                "id": 20, "name": "Test.New_Point", "type": "int32", "access": 3})
+            assert r.status_code == 200, r.text
+            assert any(p["id"] == 20 for p in client.get("/api/points").json())
+
+            client.post("/api/points/20/set", json={"value": 55})
+            assert client.get("/api/points/20").json()["value"] == 55
+
+            r = client.post("/api/points/20/rename", json={"name": "Test.Renamed"})
+            assert r.status_code == 200, r.text
+            names = [p["name"] for p in client.get("/api/points").json()]
+            assert "Test.Renamed" in names and "Test.New_Point" not in names, names
+
+            r = client.delete("/api/points/20")
+            assert r.status_code == 200, r.text
+            assert not any(p["id"] == 20 for p in client.get("/api/points").json())
+
+            # ---- v3.6 命令终端 ----
+            def cmd(c):
+                rr = client.post("/api/cmd", json={"cmd": c})
+                assert rr.status_code == 200, rr.text
+                return rr.json()["output"]
+
+            assert cmd("ping") == ["PONG"]
+            assert cmd("create 21 Term.CmdPoint int32") == ["OK"]
+            assert cmd("set Term.CmdPoint 7") == ["OK"]
+            assert cmd("get Term.CmdPoint")[0].startswith("7")
+            assert cmd("find Term.CmdPoint") == ["21"]
+            assert cmd("del Term.CmdPoint") == ["OK"]
+            assert cmd("bogus")[0].startswith("未知命令")
+
+        print("E2E OK: REST(list/get/set/meta/CRUD/cmd) + WebSocket(list/update) all passed")
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

@@ -9,6 +9,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rtdb_client import (  # noqa: E402
     REQ_HDR, RESP_HDR, WRITE_REQ, GET_REQ, GET_RESP, LIST_REQ, POINT_INFO,
     NOTIFY, FIND_REQ, FIND_RESP, META_REQ, META_PAYLOAD,
+    CREATE_REQ, DELETE_REQ, RENAME_REQ,
+    OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT,
+    RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
 )
@@ -28,6 +31,63 @@ def test_struct_sizes_match_c_layout():
     assert FIND_RESP.size == 4
     assert META_REQ.size == 4
     assert META_PAYLOAD.size == 32
+    # v3.6 CRUD
+    assert CREATE_REQ.size == 72
+    assert DELETE_REQ.size == 4
+    assert RENAME_REQ.size == 68
+
+
+def test_crud_opcodes():
+    assert (OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT) == (12, 13, 14)
+
+
+def test_crud_payload_roundtrip():
+    name = b"Test.New_Point".ljust(64, b"\x00")
+    b = CREATE_REQ.pack(20, TYPE_INT32, 3, name)
+    assert len(b) == 72
+    pid, ptype, access, nm = CREATE_REQ.unpack(b)
+    assert pid == 20 and ptype == TYPE_INT32 and access == 3
+    assert nm.rstrip(b"\x00") == b"Test.New_Point"
+
+    b2 = RENAME_REQ.pack(20, b"Test.Renamed".ljust(64, b"\x00"))
+    assert len(b2) == 68
+    pid2, nm2 = RENAME_REQ.unpack(b2)
+    assert pid2 == 20 and nm2.rstrip(b"\x00") == b"Test.Renamed"
+
+    b3 = DELETE_REQ.pack(20)
+    assert len(b3) == 4 and DELETE_REQ.unpack(b3)[0] == 20
+
+
+def test_create_point_type_resolution():
+    """create_point 接受类型名；未知类型名必须报错（避免静默写成非法 type）。"""
+    captured = {}
+
+    class FakeClient:
+        def __init__(self):
+            pass
+
+        def _ok(self, opcode, payload):
+            captured["opcode"] = opcode
+            captured["payload"] = payload
+            return b""
+
+    # 复用 RtdbClient 的方法实现（不建连）
+    from rtdb_client import RtdbClient
+    c = FakeClient()
+    RtdbClient.create_point(c, 20, "Test.New_Point", "int32", 3)
+    assert captured["opcode"] == OP_CREATE_POINT
+    pid, ptype, access, nm = CREATE_REQ.unpack(captured["payload"])
+    assert (pid, ptype, access) == (20, TYPE_INT32, 3)
+    assert nm.rstrip(b"\x00") == b"Test.New_Point"
+
+    try:
+        RtdbClient.create_point(c, 21, "Bad", "int128")
+        raise AssertionError("unknown type name should raise")
+    except RtdbError:
+        pass
+
+    assert NAME_TYPE["string"] == 3
+
 
 
 def test_req_resp_hdr_layout():
@@ -80,4 +140,7 @@ if __name__ == "__main__":
     test_value_roundtrip_numeric()
     test_get_resp_roundtrip()
     test_point_info_roundtrip()
+    test_crud_opcodes()
+    test_crud_payload_roundtrip()
+    test_create_point_type_resolution()
     print("ALL OK")

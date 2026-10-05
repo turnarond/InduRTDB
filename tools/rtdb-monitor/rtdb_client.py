@@ -31,6 +31,9 @@ OP_GET_META = 8
 OP_SET_META = 9
 OP_GET = 10
 OP_LIST = 11
+OP_CREATE_POINT = 12
+OP_DELETE_POINT = 13
+OP_RENAME_POINT = 14
 
 # 状态码
 ST_OK = 0
@@ -62,6 +65,9 @@ FIND_REQ = struct.Struct("<64s")          # name[64]
 FIND_RESP = struct.Struct("<I")           # point_id
 META_REQ = struct.Struct("<I")            # point_id
 META_PAYLOAD = struct.Struct("<ddfI8x")   # eur_min, eur_max, deadband, flags, reserved[8]
+CREATE_REQ = struct.Struct("<IBB2x64s")   # point_id, type, access, reserved[2], name[64]
+DELETE_REQ = struct.Struct("<I")          # point_id
+RENAME_REQ = struct.Struct("<I64s")        # point_id, name[64]
 
 TYPE_NAME = {
     TYPE_BOOL: "bool", TYPE_INT32: "int32", TYPE_DOUBLE: "double", TYPE_STRING: "string",
@@ -227,6 +233,31 @@ class RtdbClient:
         body = self._ok(OP_GET_META, META_REQ.pack(point_id))
         eur_min, eur_max, deadband, flags = META_PAYLOAD.unpack(body)
         return {"eurMin": eur_min, "eurMax": eur_max, "deadband": deadband, "flags": flags}
+
+    # ---- v3.6 管控写通道：点位 CRUD（服务端须放行 uid 策略） ----
+    def create_point(self, point_id: int, name: str, ptype: int, access: int = 3) -> None:
+        """注册点位。ptype 可为 int 或类型名（如 'int32'）。access 默认读写(3)。"""
+        if isinstance(ptype, str):
+            if ptype not in NAME_TYPE:
+                raise RtdbError(f"unknown type name: {ptype}")
+            ptype = NAME_TYPE[ptype]
+        ptype = int(ptype)
+        if not 0 <= ptype <= TYPE_FLOAT:
+            raise RtdbError(f"type out of range: {ptype}")
+        self._ok(OP_CREATE_POINT, CREATE_REQ.pack(
+            int(point_id), ptype, int(access),
+            name.encode("utf-8")[:64].ljust(64, b"\x00"),
+        ))
+
+    def delete_point(self, point_id: int) -> None:
+        """注销点位（清空 name 并移除 name→id 索引）。"""
+        self._ok(OP_DELETE_POINT, DELETE_REQ.pack(int(point_id)))
+
+    def rename_point(self, point_id: int, name: str) -> None:
+        """重命名点位（同步维护 name→id 索引）。"""
+        self._ok(OP_RENAME_POINT, RENAME_REQ.pack(
+            int(point_id), name.encode("utf-8")[:64].ljust(64, b"\x00"),
+        ))
 
 
 class NotifyListener:

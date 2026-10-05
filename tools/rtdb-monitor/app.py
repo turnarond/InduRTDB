@@ -172,6 +172,161 @@ def _deny():
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
+# ---- v3.6 管控写通道：点位 CRUD ----
+
+def _refresh_registry() -> None:
+    """CRUD 后刷新 id→name 缓存，并让监听线程订阅新增 id（含改名后的清单同步）。"""
+    try:
+        pts = api_client.list_points()
+    except Exception:  # noqa: BLE001
+        return
+    name_by_id.clear()
+    for p in pts:
+        name_by_id[p["id"]] = p["name"]
+    if listener:
+        try:
+            listener.subscribe([p["id"] for p in pts])
+        except Exception:  # noqa: BLE001
+            pass
+
+
+@app.post("/api/points")
+async def api_create(payload: dict, token: str | None = Query(default=None),
+                    authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
+        return _deny()
+    pid = payload.get("id")
+    name = payload.get("name")
+    if pid is None or not name:
+        return {"error": "id and name are required"}, 400
+    try:
+        api_client.create_point(pid, name, payload.get("type", "int32"),
+                                payload.get("access", 3))
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}, 400
+    _refresh_registry()
+    return {"ok": True, "id": pid, "name": name}
+
+
+@app.delete("/api/points/{point_id}")
+def api_delete(point_id: int, token: str | None = Query(default=None),
+               authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
+        return _deny()
+    try:
+        api_client.delete_point(point_id)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}, 404
+    _refresh_registry()
+    return {"ok": True, "id": point_id}
+
+
+@app.post("/api/points/{point_id}/rename")
+async def api_rename(point_id: int, payload: dict, token: str | None = Query(default=None),
+                     authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
+        return _deny()
+    name = payload.get("name")
+    if not name:
+        return {"error": "name is required"}, 400
+    try:
+        api_client.rename_point(point_id, name)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}, 400
+    _refresh_registry()
+    return {"ok": True, "id": point_id, "name": name}
+
+
+# ---- v3.6 命令终端（类 Redis CLI 的最小命令集） ----
+
+def _resolve_id(tok: str) -> int:
+    """把 id 字面量或点位名解析为 id（名为非数字时按名查找）。"""
+    s = str(tok).strip()
+    if s.lstrip("-").isdigit():
+        return int(s)
+    return api_client.find_by_name(s)
+
+
+def _run_cmd(line: str) -> list[str]:
+    """执行一条终端命令，返回输出行。失败统一以 ERR: 前缀返回，不抛异常。"""
+    parts = line.strip().split()
+    if not parts:
+        return []
+    cmd, args = parts[0].lower(), parts[1:]
+    try:
+        if cmd == "help":
+            return [
+                "可用命令：",
+                "  ping                              测试连通",
+                "  list                              列出全部点位",
+                "  find <name>                       按名查 id",
+                "  get <id|name>                     读当前值",
+                "  set <id|name> <value>             设值",
+                "  meta <id|name>                    读元数据",
+                "  create <id> <name> [type] [access] 新建点位",
+                "  del <id|name>                     删除点位",
+                "  rename <id|name> <newname>        重命名点位",
+            ]
+        if cmd == "ping":
+            return ["PONG" if api_client.ping() else "ERR: ping failed"]
+        if cmd == "list":
+            pts = api_client.list_points()
+            return [f"{p['id']}\t{p['name']}\t{p['typeName']}" for p in pts] or ["(空)"]
+        if cmd == "find":
+            if not args:
+                return ["用法: find <name>"]
+            return [str(api_client.find_by_name(args[0]))]
+        if cmd == "meta":
+            if not args:
+                return ["用法: meta <id|name>"]
+            m = api_client.get_meta(_resolve_id(args[0]))
+            return [f"eurMin={m['eurMin']} eurMax={m['eurMax']} "
+                    f"deadband={m['deadband']} flags={m['flags']}"]
+        if cmd == "get":
+            if not args:
+                return ["用法: get <id|name>"]
+            p = api_client.get_point(_resolve_id(args[0]))
+            return [f"{p['value']}  (quality={p['quality']}, ts={p['ts']})"]
+        if cmd == "set":
+            if len(args) < 2:
+                return ["用法: set <id|name> <value>"]
+            pid = _resolve_id(args[0])
+            api_client.write_point(pid, api_client.get_point(pid)["type"], args[1])
+            return ["OK"]
+        if cmd == "create":
+            if len(args) < 2:
+                return ["用法: create <id> <name> [type] [access]"]
+            api_client.create_point(int(args[0]), args[1],
+                                    args[2] if len(args) > 2 else "int32",
+                                    int(args[3]) if len(args) > 3 else 3)
+            _refresh_registry()
+            return ["OK"]
+        if cmd in ("del", "delete"):
+            if not args:
+                return ["用法: del <id|name>"]
+            api_client.delete_point(_resolve_id(args[0]))
+            _refresh_registry()
+            return ["OK"]
+        if cmd == "rename":
+            if len(args) < 2:
+                return ["用法: rename <id|name> <newname>"]
+            api_client.rename_point(_resolve_id(args[0]), args[1])
+            _refresh_registry()
+            return ["OK"]
+        return [f"未知命令: {cmd}（输入 help 查看可用命令）"]
+    except Exception as e:  # noqa: BLE001
+        return [f"ERR: {e}"]
+
+
+@app.post("/api/cmd")
+async def api_cmd(payload: dict, token: str | None = Query(default=None),
+                  authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
+        return _deny()
+    line = str(payload.get("cmd", ""))
+    return {"cmd": line, "output": _run_cmd(line)}
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
     auth = ws.headers.get("authorization")
@@ -239,12 +394,12 @@ async def _ws_set(ws: WebSocket, msg: dict) -> None:
         await ws.send_json({"op": "error", "msg": str(e)})
 
 
-@app.get("/")
-def index():
-    return FileResponse(os.path.join(HERE, "static", "index.html"))
+# 优先托管 Vite 构建产物 web/dist；未构建时回退到原生 static/。
+WEB_DIST = os.path.join(HERE, "web", "dist")
+WEB_STATIC = os.path.join(HERE, "static")
+WEB_DIR = WEB_DIST if os.path.isdir(WEB_DIST) else WEB_STATIC
 
-
-app.mount("/", StaticFiles(directory=os.path.join(HERE, "static"), html=True), name="static")
+app.mount("/", StaticFiles(directory=WEB_DIR, html=True), name="web")
 
 
 def main() -> None:

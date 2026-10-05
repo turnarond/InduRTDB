@@ -37,6 +37,13 @@
 #define RTDBD_OP_GET        10u /* 请求：point_id；响应：64B 点位值快照（status==OK 时） */
 #define RTDBD_OP_LIST       11u /* 请求：max+offset；响应：点位信息数组（id/type/access/name） */
 
+/* v3.6 管控写通道：点位 CRUD（须鉴权，deny by default，同 SET_META/WRITE）。
+ * 运行时在共享内存注册表内增/删/改名；重命名/删除同步维护 name→id 索引。
+ * 仅新增 opcode，不改动既有负载布局，故协议主版本仍为 2。 */
+#define RTDBD_OP_CREATE_POINT 12u /* 请求：id+type+access+name[64]；管控写，须鉴权 */
+#define RTDBD_OP_DELETE_POINT 13u /* 请求：point_id；管控写，须鉴权 */
+#define RTDBD_OP_RENAME_POINT 14u /* 请求：point_id+name[64]；管控写，须鉴权 */
+
 /* 单连接最大订阅点数 */
 #define RTDBD_SUB_MAX 32u
 
@@ -52,6 +59,10 @@
 #define RTDBD_TYPE_BOOL   0u
 #define RTDBD_TYPE_INT32  1u
 #define RTDBD_TYPE_DOUBLE 2u
+#define RTDBD_TYPE_STRING 3u
+#define RTDBD_TYPE_INT64  4u
+#define RTDBD_TYPE_UINT32 5u
+#define RTDBD_TYPE_FLOAT  6u
 
 #define RTDBD_AUDIT_CAPACITY 256u
 
@@ -172,5 +183,31 @@ typedef struct {
 /* 布局锁死：与 rtdbd.c 的编解码、Python 端复刻保持一致 */
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_get_resp_t) == 64, "rtdbd_get_resp_t must be 64B");
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_point_info_t) == 72, "rtdbd_point_info_t must be 72B");
+
+/* ---- v3.6 管控写通道：点位 CRUD 负载 ---- */
+
+/* CREATE_POINT 请求负载 72B（id + 类型 + 权限 + 名称） */
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  access;
+    uint8_t  reserved[2];
+    char     name[64];
+} rtdbd_create_req_t;
+
+/* DELETE_POINT 请求负载 4B */
+typedef struct {
+    uint32_t point_id;
+} rtdbd_delete_req_t;
+
+/* RENAME_POINT 请求负载 68B（id + 新名称） */
+typedef struct {
+    uint32_t point_id;
+    char     name[64];
+} rtdbd_rename_req_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_create_req_t) == 72, "rtdbd_create_req_t must be 72B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_delete_req_t) == 4, "rtdbd_delete_req_t must be 4B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_rename_req_t) == 68, "rtdbd_rename_req_t must be 68B");
 
 #endif /* RTDBD_PROTOCOL_H_ */

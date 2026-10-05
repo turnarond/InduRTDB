@@ -5,9 +5,21 @@
 
 > 实施状态：C 端 `OP_GET`/`OP_LIST` 协议扩展（`protocol.h` + `rtdbd.c` 分派 + 静态断言）、
 > `tests/integration/test_rtdbd_proto_v2.cpp` 用例、纯 Python 客户端 `rtdb_client.py`、
-> FastAPI 后端 `app.py`、原生前端 `static/`、单测 `tests/test_rtdb_client.py`、
+> FastAPI 后端 `app.py`、单测 `tests/test_rtdb_client.py`、
 > 端到端冒烟 `run_smoke.sh`（及 CI 入口 `scripts/run_monitor_smoke.sh`）均已落地；
 > `bash run_smoke.sh` 通过（ping/list/write/get/find 全部 OK），ctest 全绿。
+>
+> **Phase 2（已实施，v3.6）**：点位管控写与命令终端——新增 `OP_CREATE_POINT`(12)/
+> `OP_DELETE_POINT`(13)/`OP_RENAME_POINT`(14)（管控写，uid 鉴权，deny by default），
+> `indurtdb` 库新增 `create/delete/rename_point` API；后端提供 REST 增删改与
+> `POST /api/cmd` 命令终端（`ping/list/find/get/set/meta/create/del/rename`，参数可用点位名）；
+> 前端迁移至 **Vite + Vue3 SFC + Element Plus**（`web/`，构建产物 `web/dist` 由 FastAPI 托管），
+> 点位表支持分页/过滤/行内重命名/删除/新建对话框，新增命令终端页、详情抽屉实时曲线、深色模式。
+> 验证：`test_rtdbd_proto_v2`（含 `PointCrud`、`PointCrudRequiresAuth`）通过、
+> `test_e2e.py`（REST CRUD + 终端命令）通过、`test_rtdb_client.py` 通过。
+>
+> **未纳入（v3.7 规划，见白皮书）**：点位分区/命名空间（类 Redis db0/db1）——属数据模型层改动
+> （id 空间、name→id 索引、uid 策略均需引入分区维度），需独立评估与重构评审，本期不做。
 - **关联**：v3.4 T9/T10 的 rtdbd 管控通道；复用 `rtdbd/protocol.h` UDS 协议
 - **目标**：提供类 Redis Insight 的 RTDB Web 监控台——枚举全部点位、实时值推送、按名/id 查看、设置点位值。
 

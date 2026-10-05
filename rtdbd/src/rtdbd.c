@@ -476,6 +476,99 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         return send_all(fd, &resp, sizeof(resp));
     }
 
+    /* ---- v3.6 管控写通道：点位 CRUD（管控写，须鉴权，deny by default） ---- */
+    if (req.opcode == RTDBD_OP_CREATE_POINT) {
+        rtdbd_create_req_t c;
+        if (req.payload_len != sizeof(c) || recv_all(fd, &c, sizeof(c)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, c.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        c.name[sizeof(c.name) - 1] = '\0';
+        int rc = indurtdb_create_point(c.point_id, c.name, c.type, c.access);
+        if (rc == INDURTDB_ERR_ARG || rc == INDURTDB_ERR_FULL)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, c.point_id, now_ns());
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    if (req.opcode == RTDBD_OP_DELETE_POINT) {
+        rtdbd_delete_req_t d;
+        if (req.payload_len != sizeof(d) || recv_all(fd, &d, sizeof(d)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, d.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        int rc = indurtdb_delete_point(d.point_id);
+        if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc == INDURTDB_ERR_ARG)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, d.point_id, now_ns());
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    if (req.opcode == RTDBD_OP_RENAME_POINT) {
+        rtdbd_rename_req_t r;
+        if (req.payload_len != sizeof(r) || recv_all(fd, &r, sizeof(r)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, r.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        r.name[sizeof(r.name) - 1] = '\0';
+        int rc = indurtdb_rename_point(r.point_id, r.name);
+        if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc == INDURTDB_ERR_ARG || rc == INDURTDB_ERR_FULL)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, r.point_id, now_ns());
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
     /* ---- v3.5 监控：读取单点当前值（读，无需鉴权） ---- */
     if (req.opcode == RTDBD_OP_GET) {
         rtdbd_get_req_t g;

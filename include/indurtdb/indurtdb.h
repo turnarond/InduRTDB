@@ -19,9 +19,9 @@ extern "C" {
 
 /* ==== 版本 (须与 VERSION 文件、CMake project(VERSION) 一致) ==== */
 #define INDURTDB_VERSION_MAJOR 3
-#define INDURTDB_VERSION_MINOR 5
+#define INDURTDB_VERSION_MINOR 6
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "3.5.0"
+#define INDURTDB_VERSION_STRING "3.6.0"
 
 /* ==== 点位类型/质量/权限常量 (与 v2.x 枚举值一致) ==== */
 #define INDURTDB_TYPE_BOOL     0
@@ -207,6 +207,9 @@ int indurtdb_find_by_name(const char* name, uint32_t* out_id);
  * 读/写前须确保 id 对应的点已存在 (注册), 否则数据无意义。 */
 int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta);
 int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
+int indurtdb_create_point(uint32_t id, const char* name, int type, int access);
+int indurtdb_delete_point(uint32_t id);
+int indurtdb_rename_point(uint32_t id, const char* name);
 int  indurtdb_check_timeouts(uint64_t timeout_ns);
 uint64_t indurtdb_get_write_count(void);
 uint64_t indurtdb_get_timeout_count(void);
@@ -276,6 +279,16 @@ void indurtdb_h_update_heartbeat(indurtdb_t* h);
 int indurtdb_h_find_by_name(indurtdb_t* h, const char* name, uint32_t* out_id);
 int indurtdb_h_get_meta(indurtdb_t* h, uint32_t id, indurtdb_meta_t* meta);
 int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta);
+
+/* v3.6 管控写通道：点位 CRUD（运行时注册表增删改名；须配合 rtdbd 的 uid 鉴权使用）。
+ * create: 在空闲槽(id 对应点位 name[0]=='\0')注册；同名已存在(指其他 id)返回 ERR_ARG；
+ *         同 id 重注册按幂等更新。
+ * delete: 清空 name[0] 并注销 name→id 索引；点位不存在返回 ERR_NOT_FOUND。
+ * rename: 改 name 并同步索引（原子）；点位不存在返回 ERR_NOT_FOUND；同名(同 id)为幂等 no-op。
+ * 返回 INDURTDB_OK / INDURTDB_ERR_ARG / INDURTDB_ERR_NOT_FOUND / INDURTDB_ERR_FULL / INDURTDB_ERR_BUSY。 */
+int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int type, int access);
+int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id);
+int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name);
 
 int indurtdb_h_check_timeouts(indurtdb_t* h, uint64_t timeout_ns);
 uint64_t indurtdb_h_get_write_count(indurtdb_t* h);

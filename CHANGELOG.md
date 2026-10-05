@@ -4,6 +4,33 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.6.0] — 2026-10-05「点位管控写与命令终端」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md` Phase 2)
+
+把 `rtdb-monitor` 从「只读监控」推进到「可管理 + 类 Redis CLI」：点位支持运行时增/删/改名，并提供命令终端与前端工程化界面。
+
+### Added
+- **rtdbd 协议扩展（加法式，协议主版本仍为 2）**：新增三个**管控写** opcode（与 `OP_WRITE`/`OP_SET_META` 同权，走 `SO_PEERCRED` + uid 策略，deny by default）
+  - `RTDBD_OP_CREATE_POINT`(12)：`id + type + access + name[64]` 注册点位（72B）。
+  - `RTDBD_OP_DELETE_POINT`(13)：注销点位（清空 `name[0]` 并移除 name→id 索引）。
+  - `RTDBD_OP_RENAME_POINT`(14)：`id + name[64]` 改名并同步索引（持写锁内原子完成）。
+- **indurtdb 库新增 CRUD API**：`indurtdb_h_create_point/delete_point/rename_point` 及 v1 同名薄封装；复用 `load_config` 的 seqlock 写锁模式，索引用 `_locked` 变体保证原子性；建点位时拒绝同名（指其他 id）与已占用 id，删除/改名对不存在的点位返回 `NOT_FOUND`。
+- **布局静态断言**：`CREATE_REQ` 72B / `DELETE_REQ` 4B / `RENAME_REQ` 68B 与 Python 客户端逐字节对齐。
+- **Python 客户端**：`create_point`（支持类型名如 `int32`）/ `delete_point` / `rename_point`。
+- **Web 后端**：REST `POST /api/points`（新建）、`DELETE /api/points/{id}`、`POST /api/points/{id}/rename`（改名）；`POST /api/cmd` 命令终端支持 `ping/list/find/get/set/meta/create/del/rename`（参数可用点位名）。
+- **前端工程化**：迁移到 **Vite + Vue3 SFC + Element Plus**（构建产物 `web/dist` 由 FastAPI 托管）；点位表支持分页、名称/类型/权限过滤、行内重命名与删除、新建点位对话框；新增**命令终端**页（历史/上下键/清屏）；点位详情抽屉含实时曲线；深色模式与专业布局。
+- **测试**：`tests/integration/test_rtdbd_proto_v2.cpp` 新增 `PointCrud`（create→get→rename→find→delete）与 `PointCrudRequiresAuth`（默认策略须拒绝）；`tests/test_rtdb_client.py` 新增 CRUD 编解码/类型解析用例；`tests/test_e2e.py` 覆盖 REST CRUD 与终端命令。
+
+### Changed
+- 前端由原生 HTML/JS（`static/`）迁至 `web/` 工程；`app.py` 优先托管 `web/dist`，未构建时回退 `static/`。
+- 版本号四处同步为 3.6.0（`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 宏 / CHANGELOG）。
+
+### Notes / 已知限制
+- 运行时 CRUD 落在**共享内存注册表**，进程重启后不保留（需持久化则另立版本规划，配合配置回写）。
+- 新建点位受 `--max-points` 上限约束；点位类型受 8B `value_bits` 限制，字符串点位写值仍不可用。
+- **点位分区（类似 Redis db0/db1）不在本版本**：已在 `docs/01-白皮书/01-产品白皮书.md` 演进路线登记为 **v3.7 规划项**，属数据模型层改动，待独立评估。
+
+---
+
 ## [3.5.0] — 2026-10-05「RTDB 监控台 rtddb-monitor」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md`)
 
 新增可选监控工具 `tools/rtdb-monitor/`（纯 Python，零 C 依赖），提供类 Redis Insight 的 Web 监控台——枚举全部点位、实时值推送、按名/id 查看、设置点位值。

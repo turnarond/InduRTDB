@@ -357,6 +357,107 @@ TEST(ProtoV2, ListPoints)
     p.stop();
 }
 
+/* 7. v3.6 管控写：点位 CRUD（create → get → rename → find → delete） */
+TEST(ProtoV2, PointCrud)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("crud", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    /* create id=20 int32 读写 */
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 20;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Test.New_Point", sizeof(c.name) - 1);
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    /* 建完即可读（GET 读免鉴权） */
+    rtdbd_get_req_t g;
+    memset(&g, 0, sizeof(g));
+    g.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_get_resp_t));
+
+    /* rename 为新名 */
+    rtdbd_rename_req_t rn;
+    memset(&rn, 0, sizeof(rn));
+    rn.point_id = 20;
+    strncpy(rn.name, "Test.Renamed", sizeof(rn.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_RENAME_POINT, &rn, sizeof(rn), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    /* 旧名应失效，新名应解析到 20 */
+    rtdbd_find_req_t f;
+    memset(&f, 0, sizeof(f));
+    strncpy(f.name, "Test.New_Point", sizeof(f.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_FIND_BY_NAME, &f, sizeof(f), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    memset(&f, 0, sizeof(f));
+    strncpy(f.name, "Test.Renamed", sizeof(f.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_FIND_BY_NAME, &f, sizeof(f), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_find_resp_t));
+    rtdbd_find_resp_t fr;
+    memcpy(&fr, body.data(), sizeof(fr));
+    EXPECT_EQ(fr.point_id, 20u);
+
+    /* delete 后 GET 应 NOT_FOUND */
+    rtdbd_delete_req_t d;
+    memset(&d, 0, sizeof(d));
+    d.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_DELETE_POINT, &d, sizeof(d), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    memset(&g, 0, sizeof(g));
+    g.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    close(fd);
+    p.stop();
+}
+
+/* 8. v3.6 管控写鉴权：默认策略（deny all）下 create/delete 必须被拒 */
+TEST(ProtoV2, PointCrudRequiresAuth)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("denycrud", "# no rules\n", kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 30;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Denied.Point", sizeof(c.name) - 1);
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_DENIED);
+
+    rtdbd_delete_req_t d;
+    memset(&d, 0, sizeof(d));
+    d.point_id = 10;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_DELETE_POINT, &d, sizeof(d), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_DENIED);
+
+    close(fd);
+    p.stop();
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

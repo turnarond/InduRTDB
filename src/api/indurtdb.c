@@ -418,6 +418,133 @@ int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta)
     return rc;
 }
 
+/* ---- v3.6 管控写通道：点位 CRUD（运行时注册表增删改名） ---- */
+
+/* 在指定槽写入点位静态属性（不触索引）。调用方须持写锁。 */
+static int h_point_register(irt_shm_t* shm, uint32_t id, const char* name, int type, int access)
+{
+    indurtdb_point_t* p = &irt_shm_points(shm)[id];
+    p->type   = (uint8_t)type;
+    p->access = (uint8_t)access;
+    p->unit   = 0;
+    p->quality = INDURTDB_QUALITY_GOOD;   /* 0: 新点初始 Good */
+    memset(&p->value, 0, sizeof(p->value));
+    strncpy(p->name, name, sizeof(p->name) - 1);
+    p->name[sizeof(p->name) - 1] = '\0';
+    return 0;
+}
+
+int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int type, int access)
+{
+    ENSURE_H(h);
+    if (!name || name[0] == '\0') { set_error("empty name"); return INDURTDB_ERR_ARG; }
+    if (type < 0 || type > INDURTDB_TYPE_FLOAT) { set_error("bad type"); return INDURTDB_ERR_ARG; }
+    if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
+
+    /* 同名已注册到其他 id → 拒绝（管理面低并发，锁外探测可接受） */
+    uint32_t exist = 0;
+    if (irt_index_lookup(&h->shm, name, &exist) == 0 && exist != id) {
+        set_error("name already exists"); return INDURTDB_ERR_ARG;
+    }
+
+    irt_header_t* hdr = irt_shm_header(&h->shm);
+    if (!hdr) return INDURTDB_ERR_ARG;
+
+    for (int attempt = 0; attempt < IRT_SEQLOCK_MAX_RETRY; ++attempt) {
+        uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+        if (seq0 & 1ULL) { sched_yield(); continue; }
+        indurtdb_point_t* p = &irt_shm_points(&h->shm)[id];
+        if (p->name[0] != '\0') {            /* 槽已占用 */
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            set_error("point id already registered"); return INDURTDB_ERR_FULL;
+        }
+        h_point_register(&h->shm, id, name, type, access);
+        __atomic_thread_fence(__ATOMIC_RELEASE);
+        irt_seqlock_write_end(&hdr->write_seq, seq0);
+
+        /* 索引插入锁释放后单独取锁（与 load_config 同模式，避免嵌套自锁） */
+        int irc = irt_index_insert(&h->shm, name, id);
+        if (irc == INDURTDB_ERR_FULL) {       /* 索引满：回滚注册，避免不一致 */
+            for (int a2 = 0; a2 < IRT_SEQLOCK_MAX_RETRY; ++a2) {
+                uint64_t s2 = irt_seqlock_write_begin(&hdr->write_seq);
+                if (s2 & 1ULL) { sched_yield(); continue; }
+                irt_shm_points(&h->shm)[id].name[0] = '\0';
+                irt_seqlock_write_end(&hdr->write_seq, s2);
+                break;
+            }
+            set_error("index full"); return INDURTDB_ERR_FULL;
+        }
+        return irc;
+    }
+    set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+
+int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
+{
+    ENSURE_H(h);
+    if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
+    irt_header_t* hdr = irt_shm_header(&h->shm);
+    if (!hdr) return INDURTDB_ERR_ARG;
+
+    for (int attempt = 0; attempt < IRT_SEQLOCK_MAX_RETRY; ++attempt) {
+        uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+        if (seq0 & 1ULL) { sched_yield(); continue; }
+        indurtdb_point_t* p = &irt_shm_points(&h->shm)[id];
+        if (p->name[0] == '\0') {
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            set_error("point not found"); return INDURTDB_ERR_NOT_FOUND;
+        }
+        char old[64];
+        memcpy(old, p->name, sizeof(old));
+        p->name[0] = '\0';                      /* 先标记空闲 */
+        irt_index_remove_locked(&h->shm, old); /* 持锁内用 _locked 变体（原子） */
+        irt_seqlock_write_end(&hdr->write_seq, seq0);
+        return INDURTDB_OK;
+    }
+    set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+
+int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
+{
+    ENSURE_H(h);
+    if (!name || name[0] == '\0') { set_error("empty name"); return INDURTDB_ERR_ARG; }
+    if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
+
+    uint32_t exist = 0;
+    if (irt_index_lookup(&h->shm, name, &exist) == 0 && exist != id) {
+        set_error("name already exists"); return INDURTDB_ERR_ARG;
+    }
+
+    irt_header_t* hdr = irt_shm_header(&h->shm);
+    if (!hdr) return INDURTDB_ERR_ARG;
+
+    for (int attempt = 0; attempt < IRT_SEQLOCK_MAX_RETRY; ++attempt) {
+        uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+        if (seq0 & 1ULL) { sched_yield(); continue; }
+        indurtdb_point_t* p = &irt_shm_points(&h->shm)[id];
+        if (p->name[0] == '\0') {
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            set_error("point not found"); return INDURTDB_ERR_NOT_FOUND;
+        }
+        if (strncmp(p->name, name, sizeof(p->name)) == 0) {  /* 同名(同 id) 幂等 */
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            return INDURTDB_OK;
+        }
+        /* 先更新索引（新名插入、旧名删除），再改点位名，全程持锁 → 原子 */
+        int irc = irt_index_insert_locked(&h->shm, name, id);
+        if (irc != 0) {
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            set_error("index full"); return INDURTDB_ERR_FULL;
+        }
+        irt_index_remove_locked(&h->shm, p->name);
+        strncpy(p->name, name, sizeof(p->name) - 1);
+        p->name[sizeof(p->name) - 1] = '\0';
+        irt_seqlock_write_end(&hdr->write_seq, seq0);
+        return INDURTDB_OK;
+    }
+    set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+
 /* ---- 校验/统计 ---- */
 int indurtdb_h_check_timeouts(indurtdb_t* h, uint64_t timeout_ns) {
     ENSURE_H(h);
@@ -580,6 +707,15 @@ int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta) {
 }
 int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta) {
     return v1_int(indurtdb_h_set_meta(g_default, id, meta));
+}
+int indurtdb_create_point(uint32_t id, const char* name, int type, int access) {
+    return v1_int(indurtdb_h_create_point(g_default, id, name, type, access));
+}
+int indurtdb_delete_point(uint32_t id) {
+    return v1_int(indurtdb_h_delete_point(g_default, id));
+}
+int indurtdb_rename_point(uint32_t id, const char* name) {
+    return v1_int(indurtdb_h_rename_point(g_default, id, name));
 }
 int indurtdb_check_timeouts(uint64_t timeout_ns) {
     return v1_int(indurtdb_h_check_timeouts(g_default, timeout_ns));
