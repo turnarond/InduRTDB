@@ -40,6 +40,7 @@ api_client: RtdbClient | None = None
 listener: NotifyListener | None = None
 ws_clients: set[WebSocket] = set()
 loop: asyncio.AbstractEventLoop | None = None
+name_by_id: dict[int, str] = {}  # id -> point name，用于 WS update.pointId 对齐 HmiPointValueDto
 
 
 def _authed(token: str | None) -> bool:
@@ -52,7 +53,7 @@ def _broadcast(pid: int, info: dict) -> None:
     """NOTIFY 线程回调：把 update 推给所有 WS 客户端。"""
     msg = {
         "op": "update",
-        "pointId": info.get("name") or str(pid),
+        "pointId": name_by_id.get(pid, str(pid)),
         "id": pid,
         "value": info["value"],
         "quality": info.get("quality", 0),
@@ -86,6 +87,9 @@ async def _startup() -> None:
     try:
         pts = api_client.list_points()
         ids = [p["id"] for p in pts]
+        name_by_id.clear()
+        for p in pts:
+            name_by_id[p["id"]] = p["name"]
     except Exception:
         ids = []
     listener = NotifyListener(SOCK, on_notify=_broadcast)
@@ -229,6 +233,7 @@ app.mount("/", StaticFiles(directory=os.path.join(HERE, "static"), html=True), n
 
 def main() -> None:
     import uvicorn
+    global SOCK
 
     parser = argparse.ArgumentParser(description="InduRTDB Web Monitor")
     parser.add_argument("--socket", default=SOCK, help="rtdbd UDS 路径")
@@ -236,9 +241,8 @@ def main() -> None:
     parser.add_argument("--port", type=int, default=8080)
     args = parser.parse_args()
 
-    os.environ["RTDBD_SOCK"] = args.socket
-    global SOCK
     SOCK = args.socket
+    os.environ["RTDBD_SOCK"] = args.socket
     uvicorn.run(app, host=args.host, port=args.port)
 
 
