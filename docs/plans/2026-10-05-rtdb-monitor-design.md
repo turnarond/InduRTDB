@@ -1,7 +1,13 @@
 # InduRTDB 监控软件（rtdb-monitor）设计文档
 
 - **日期**：2026-10-05
-- **状态**：设计已确认（待实施）
+- **状态**：已实施（待评审）
+
+> 实施状态：C 端 `OP_GET`/`OP_LIST` 协议扩展（`protocol.h` + `rtdbd.c` 分派 + 静态断言）、
+> `tests/integration/test_rtdbd_proto_v2.cpp` 用例、纯 Python 客户端 `rtdb_client.py`、
+> FastAPI 后端 `app.py`、原生前端 `static/`、单测 `tests/test_rtdb_client.py`、
+> 端到端冒烟 `run_smoke.sh`（及 CI 入口 `scripts/run_monitor_smoke.sh`）均已落地；
+> `bash run_smoke.sh` 通过（ping/list/write/get/find 全部 OK），ctest 全绿。
 - **关联**：v3.4 T9/T10 的 rtdbd 管控通道；复用 `rtdbd/protocol.h` UDS 协议
 - **目标**：提供类 Redis Insight 的 RTDB Web 监控台——枚举全部点位、实时值推送、按名/id 查看、设置点位值。
 

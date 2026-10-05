@@ -4,6 +4,25 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.5.0] — 2026-10-05「RTDB 监控台 rtddb-monitor」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md`)
+
+新增可选监控工具 `tools/rtdb-monitor/`（纯 Python，零 C 依赖），提供类 Redis Insight 的 Web 监控台——枚举全部点位、实时值推送、按名/id 查看、设置点位值。
+
+### Added
+- **rtdbd 协议扩展（加法式，协议版本仍为 2）**：新增**只读、免鉴权** opcode
+  - `RTDBD_OP_GET`(10)：按 `point_id` 读当前值（共享内存无锁读，不进入写热路径）。
+  - `RTDBD_OP_LIST`(11)：枚举全部已注册点位（id/name/type/access），按 `max/offset` 分片流式返回。
+  - 与 `FIND_BY_NAME`/`GET_META` 同权；写值仍走 `OP_WRITE`、元数据写走 `OP_SET_META`，继续受 `SO_PEERCRED` + uid 策略管控。
+- **协议布局静态断言**：`rtdbd.c` 为 `GET_RESP`/`POINT_INFO` 等新增负载补 `RTDBD_STATIC_ASSERT` 锁死字节布局，与 `tools/rtdb-monitor/rtdb_client.py` 逐字节对齐。
+- **Python 客户端 `rtdb_client.py`**：纯 `socket`+`struct` 复刻 `rtdbd/protocol.h` 报文，支持 PING/GET/LIST/WRITE/FIND_BY_NAME/GET_META 与 `SUBSCRIBE→NOTIFY` 后台推送线程。
+- **Web 后端 `app.py`（FastAPI）**：REST（`/api/points`、`/api/points/{id}`、`/api/points/{id}/set`、`/api/meta/{id}`）+ WebSocket（`/ws` 实时推送 `update`，报文 schema 对齐 node-server `HmiPointValueDto`）；默认仅绑 `127.0.0.1`，可选 Bearer 校验。
+- **原生前端 `static/`**：单页（无构建、`StaticFiles` 托管），点位表格 + 实时刷新 + 按 id 设值。
+- **测试**：`tests/integration/test_rtdbd_proto_v2.cpp` 新增 `GetPointValue`/`ListPoints` 用例；`tools/rtdb-monitor/tests/test_rtdb_client.py` 协议编解码单测；`tools/rtdb-monitor/run_smoke.sh` + `scripts/run_monitor_smoke.sh` 端到端冒烟。
+
+### Notes
+- 写值权限最终由 rtdbd uid 策略决定；监控 Web 服务运行 uid 须在策略允许列表内（deny by default，无热加载，需重启 rtdbd 生效）。
+- 新增 opcode 不 bump 协议主版本；若未来改负载布局需 bump `RTDBD_PROTO_VERSION` 并做协商拒绝。
+
 ## [3.4.0] — 2026-10-04「布局 v2 与 API v2」(路线乙，方案见 `docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md`)
 
 **⚠️ ABI / 布局变更**：v3.4 段格式版本由 1 升至 2，Header 由 64B 扩至 128B。
