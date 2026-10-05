@@ -38,6 +38,9 @@ extern "C" {
 #define INDURTDB_QUALITY_TIMEOUT     2
 #define INDURTDB_QUALITY_SUBSTITUTED 3
 
+/* 注：access 为「描述性元数据」（点位静态属性标记）。库与 rtdbd 写路径
+ * 均不据此强制访问控制 —— 真正的写管控由 rtdbd 的 SO_PEERCRED + UID 策略
+ * （deny by default）承担。请勿将 access 当作安全边界。 */
 #define INDURTDB_ACCESS_READ_ONLY   1
 #define INDURTDB_ACCESS_READ_WRITE  3
 

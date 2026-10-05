@@ -7,7 +7,7 @@
  *
  * 设计依据: docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md §3.4
  *   indurtdb_t* 不透明句柄; indurtdb_h_open / indurtdb_h_close;
- *   v1 的 26 个全局函数保留为薄封装 (默认句柄), 标注 deprecated, 不破既有调用方.
+ *   v1 的 47 个全局函数保留为薄封装 (默认句柄), 标注 deprecated, 不破既有调用方.
  *
  * 用例 (红阶段应全部失败: indurtdb_t / indurtdb_cfg_t / indurtdb_h_* 尚未实现):
  *   ApiV2.MultipleInstancesInOneProcess  同进程持两实例, 各自读写互不影响

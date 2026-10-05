@@ -34,6 +34,9 @@ typedef struct {
 } __attribute__((packed, aligned(8))) irt_index_slot_t;
 
 IRT_STATIC_ASSERT(sizeof(irt_index_slot_t) == 8, "index slot must be 8 bytes");
+/* 桶数下限 8（roundup_pow2(2N), N≥1，2 的幂）保证 index_size = cap*8 为 32 的倍数，
+ * 配合 header/point 的 128B 对齐，确保紧随其后的 meta 区 32 对齐（M-2 对齐兜底）。 */
+IRT_STATIC_ASSERT((8u * 8u) % 32 == 0, "min index capacity (8) keeps meta region 32-aligned");
 
 /* 索引视图 (不持有内存, 仅指向段内索引区) */
 typedef struct {

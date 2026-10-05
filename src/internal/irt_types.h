@@ -70,6 +70,13 @@ IRT_STATIC_ASSERT(offsetof(irt_header_t, index_count)      == 72, "index_count o
 /* scan_skipped 必须落在 CRC 范围 [48..71] 之外，否则运行时自增会使 attach 校验失败 */
 IRT_STATIC_ASSERT(offsetof(irt_header_t, scan_skipped)      == 76, "scan_skipped must be outside CRC range [48..71]");
 
+/* 区域对齐兜底（M-2）：header(128) 与 point(128) 均为 32 对齐；
+ * 索引桶数 = roundup_pow2(2N)（2 的幂、≥8），故 index_size = cap*8 必为 32 的倍数；
+ * 由此 meta 区(需 align 32) / subs 区(需 align 16) 相对 hdr 的偏移均自然对齐，
+ * indurtdb_meta_t / irt_subscriber_entry_t 不会因未对齐产生 UB。 */
+IRT_STATIC_ASSERT(sizeof(irt_header_t) % 32 == 0, "header must be 32-aligned so meta/subs regions inherit alignment");
+IRT_STATIC_ASSERT(sizeof(indurtdb_point_t) % 32 == 0, "point must be 32-aligned so subsequent regions stay aligned");
+
 /* 订阅者心跳条目 (16 字节, == v2.x SubscriberEntry) */
 typedef struct {
     int32_t  pid;

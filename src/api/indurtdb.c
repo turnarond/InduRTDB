@@ -340,29 +340,42 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
     if (!pts || maxp == 0) { irt_point_config_free(&batch); return INDURTDB_ERR_ARG; }
     irt_header_t* hdr = irt_shm_header(&h->shm);
     if (!hdr) { irt_point_config_free(&batch); return INDURTDB_ERR_ARG; }
+    int overall_rc = 0;
     for (int i = 0; i < n; ++i) {
         const irt_point_meta_t* pm = &batch.points[i];
         if (pm->id >= maxp) continue;
         if (pm->type > INDURTDB_TYPE_STRING) continue;
 
-        uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
-        if (seq0 & 1ULL) continue;
+        /* 写锁冲突(他人持写锁)或索引忙时有限重试；仍失败则如实上报，
+         * 不再静默丢弃该点位（否则 find_by_name 对这些"已配置"点会误报 NOT_FOUND）。 */
+        int configured = 0;
+        for (int attempt = 0; attempt < IRT_SEQLOCK_MAX_RETRY && !configured; ++attempt) {
+            uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+            if (seq0 & 1ULL) { sched_yield(); continue; }
 
-        indurtdb_point_t* p = &pts[pm->id];
-        p->type   = pm->type;
-        p->unit   = pm->unit;
-        p->access = pm->access;
-        strncpy(p->name, pm->name, sizeof(p->name) - 1);
-        p->name[sizeof(p->name) - 1] = '\0';
+            indurtdb_point_t* p = &pts[pm->id];
+            p->type   = pm->type;
+            p->unit   = pm->unit;
+            p->access = pm->access;
+            strncpy(p->name, pm->name, sizeof(p->name) - 1);
+            p->name[sizeof(p->name) - 1] = '\0';
 
-        __atomic_thread_fence(__ATOMIC_RELEASE);
-        irt_seqlock_write_end(&hdr->write_seq, seq0);
+            __atomic_thread_fence(__ATOMIC_RELEASE);
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
 
-        /* 注册进本实例的 name→id 索引 (写锁释放后单独取锁, 避免嵌套自锁) */
-        irt_index_insert(&h->shm, p->name, pm->id);
+            /* 注册进本实例的 name→id 索引 (写锁释放后单独取锁, 避免嵌套自锁) */
+            int irc = irt_index_insert(&h->shm, p->name, pm->id);
+            if (irc == INDURTDB_ERR_FULL) {
+                irt_point_config_free(&batch);
+                return INDURTDB_ERR_FULL;   /* 索引满，无法继续注册 */
+            }
+            if (irc == INDURTDB_ERR_BUSY) { sched_yield(); continue; }
+            configured = 1;
+        }
+        if (!configured) overall_rc = INDURTDB_ERR_BUSY;  /* 持续冲突/忙：记录失败而非静默丢弃 */
     }
     irt_point_config_free(&batch);
-    return 0;
+    return overall_rc;
 }
 
 int indurtdb_h_set_quality(indurtdb_t* h, uint32_t id, uint8_t quality) {

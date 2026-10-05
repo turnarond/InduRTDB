@@ -22,11 +22,15 @@ echo "BUILD_DIR: $BUILD_DIR"
 echo ""
 
 # ---- 清理上一轮残留：孤儿守护进程 / socket / 共享内存段 ----
+# 警告：本脚本须在隔离环境（容器/专用 CI 主机）运行；以下仅清理本测试拉起的 rtdbd
+# （其命令行含本测试的 socket 路径 /tmp/indurtdb_e2e），避免误杀主机上其它真实 rtdbd 服务。
 cleanup() {
-    if pgrep -x rtdbd > /dev/null 2>&1; then
-        echo "[cleanup] killing stale rtdbd"
-        pkill -9 -x rtdbd || true
-    fi
+    for pid in $(pgrep -x rtdbd 2>/dev/null); do
+        if tr '\0' ' ' < /proc/"$pid"/cmdline 2>/dev/null | grep -q '/tmp/indurtdb_e2e'; then
+            echo "[cleanup] killing rtdbd pid $pid (our e2e instance)"
+            kill -9 "$pid" 2>/dev/null || true
+        fi
+    done
     rm -f /tmp/indurtdb_e2e_*.sock /tmp/e2e_policy_*.txt 2>/dev/null || true
     rm -f /dev/shm/indurtdb_e2e_test_* 2>/dev/null || true
 }

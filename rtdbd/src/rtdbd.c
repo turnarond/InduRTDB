@@ -26,6 +26,11 @@
 #include "audit.h"
 #include "policy.h"
 
+/* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
+ * 否则 rtdbd.c 的 memcpy(&m, &s.meta, sizeof(m)) 会越界/截断（protocol.h:108）。 */
+_Static_assert(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
+               "rtdbd_meta_payload_t must match indurtdb_meta_t size");
+
 #define RTDBD_MAX_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
@@ -332,8 +337,13 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         indurtdb_meta_t meta;
         memset(&meta, 0, sizeof(meta));
         int rc = indurtdb_get_meta(m.point_id, &meta);
-        if (rc == INDURTDB_ERR_NOT_FOUND || rc == INDURTDB_ERR_ARG) {
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
             resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc == INDURTDB_ERR_ARG) {   /* 越界 id 属请求错误，非"未找到" */
+            resp.status      = RTDBD_ST_BAD_REQUEST;
             resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
         }
@@ -377,8 +387,13 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         indurtdb_meta_t m;
         memcpy(&m, &s.meta, sizeof(m)); /* 线结构 → 库结构（布局一致） */
         int rc = indurtdb_set_meta(s.point_id, &m);
-        if (rc == INDURTDB_ERR_NOT_FOUND || rc == INDURTDB_ERR_ARG) {
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
             resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc == INDURTDB_ERR_ARG) {   /* 越界 id 属请求错误，非"未找到" */
+            resp.status      = RTDBD_ST_BAD_REQUEST;
             resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
         }
