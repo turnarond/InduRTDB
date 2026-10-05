@@ -65,7 +65,7 @@ def _broadcast(pid: int, info: dict) -> None:
         return
     dead = []
     for ws in list(ws_clients):
-        fut = asyncio.run_coroutine_thread_safe(_safe_send(ws, msg), loop)
+        fut = asyncio.run_coroutine_threadsafe(_safe_send(ws, msg), loop)
         fut.add_done_callback(lambda f, w=ws: dead.append(w) if f.exception() else None)
     for w in dead:
         ws_clients.discard(w)

@@ -272,7 +272,7 @@ class NotifyListener:
                 if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION:
                     break
                 if kind == OP_NOTIFY and plen == NOTIFY.size:
-                    pid, ptype, _pad, vbits, ts, sts = NOTIFY.unpack(body)
+                    pid, ptype, vbits, ts, sts = NOTIFY.unpack(body)
                     self.on_notify(pid, {
                         "id": pid, "type": ptype,
                         "typeName": TYPE_NAME.get(ptype, str(ptype)),
