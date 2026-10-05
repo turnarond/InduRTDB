@@ -28,6 +28,10 @@ points:
     id: 11
     type: bool
     access: read_write
+  - name: Line_Status
+    id: 12
+    type: string
+    access: read_write
 """
 
 
@@ -53,7 +57,7 @@ def main() -> None:
         f.write(f"{os.getuid()}:0:63\n")  # 放行当前 uid（deny by default）
 
     proc = subprocess.Popen(
-        [RTDBD, "--instance", "e2e", "--sock", sock,
+        [RTDBD, "--instance", "e2e", "--socket", sock,
          "--config", cfg, "--policy", pol, "--max-points", "64"]
     )
     try:
@@ -73,9 +77,10 @@ def main() -> None:
             r = client.get("/api/points")
             assert r.status_code == 200, r.text
             pts = r.json()
-            assert len(pts) == 2, pts
+            assert len(pts) == 3, pts
             names = {p["name"]: p["id"] for p in pts}
             assert names.get("AHU_01.Supply_Temp") == 10
+            assert names.get("Line_Status") == 12
 
             # ---- REST：按 id 读当前值 ----
             r = client.get("/api/points/10")
@@ -90,6 +95,11 @@ def main() -> None:
             r = client.get("/api/points/10")
             assert r.json()["value"] == 77, r.json()
 
+            # ---- REST：字符串点位 GET（value_str 路径）----
+            r = client.get("/api/points/12")
+            assert r.status_code == 200, r.text
+            assert isinstance(r.json()["value"], str), r.json()  # 字符串点位值为 str
+
             # ---- REST：元数据 ----
             r = client.get("/api/meta/10")
             assert r.status_code == 200, r.text
@@ -98,7 +108,7 @@ def main() -> None:
             # ---- WebSocket：清单 + 实时 update ----
             with client.websocket_connect("/ws") as ws:
                 msg = ws.receive_json()
-                assert msg["op"] == "list" and len(msg["points"]) == 2, msg
+                assert msg["op"] == "list" and len(msg["points"]) == 3, msg
 
                 # 触发一次写，期待经 NOTIFY 收到 update
                 client.post("/api/points/10/set", json={"value": 123})
@@ -111,7 +121,8 @@ def main() -> None:
                 assert update is not None, "no update received over WS"
                 assert update["id"] == 10, update
                 assert update["pointId"] == "AHU_01.Supply_Temp", update  # 点名对齐 HmiPointValueDto
-                assert update["value"] == 123, update
+                assert update["value"] == "123", update                   # value 字符串化对齐
+                assert update["quality"] == "0", update                  # quality 字符串化对齐
 
         print("E2E OK: REST(list/get/set/meta) + WebSocket(list/update) all passed")
     finally:

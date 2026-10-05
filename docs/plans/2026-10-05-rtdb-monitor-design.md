@@ -53,7 +53,9 @@ InduRTDB 当前对外暴露能力的通道有两条：
 
 | opcode | 值 | 请求负载 | 响应负载 | 鉴权 |
 |---|---|---|---|---|
-| `RTDBD_OP_GET` | 10 | `point_id`(4B) | `{point_id(4), type(1), quality(1), reserved(2), value_bits(8), timestamp_ns(8), source_ts_ns(8)}` ≈ 32B | 免鉴权 |
+| `RTDBD_OP_GET` | 10 | `point_id`(4B) | `{point_id(4), type(1), quality(1), reserved(2), value_bits(8), value_str[32], timestamp_ns(8), source_ts_ns(8)}` = 64B | 免鉴权 |
+
+> GET 响应实际为 **64B**（含 `value_str[32]`），以支持 `TYPE_STRING` 点位的读值（字符串不进 `value_bits` 的 8B 负载）。设计初稿的"≈32B"已过时，此处为最终布局。
 | `RTDBD_OP_LIST` | 11 | `max`(4B, 0=全部) + `offset`(4B) | 点位信息数组 `{point_id(4), type(1), access(1), reserved(2), name[64]}`；分片流式返回 | 免鉴权 |
 
 设计要点：
@@ -143,7 +145,8 @@ tools/rtdb-monitor/
 - `GET  /api/points/{id}` → `GET`（单点当前值）。
 - `POST /api/points/{id}/set` → `WRITE`（body: `{value, sourceTs?}`）。
 - `WS   /ws` → 接收浏览器 `subscribe/list/set`，订阅 rtdbd NOTIFY 并向该连接推送 `update`。
-- 可选 `Authorization: Bearer <token>` 校验（`--token` 设置时启用）。
+- **鉴权**：默认 `--host 127.0.0.1` 仅本机；设置环境变量 `RTDB_MONITOR_TOKEN` 后，REST 与 WS 均需鉴权，支持两种方式：`?token=<token>`（query）或 `Authorization: Bearer <token>`（请求头）。未设 `RTDB_MONITOR_TOKEN` 时放行。
+- **WS 报文对齐**：`update` 的 `value` / `quality` 均为字符串，对齐 node-server `HmiPointValueDto`（value:String / quality:String），便于复用其 HMI 前端组件。
 
 ### 5.3 安全与暴露
 - 默认 `--host 127.0.0.1`（仅本机），`--port 8080`。
@@ -153,9 +156,13 @@ tools/rtdb-monitor/
 
 ### 5.4 配置
 ```
-python3 -m uvicorn app:app --socket /run/rtdbd.sock --host 127.0.0.1 --port 8080 [--token X]
+# 方式一：经 app.py 启动参数（推荐）
+RTDBD_SOCK=/run/rtdbd.sock python3 app.py --socket /run/rtdbd.sock --host 127.0.0.1 --port 8080
+
+# 方式二：直接 uvicorn（用环境变量指定 socket）
+RTDBD_SOCK=/run/rtdbd.sock uvicorn app:app --host 127.0.0.1 --port 8080
 ```
-（装配为 `app.py` 启动参数；`--socket` 指定要连的 rtdbd 实例。）
+（`app.py` 启动参数 `--socket` 指定要连的 rtdbd 实例；`uvicorn` 不识别 `--socket`，须用 `RTDBD_SOCK` 环境变量。）
 
 ---
 
@@ -203,3 +210,5 @@ python3 -m uvicorn app:app --socket /run/rtdbd.sock --host 127.0.0.1 --port 8080
 - `GET` / `LIST` 走共享内存无锁读，需与 v3.4 既有读路径保持一致的重试范式，避免 TOCTOU。
 - rtdbd 策略无热加载：monitor 改 uid 权限须重启 rtdbd（已记为运维约束）。
 - 协议版本：新增 opcode 不 bump 主版本；若未来改负载布局需 bump `RTDBD_PROTO_VERSION` 并做协商拒绝。
+- **LIST 分片上限**：当前 `RTDBD_LIST_CHUNK=1024`（见 `rtdbd.c`），单包最多 1024×72B≈72KB，偏离设计初稿 ~4KB 建议；典型 <1024 点位可接受，超大 `max_points` 实例首屏单包偏大，后续可按 envelope 限制收紧。
+- **`name_by_id` 快照**：后端启动时建立 `id→name` 缓存用于 WS `update.pointId`（对齐 `HmiPointValueDto`）；运行期新增点位会退化为数值 id，属已知限制（后续可加定时刷新）。

@@ -12,7 +12,7 @@ const byId = new Map();     // id -> <tr>
 const byName = new Map();   // name -> <tr>
 let points = [];            // 最近一次清单
 
-const Q_MAP = { 0: ["good", "GOOD"], 1: ["bad", "BAD"], 2: ["bad", "TIMEOUT"], 3: ["other", "SUBST"] };
+const Q_MAP = { "0": ["good", "GOOD"], "1": ["bad", "BAD"], "2": ["bad", "TIMEOUT"], "3": ["other", "SUBST"] };
 
 function fmtTs(ns) {
   if (!ns) return "—";

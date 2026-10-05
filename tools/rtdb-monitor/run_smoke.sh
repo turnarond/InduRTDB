@@ -39,7 +39,7 @@ printf '%s:0:63\n' "$(id -u)" > "${POL}"
 
 echo "[smoke] starting rtdbd ..."
 # 后台启动（rtdbd 自身不识别 --daemon，前台会阻塞脚本）；$! 即其 PID。
-"${RTDBD}" --instance monitor-smoke --sock "${SOCK}" --config "${CFG}" --policy "${POL}" --max-points 64 &
+"${RTDBD}" --instance monitor-smoke --socket "${SOCK}" --config "${CFG}" --policy "${POL}" --max-points 64 &
 RTDBD_PID=$!
 # 轮询等待 socket 就绪
 for _ in $(seq 1 50); do [ -S "${SOCK}" ] && break; sleep 0.1; done

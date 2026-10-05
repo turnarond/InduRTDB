@@ -24,7 +24,7 @@ import asyncio
 import json
 import os
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Query, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -43,20 +43,31 @@ loop: asyncio.AbstractEventLoop | None = None
 name_by_id: dict[int, str] = {}  # id -> point name，用于 WS update.pointId 对齐 HmiPointValueDto
 
 
-def _authed(token: str | None) -> bool:
+def _authed(token: str | None, authorization: str | None = None) -> bool:
+    """鉴权：未设 RTDB_MONITOR_TOKEN 时放行；否则需 query token 或 Authorization: Bearer 命中。"""
     if not TOKEN:
         return True
-    return token == TOKEN
+    if token is not None and token == TOKEN:
+        return True
+    if authorization:
+        scheme, _, val = authorization.partition(" ")
+        if (scheme.lower() == "bearer" and val == TOKEN) or authorization == TOKEN:
+            return True
+    return False
 
 
 def _broadcast(pid: int, info: dict) -> None:
-    """NOTIFY 线程回调：把 update 推给所有 WS 客户端。"""
+    """NOTIFY 线程回调：把 update 推给所有 WS 客户端。
+
+    value/quality 字符串化，对齐 node-server HmiPointValueDto（value:String / quality:String），
+    便于复用其 HMI 前端组件。
+    """
     msg = {
         "op": "update",
         "pointId": name_by_id.get(pid, str(pid)),
         "id": pid,
-        "value": info["value"],
-        "quality": info.get("quality", 0),
+        "value": str(info["value"]),
+        "quality": str(info.get("quality", 0)),
         "ts": info.get("ts", 0),
         "sourceTs": info.get("sourceTs", 0),
         "type": info.get("type"),
@@ -107,15 +118,17 @@ async def _shutdown() -> None:
 
 
 @app.get("/api/points")
-def api_points(token: str | None = Query(default=None)):
-    if not _authed(token):
+def api_points(token: str | None = Query(default=None),
+              authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
         return _deny()
     return api_client.list_points()
 
 
 @app.get("/api/points/{point_id}")
-def api_point(point_id: int, token: str | None = Query(default=None)):
-    if not _authed(token):
+def api_point(point_id: int, token: str | None = Query(default=None),
+             authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
         return _deny()
     try:
         return api_client.get_point(point_id)
@@ -124,8 +137,9 @@ def api_point(point_id: int, token: str | None = Query(default=None)):
 
 
 @app.post("/api/points/{point_id}/set")
-async def api_set(point_id: int, payload: dict, token: str | None = Query(default=None)):
-    if not _authed(token):
+async def api_set(point_id: int, payload: dict, token: str | None = Query(default=None),
+                 authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
         return _deny()
     value = payload.get("value")
     ptype = payload.get("type")
@@ -143,8 +157,9 @@ async def api_set(point_id: int, payload: dict, token: str | None = Query(defaul
 
 
 @app.get("/api/meta/{point_id}")
-def api_meta(point_id: int, token: str | None = Query(default=None)):
-    if not _authed(token):
+def api_meta(point_id: int, token: str | None = Query(default=None),
+             authorization: str | None = Header(default=None)):
+    if not _authed(token, authorization):
         return _deny()
     try:
         return api_client.get_meta(point_id)
@@ -159,7 +174,8 @@ def _deny():
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
-    if not _authed(token):
+    auth = ws.headers.get("authorization")
+    if not _authed(token, auth):
         await ws.close(code=4401)
         return
     await ws.accept()
