@@ -13,6 +13,7 @@
 #include <cerrno>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <poll.h>
 #include <signal.h>
@@ -135,6 +136,30 @@ std::string policy_for_uid(unsigned long uid)
     return std::string(buf);
 }
 
+/* 裸协议交互：发请求头+负载，收响应头+全部负载体。返回是否成功收完。 */
+bool raw_exchange(int fd, uint16_t op, const void* payload, uint32_t plen,
+                  rtdbd_resp_hdr_t* resp, std::vector<uint8_t>* body)
+{
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic        = RTDBD_MAGIC;
+    req.version      = RTDBD_PROTO_VERSION;
+    req.opcode       = op;
+    req.payload_len  = plen;
+    if (send(fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) return false;
+    if (plen && send(fd, payload, plen, 0) != (ssize_t)plen) return false;
+
+    if (recv(fd, resp, sizeof(*resp), 0) != (ssize_t)sizeof(*resp)) return false;
+    body->resize(resp->payload_len);
+    size_t got = 0;
+    while (got < resp->payload_len) {
+        ssize_t n = recv(fd, body->data() + got, resp->payload_len - got, 0);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    return true;
+}
+
 } // namespace
 
 /* 1. 按名查找：客户端经服务端查到 id（共享索引） */
@@ -236,6 +261,97 @@ TEST(ProtoV2, RejectsV1Client)
     char buf[64];
     ssize_t n = recv(fd, buf, sizeof(buf), 0);
     EXPECT_EQ(n, 0) << "协议版本不匹配（v1 客户端）时服务端应关闭连接";
+
+    close(fd);
+    p.stop();
+}
+
+/* 5. v3.5 监控：按 id 读取当前值（GET，读免鉴权） */
+TEST(ProtoV2, GetPointValue)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("get", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    /* 用裸 WRITE 同步写入一个值（写需鉴权，与监控读路径分离验证） */
+    rtdbd_write_req_t w;
+    memset(&w, 0, sizeof(w));
+    w.point_id    = 10;
+    w.type        = (uint8_t)INDURTDB_TYPE_INT32;
+    w.value_bits  = (uint64_t)(int32_t)12345;
+    w.source_ts_ns = 0;
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+
+    rtdbd_get_req_t g;
+    memset(&g, 0, sizeof(g));
+    g.point_id = 10;
+
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_get_resp_t));
+
+    rtdbd_get_resp_t r;
+    memcpy(&r, body.data(), sizeof(r));
+    EXPECT_EQ(r.point_id, 10u);
+    EXPECT_EQ(r.type, (uint8_t)INDURTDB_TYPE_INT32);
+    EXPECT_EQ(r.value_bits, (uint64_t)12345u);
+
+    /* 未注册 id（仍在 max_points 内）应 NOT_FOUND */
+    g.point_id = 50;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    /* 越界 id 应 NOT_FOUND */
+    g.point_id = 999;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    close(fd);
+    p.stop();
+}
+
+/* 6. v3.5 监控：枚举已注册点位（LIST，读免鉴权） */
+TEST(ProtoV2, ListPoints)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("list", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_list_req_t l;
+    memset(&l, 0, sizeof(l));
+    l.max = 0; l.offset = 0; /* 全量 */
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_LIST, &l, sizeof(l), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), 2u * sizeof(rtdbd_point_info_t));
+
+    rtdbd_point_info_t e[2];
+    memcpy(&e[0], body.data(), sizeof(rtdbd_point_info_t));
+    memcpy(&e[1], body.data() + sizeof(rtdbd_point_info_t), sizeof(rtdbd_point_info_t));
+    EXPECT_EQ(e[0].point_id, 10u);
+    EXPECT_EQ(e[1].point_id, 11u);
+    EXPECT_EQ(std::string(e[0].name), "AHU_01.Supply_Temp");
+    EXPECT_EQ(std::string(e[1].name), "Pump_Start_CMD");
+    EXPECT_EQ(e[0].type, (uint8_t)INDURTDB_TYPE_INT32);
+    EXPECT_EQ(e[1].type, (uint8_t)INDURTDB_TYPE_BOOL);
+    EXPECT_EQ(e[0].access, (uint8_t)INDURTDB_ACCESS_READ_WRITE);
+    EXPECT_EQ(e[1].access, (uint8_t)INDURTDB_ACCESS_READ_WRITE);
+
+    /* 分页：单包 max=1 只回 1 条 */
+    l.max = 1;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_LIST, &l, sizeof(l), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    EXPECT_EQ(body.size(), 1u * sizeof(rtdbd_point_info_t));
 
     close(fd);
     p.stop();

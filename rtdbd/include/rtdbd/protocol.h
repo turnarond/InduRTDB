@@ -12,6 +12,13 @@
 
 #include <stdint.h>
 
+/* 跨语言静态断言：C 用 _Static_assert 关键字，C++ 用 static_assert 关键字 */
+#if defined(__cplusplus)
+#define RTDBD_STATIC_ASSERT(cond, msg) static_assert(cond, msg)
+#else
+#define RTDBD_STATIC_ASSERT(cond, msg) _Static_assert(cond, msg)
+#endif
+
 #define RTDBD_MAGIC        0x52424431u /* "RBD1" */
 #define RTDBD_PROTO_VERSION 2u
 
@@ -26,6 +33,9 @@
 #define RTDBD_OP_FIND_BY_NAME 7u /* 请求：name[64]；响应：point_id（status==OK 时） */
 #define RTDBD_OP_GET_META     8u /* 请求：point_id；响应：32B meta（status==OK 时） */
 #define RTDBD_OP_SET_META     9u /* 请求：point_id + 32B meta；管控写，须鉴权 */
+/* v3.5 监控只读通道（读免鉴权，同 FIND_BY_NAME / GET_META） */
+#define RTDBD_OP_GET        10u /* 请求：point_id；响应：64B 点位值快照（status==OK 时） */
+#define RTDBD_OP_LIST       11u /* 请求：max+offset；响应：点位信息数组（id/type/access/name） */
 
 /* 单连接最大订阅点数 */
 #define RTDBD_SUB_MAX 32u
@@ -124,5 +134,43 @@ typedef struct {
     uint32_t             point_id;
     rtdbd_meta_payload_t meta;
 } rtdbd_set_meta_req_t;
+
+/* ---- v3.5 监控只读通道：GET / LIST ---- */
+
+/* GET 请求负载 4B */
+typedef struct {
+    uint32_t point_id;
+} rtdbd_get_req_t;
+
+/* GET 响应负载 64B：点位当前值快照（无锁读，与 indurtdb_point_t 布局对齐） */
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  quality;
+    uint8_t  reserved[2];
+    uint64_t value_bits;    /* 数值类型的位模式（bool/int32/int64/uint32/float/double） */
+    char     value_str[32]; /* 字符串类型的值（仅 TYPE_STRING 有意义） */
+    uint64_t timestamp_ns;
+    uint64_t source_ts_ns;
+} rtdbd_get_resp_t;
+
+/* LIST 请求负载 8B */
+typedef struct {
+    uint32_t max;    /* 单包最大条数，0 = 全部 */
+    uint32_t offset; /* 起始 id（分页） */
+} rtdbd_list_req_t;
+
+/* LIST 单条点位信息 72B */
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  access;
+    uint8_t  reserved[2];
+    char     name[64];
+} rtdbd_point_info_t;
+
+/* 布局锁死：与 rtdbd.c 的编解码、Python 端复刻保持一致 */
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_get_resp_t) == 64, "rtdbd_get_resp_t must be 64B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_point_info_t) == 72, "rtdbd_point_info_t must be 72B");
 
 #endif /* RTDBD_PROTOCOL_H_ */

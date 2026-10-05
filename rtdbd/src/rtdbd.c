@@ -28,13 +28,18 @@
 
 /* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
  * 否则 rtdbd.c 的 memcpy(&m, &s.meta, sizeof(m)) 会越界/截断（protocol.h:108）。 */
-_Static_assert(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
                "rtdbd_meta_payload_t must match indurtdb_meta_t size");
 
 #define RTDBD_MAX_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
 static volatile sig_atomic_t g_stop = 0;
+
+/* 监控 LIST 用的实例点位上限与分片缓冲（rtdbd 串行处理，静态缓冲安全） */
+static uint32_t g_max_points = 0;
+#define RTDBD_LIST_CHUNK 1024u
+static uint8_t g_list_buf[RTDBD_LIST_CHUNK * sizeof(rtdbd_point_info_t)];
 
 static void on_signal(int sig)
 {
@@ -184,17 +189,79 @@ static int do_write(const rtdbd_write_req_t* w)
     case RTDBD_TYPE_INT32:
         return indurtdb_write_int32_ts(w->point_id, (int32_t)w->value_bits,
                                        w->source_ts_ns);
+    case RTDBD_TYPE_INT64: {
+        int64_t v = 0;
+        memcpy(&v, &w->value_bits, sizeof(v));
+        return indurtdb_write_int64_ts(w->point_id, v, w->source_ts_ns);
+    }
+    case RTDBD_TYPE_UINT32:
+        return indurtdb_write_uint32_ts(w->point_id, (uint32_t)w->value_bits,
+                                        w->source_ts_ns);
+    case RTDBD_TYPE_FLOAT: {
+        float f = 0.0f;
+        memcpy(&f, &w->value_bits, sizeof(f));
+        return indurtdb_write_float_ts(w->point_id, f, w->source_ts_ns);
+    }
     case RTDBD_TYPE_DOUBLE: {
         double d = 0.0;
         memcpy(&d, &w->value_bits, sizeof(d));
         return indurtdb_write_double_ts(w->point_id, d, w->source_ts_ns);
     }
     default:
-        return -99; /* 不支持的类型 */
+        return -99; /* 不支持的类型（如 STRING 受 8B 负载限制） */
     }
 }
 
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
+/* ---- v3.5 监控只读通道：GET / LIST（读免鉴权） ---- */
+
+/* 读取单点当前值快照；成功返回 0，失败（id 无效/未注册）返回 -1 */
+static int do_get(uint32_t id, rtdbd_get_resp_t* out)
+{
+    indurtdb_point_t pt;
+    if (indurtdb_read_point(id, &pt) != 0) return -1;
+    if (pt.name[0] == '\0') return -1; /* 未注册点位不可读，与 LIST 一致 */
+
+    memset(out, 0, sizeof(*out));
+    out->point_id     = id;
+    out->type         = pt.type;
+    out->quality      = pt.quality;
+    memcpy(&out->value_bits, &pt.value, sizeof(out->value_bits));
+    if (pt.type == INDURTDB_TYPE_STRING)
+        memcpy(out->value_str, pt.value.str, sizeof(out->value_str));
+    out->timestamp_ns   = pt.timestamp_ns;
+    out->source_ts_ns   = pt.source_timestamp_ns;
+    return 0;
+}
+
+/* 枚举已注册点位（name[0]!='\0' 视为已注册）。
+ * 从 offset(id) 起向后扫描，最多收集 max 个已注册点（max=0 表示上限 CHUNK 个），
+ * 结果写入 buf，*out_len 返回字节数。分页时 offset 为起始 id，max 为返回条数上限。 */
+static void do_list(uint32_t max_n, uint32_t offset, uint8_t* buf, size_t* out_len)
+{
+    *out_len = 0;
+    if (offset >= g_max_points) return;
+
+    uint32_t cap = (max_n == 0) ? RTDBD_LIST_CHUNK : max_n;
+    if (cap > RTDBD_LIST_CHUNK) cap = RTDBD_LIST_CHUNK;
+
+    rtdbd_point_info_t* arr = (rtdbd_point_info_t*)buf;
+    uint32_t n = 0;
+    for (uint32_t id = offset; id < g_max_points && n < cap; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_read_point(id, &pt) != 0) continue;
+        if (pt.name[0] == '\0') continue; /* 未注册点位跳过 */
+
+        rtdbd_point_info_t* e = &arr[n++];
+        e->point_id = id;
+        e->type     = pt.type;
+        e->access   = pt.access;
+        memset(e->name, 0, sizeof(e->name));
+        memcpy(e->name, pt.name, sizeof(e->name) - 1);
+    }
+    *out_len = (size_t)n * sizeof(rtdbd_point_info_t);
+}
+
 static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
                           rtdbd_conn_t* conn, rtdbd_conn_t* conns, int nconns)
 {
@@ -409,6 +476,48 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         return send_all(fd, &resp, sizeof(resp));
     }
 
+    /* ---- v3.5 监控：读取单点当前值（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET) {
+        rtdbd_get_req_t g;
+        if (req.payload_len != sizeof(g) || recv_all(fd, &g, sizeof(g)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        rtdbd_get_resp_t r;
+        if (do_get(g.point_id, &r) != 0) {
+            resp.status      = RTDBD_ST_NOT_FOUND; /* 越界/未注册均按未找到 */
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(r);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &r, sizeof(r));
+    }
+
+    /* ---- v3.5 监控：枚举已注册点位（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_LIST) {
+        rtdbd_list_req_t l;
+        if (req.payload_len != sizeof(l) || recv_all(fd, &l, sizeof(l)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        size_t len = 0;
+        do_list(l.max, l.offset, g_list_buf, &len);
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)len;
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        if (len > 0 && send_all(fd, g_list_buf, len) != 0) return 1;
+        return 0;
+    }
+
     resp.status      = RTDBD_ST_BAD_REQUEST;
     resp.payload_len = 0;
     (void)send_all(fd, &resp, sizeof(resp));
@@ -529,6 +638,8 @@ int main(int argc, char** argv)
         default: break;
         }
     }
+
+    g_max_points = max_points; /* 供监控 LIST 遍历点位表使用 */
 
     if (supervise) {
         return supervise_loop(argc, argv, pidfile);
