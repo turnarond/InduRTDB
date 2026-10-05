@@ -24,7 +24,7 @@ typedef struct {
 
 > _Static_assert 保证 sizeof == 128, 与 v2.x 布局逐字节一致。
 
-## 2. C API (26 个函数)
+## 2. C API（90 个函数：v1 全局 47 + v2 句柄 43）
 
 详见 `include/indurtdb/indurtdb.h`。
 
@@ -37,7 +37,7 @@ typedef struct {
 | 编译器 | GCC ≥7.5, C11 (`-std=gnu11`) |
 | 可靠性 | 7×24 无泄漏; 僵尸订阅者自动清理(心跳>1s) |
 | 安全性 | access 控制: 只读点位拒绝写入 |
-| 测试覆盖率 | gtest **26 套件 / 126 用例**（`ctest` 注册 16 个：15 单元 + 1 多进程集成），100% 通过 |
+| 测试覆盖率 | gtest 多套件（`ctest` 注册 **31 个**用例：多单元 + 多进程集成 + 端到端），100% 通过 |
 
 ## 4. 版本路线图
 

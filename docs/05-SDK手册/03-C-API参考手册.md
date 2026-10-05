@@ -1,6 +1,6 @@
 # InduRTDB C API 参考手册
 
-**版本**: 3.4.0 | **更新日期**: 2026-10-04 | **变更**: v3.4 布局 v2 + API v2（句柄化 / 按名查找 / 元数据 / 类型扩展 / 质量 OPC UA 映射）。公开 API 共 **88 个**：v1 全局函数 46 + v2 句柄函数 42。
+**版本**: 3.4.0 | **更新日期**: 2026-10-04 | **变更**: v3.4 布局 v2 + API v2（句柄化 / 按名查找 / 元数据 / 类型扩展 / 质量 OPC UA 映射）。公开 API 共 **90 个**：v1 全局函数 47 + v2 句柄函数 43。
 
 **头文件**: `<indurtdb/indurtdb.h>`
 **链接**: `-lindurtdb -lpthread -lrt`
@@ -14,7 +14,7 @@ v3.4 起支持**去单例化**：同一进程可同时持有多个实例，各�
 - `indurtdb_t`：不透明句柄（定义于库实现）。
 - `indurtdb_h_open(&h, instance_id, &cfg)` / `indurtdb_h_close(h)`：打开 / 关闭实例。
 - v2 函数一律加 `_h_` 前缀（C 无重载），入参首位为 `indurtdb_t* h`，返回**语义化错误码**（见下）。
-- v1 的 46 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
+- v1 的 47 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
 
 ### 多实例示例
 
@@ -45,7 +45,7 @@ indurtdb_h_close(b);
 
 > v1 接口向后兼容：只判 `< 0` 的旧代码行为完全不变；`ERR_NOT_INIT` 对 v1 被映射回 `-1`。
 
-### v2 句柄函数完整清单（共 42 个）
+### v2 句柄函数完整清单（共 43 个）
 
 所有 `indurtdb_h_*` 与对应 v1 全局函数**签名同构**（仅入参首位多 `indurtdb_t* h`），返回**语义化错误码**（见上方错误码表）。下表为全量收录，与 `indurtdb.h` 公开 API 一一对应。
 
@@ -56,7 +56,7 @@ indurtdb_h_close(b);
 | `indurtdb_h_write_int64` / `h_write_uint32` / `h_write_float` | `indurtdb_write_int64/uint32/float` | 写·单点（v3.4 类型扩展） |
 | `indurtdb_h_write_bool_ts` / `h_write_int32_ts` / `h_write_double_ts` / `h_write_string_ts` | `indurtdb_write_*_ts` | 写·携带采集时刻 |
 | `indurtdb_h_write_int64_ts` / `h_write_uint32_ts` / `h_write_float_ts` | `indurtdb_write_int64_ts/uint32_ts/float_ts` | 写·携带采集时刻（v3.4 类型扩展） |
-| `indurtdb_h_read_bool` / `h_read_int32` / `h_read_double` / `h_read_string` / `h_read_point` | `indurtdb_read_bool/int32/double/string/read_point` | 读·单点 |
+| `indurtdb_h_read_bool` / `h_read_int32` / `h_read_double` / `h_read_string` / `h_read_point` / `h_peek` | `indurtdb_read_bool/int32/double/string/read_point/peek` | 读·单点（含 peek） |
 | `indurtdb_h_read_int64` / `h_read_uint32` / `h_read_float` | `indurtdb_read_int64/uint32/float` | 读·单点（v3.4 类型扩展） |
 | `indurtdb_h_read_range` | `indurtdb_read_range` | 批量读 |
 | `indurtdb_h_write_range_bool` / `h_write_range_int32` / `h_write_range_double` | `indurtdb_write_range_bool/int32/double` | 批量写 |
@@ -128,9 +128,9 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
 |---|---|---|
 | 1 | **单进程单例** | 同一进程内 `indurtdb_initialize()` 只能持有一个实例；切换实例必须先 `indurtdb_shutdown()`。不同 `instance_id` 的跨进程隔离正常。 |
 | 2 | **`peek()` 为单拷贝** | 数据经 Seqlock 拷贝到 `_Thread_local` 缓冲后返回其指针，**同线程下一次 `peek()` 即覆盖**；需长期持有请用 `indurtdb_read_point()` 拷贝到自管理缓冲。 |
-| 3 | **写冲突不重试** | 多写者并发时，若 Seqlock 处于写中状态，`write_*` 立即返回 `-2`（busy），**不阻塞、不自旋重试**；只读点位返回 `-3`。调用方需按业务策略自行重试（该语义将在 v3.3 确定化）。 |
+| 3 | **写冲突不重试** | 多写者并发时，若 Seqlock 处于写中状态，`write_*` 立即返回 `-2`（busy），**不阻塞、不自旋重试**；只读点位返回 `-3`。调用方需按业务策略自行重试（该语义已在 v3.3 确定化）。 |
 | 4 | **超时检测 best-effort** | `indurtdb_check_timeouts()` 扫描时若遇写冲突会跳过该点位, 单次调用不保证覆盖全部点位; 周期性调用即可收敛。**严苛边界**: 写入者以最大速率**自旋**(无间隙连续写)时, 全局单 seqlock 的可用窗口极短, 扫描可能整轮取不到写锁而返回 `0`; 真实采集周期(ms 级)下不会触发, 见 [issue #19](https://github.com/turnarond/InduRTDB/issues/19)。 |
-| 5 | **订阅为进程内回调** | 回调仅在**本进程**内注册的订阅者上触发，**不支持跨进程变更通知**（v3.3 规划）。跨进程感知当前需轮询。 |
+| 5 | **订阅为进程内回调** | 回调仅在**本进程**内注册的订阅者上触发，**不支持跨进程变更通知**（核心库 `indurtdb_subscribe` 仅进程内；跨进程经 v3.3 的 `rtdbd`/`irtcli` 订阅事件实现）。 |
 | 6 | **无鉴权/加密/持久化（库级）** | 核心库不提供网络服务、认证、加密与持久化；`access` 字段是静态只读标记，不是访问控制机制。这些能力由 node-server / 上层 Bridge 承担。v3.4 起 `rtdbd` 守护进程的**管控通道**（`SET_META` 元数据写）走本机 `SO_PEERCRED` 的 UID 级鉴权（deny by default），属**进程级**管控，非库级网络鉴权；跨主机 / 传输加密仍不在范围内。 |
 
 ---
@@ -336,7 +336,7 @@ int indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data);
 
 注册点位变更回调。当该点位被写入时, 回调在**写入者线程内**同步执行。
 
-**约束**: 最多 256 个订阅槽位。回调中不得执行耗时操作或嵌套写入。**订阅仅在本进程内生效**——回调不会跨进程触发（跨进程变更通知规划于 v3.3）。
+**约束**: 最多 256 个订阅槽位。回调中不得执行耗时操作或嵌套写入。**订阅仅在本进程内生效**——回调不会跨进程触发（跨进程变更通知已在 v3.3 经 `rtdbd`/`irtcli` 实现）。
 
 ### indurtdb_unsubscribe
 
