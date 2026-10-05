@@ -132,6 +132,7 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
 | 4 | **超时检测 best-effort** | `indurtdb_check_timeouts()` 扫描时若遇写冲突会跳过该点位, 单次调用不保证覆盖全部点位; 周期性调用即可收敛。**严苛边界**: 写入者以最大速率**自旋**(无间隙连续写)时, 全局单 seqlock 的可用窗口极短, 扫描可能整轮取不到写锁而返回 `0`; 真实采集周期(ms 级)下不会触发, 见 [issue #19](https://github.com/turnarond/InduRTDB/issues/19)。 |
 | 5 | **订阅为进程内回调** | 回调仅在**本进程**内注册的订阅者上触发，**不支持跨进程变更通知**（核心库 `indurtdb_subscribe` 仅进程内；跨进程经 v3.3 的 `rtdbd`/`irtcli` 订阅事件实现）。 |
 | 6 | **无鉴权/加密/持久化（库级）** | 核心库不提供网络服务、认证、加密与持久化；`access` 字段是静态只读标记，不是访问控制机制。这些能力由 node-server / 上层 Bridge 承担。v3.4 起 `rtdbd` 守护进程的**管控通道**（`SET_META` 元数据写）走本机 `SO_PEERCRED` 的 UID 级鉴权（deny by default），属**进程级**管控，非库级网络鉴权；跨主机 / 传输加密仍不在范围内。 |
+| 7 | **rtdbd 管控策略无热加载** | `rtdbd` 的 UID 写策略（`--config` / `-p` 指定的策略文件）**仅在进程启动时加载一次**；运行时修改策略文件不会即时生效，须**重启 rtdbd** 方能应用新规则。当前版本不提供策略热加载 / SIGHUP 重载。 |
 
 ---
 
