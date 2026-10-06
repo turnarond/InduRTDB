@@ -24,9 +24,9 @@ bool irt_pm_validate_id(const irt_pm_t* pm, uint32_t id) {
     return hdr && id < hdr->max_points;
 }
 
-static int pm_write_impl(irt_pm_t* pm, uint32_t id,
-                          uint8_t type, const void* value,
-                          uint64_t source_ts_ns) {
+static int pm_write_impl_q(irt_pm_t* pm, uint32_t id,
+                           uint8_t type, const void* value,
+                           uint64_t source_ts_ns, uint8_t quality) {
     if (!irt_pm_validate_id(pm, id)) return -1;
 
     irt_header_t*      hdr = irt_shm_header(pm->shm);
@@ -58,7 +58,7 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     default: break;
     }
     p->timestamp_ns = irt_time_now_ns();
-    p->quality      = INDURTDB_QUALITY_GOOD;
+    p->quality      = quality;
     /* 采集时刻：0 表示"未提供"，语义退化为仅用入库时刻（旧行为不变） */
     p->source_timestamp_ns = source_ts_ns;
 
@@ -70,6 +70,19 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     irt_seqlock_write_end(&hdr->write_seq, seq0);
     __atomic_fetch_add(&hdr->stats.writes, 1, __ATOMIC_RELAXED);
     return 0;
+}
+
+/* 默认写入口：强制 GOOD，保持热路径纯净、零 meta 读（v3.7 不变式）。
+ * 既有 irt_pm_write_*_ts 封装继续调用本函数，行为完全不变。 */
+static int pm_write_impl(irt_pm_t* pm, uint32_t id, uint8_t type,
+                         const void* value, uint64_t source_ts_ns) {
+    return pm_write_impl_q(pm, id, type, value, source_ts_ns, INDURTDB_QUALITY_GOOD);
+}
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用），一次性落值 + 调用方质量 */
+int irt_pm_write_quality_ts(irt_pm_t* pm, uint32_t id, uint8_t type,
+                            const void* value, uint64_t source_ts_ns, uint8_t quality) {
+    return pm_write_impl_q(pm, id, type, value, source_ts_ns, quality);
 }
 
 int irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value) {

@@ -64,6 +64,8 @@ indurtdb_h_close(b);
 | `indurtdb_h_load_config` / `h_set_quality` / `h_update_heartbeat` | `indurtdb_load_config` / `indurtdb_set_quality` / `indurtdb_update_heartbeat` | 配置/心跳 |
 | `indurtdb_h_find_by_name` | `indurtdb_find_by_name` | 索引（v3.4） |
 | `indurtdb_h_get_meta` / `h_set_meta` | `indurtdb_get_meta` / `indurtdb_set_meta` | 元数据（v3.4） |
+| `indurtdb_h_write_quality_ts` / `indurtdb_write_quality_ts` | `—` | 写·质量感知（写权威，v3.7 主题A） |
+| `indurtdb_value_to_double` / `indurtdb_eurange_limit` / `indurtdb_deadband_exceeded` | `—` | 语义纯函数（v3.7 主题A，可单测） |
 | `indurtdb_h_check_timeouts` | `indurtdb_check_timeouts` | 校验 |
 | `indurtdb_h_get_write_count` / `h_get_timeout_count` / `h_get_scan_skipped` | `indurtdb_get_write_count` / `get_timeout_count` / `get_scan_skipped` | 统计 |
 | `indurtdb_h_validate_id` | `indurtdb_validate_id` | 校验 |
@@ -431,6 +433,58 @@ int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
 - `set` 走全局 seqlock 写锁（**注册/配置期**），`get` 走无锁读重试；**两者都不进入读写热路径** —— 频繁的点位值读写不会触碰元数据区。
 - 结构 `indurtdb_meta_t` 为 **32B**（`align(32)`），字段偏移已静态断言锁死；升级/跨语言互操作时须保持逐字节兼容。
 - 读/写前应确保 id 对应的点已注册（配置加载），否则数据无意义；未初始化/越界由返回码明确区分。
+
+---
+
+## v3.7 主题A：语义纯函数与质量感知写入口
+
+> v3.7 新增（主题A：死区/RBE + EURange 生效）。均为**纯函数 / 薄封装**，无状态、不触共享内存，集中收口"值→语义"逻辑。
+
+### 元数据 flags 位（indurtdb_meta_t.flags）
+
+| 宏 | 位 | 含义 |
+|---|---|---|
+| `INDURTDB_META_FLAG_EUR` | bit0 | 启用量程检查（EURange → 量程位） |
+| `INDURTDB_META_FLAG_DEADBAND` | bit1 | 启用绝对死区（阈值 = `deadband`） |
+| `INDURTDB_META_FLAG_DEADBAND_PCT` | bit2 | 死区为百分比模式（阈值 = `deadband% × (eur_max − eur_min)`） |
+
+> 仅新增 bit2，结构体布局不变（仍 32B）。
+
+### indurtdb_value_to_double / indurtdb_eurange_limit / indurtdb_deadband_exceeded
+
+```c
+double  indurtdb_value_to_double(uint8_t type, const void* value_bits);
+uint8_t indurtdb_eurange_limit(bool eur_enabled, double eur_min, double eur_max, double value);
+bool    indurtdb_deadband_exceeded(bool abs_mode, double deadband,
+                                   double eur_min, double eur_max,
+                                   double last, double cur);
+```
+
+- `indurtdb_value_to_double`：6 种数值类型 → `double` 归一化（按 `type` 解析 `value_bits`，与 `indurtdb_point_t.value` union 一致）；供死区/RBE 与 EURange 比较。`string` 不适用，调用方应仅对数值类型使用。
+- `indurtdb_eurange_limit`：`eur` 未启用返回 `INDURTDB_LIMIT_NONE`；`value < eur_min → INDURTDB_LIMIT_LOW`，`> eur_max → INDURTDB_LIMIT_HIGH`，区间内（含边界）→ `NONE`。
+- `indurtdb_deadband_exceeded`：`abs_mode`=绝对阈值；否则（百分比）阈值 = `deadband% × (eur_max − eur_min)`。严格大于阈值才触发（等号不触发）；百分比模式 `eur_max == eur_min` 时不触发（除零保护）。
+
+### indurtdb_write_quality_ts / indurtdb_h_write_quality_ts
+
+```c
+int indurtdb_write_quality_ts(uint32_t id, uint8_t type, const void* value,
+                              uint64_t source_ts_ns, uint8_t quality);
+int indurtdb_h_write_quality_ts(indurtdb_t* h, uint32_t id, uint8_t type, const void* value,
+                                uint64_t source_ts_ns, uint8_t quality);
+```
+
+**质量感知写入口**（v3.7 主题A）。`value` 按 `type` 解释（与 `indurtdb_value_to_double` 一致），一次性写入值 + 调用方计算好的 `quality`（含 EURange 量程位，用 `INDURTDB_QUALITY_MAKE` 组装）。
+
+- **默认 `indurtdb_write_*` 行为完全不变**：核心热路径仍强制 `quality = GOOD`、`零 meta 读`（守住 v3.4 T3「meta 不进热路径」不变式）。
+- 本入口专供**写权威 `rtdbd`** 使用：在 `do_write` 读取该点 meta 计算量程位并经此落值；直接 shm 写者（legacy 路径）默认不含量程位，与「rtdbd 是写权威」一致。
+- 典型用法：`rtdbd` 收到写请求 → `indurtdb_get_meta` → `indurtdb_value_to_double` → `indurtdb_eurange_limit`（算量程位）→ `INDURTDB_QUALITY_MAKE(GOOD, lim)` → `indurtdb_write_quality_ts(...)`。
+
+### rtdbd 通知门控语义（RBE，v3.7 主题A）
+
+`rtdbd` 对每个订阅连接按 `rbe_decide()` 决定是否推送 `NOTIFY`——**仅当死区越过或 EURange 边界跨越才推送**，区间内常规变化不推送（值仍已落库、GET 轮询可见）。
+
+- 仅开启 `INDURTDB_META_FLAG_EUR`（无死区）时同样适用：推送**仅在跨量程边界时触发**，区间内变化不推送。这是「按订阅者 Reporting-By-Exception」的预期行为，非缺陷。
+- 默认 `flags=0`：每次写都通知（零行为变更）。
 
 ---
 

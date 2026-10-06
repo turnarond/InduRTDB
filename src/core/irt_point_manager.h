@@ -37,6 +37,10 @@ int irt_pm_write_float_ts(irt_pm_t* pm, uint32_t id, float value, uint64_t sourc
 int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns);
 int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns);
 
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用），一次性落值 + 调用方质量 */
+int irt_pm_write_quality_ts(irt_pm_t* pm, uint32_t id, uint8_t type,
+                            const void* value, uint64_t source_ts_ns, uint8_t quality);
+
 /* 显式设置点位质量（如失联标记 COMM_FAILURE） */
 int irt_pm_set_quality(irt_pm_t* pm, uint32_t id, uint8_t quality);
 

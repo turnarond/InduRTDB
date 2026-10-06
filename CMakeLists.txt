@@ -1,6 +1,6 @@
 # InduRTDB - Industrial Real-Time Database (pure C core)
 cmake_minimum_required(VERSION 3.15)
-project(InduRTDB VERSION 3.6.0 LANGUAGES C CXX)
+project(InduRTDB VERSION 3.7.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,6 +26,7 @@ endif()
 set(IRT_CORE_SRC
     src/core/irt_shm.c
     src/core/irt_point_manager.c
+    src/core/irt_semantics.c
     src/core/irt_subscription.c
     src/core/irt_config.c
     src/core/irt_index.c

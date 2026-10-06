@@ -19,9 +19,9 @@ extern "C" {
 
 /* ==== 版本 (须与 VERSION 文件、CMake project(VERSION) 一致) ==== */
 #define INDURTDB_VERSION_MAJOR 3
-#define INDURTDB_VERSION_MINOR 6
+#define INDURTDB_VERSION_MINOR 7
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "3.6.0"
+#define INDURTDB_VERSION_STRING "3.7.0"
 
 /* ==== 点位类型/质量/权限常量 (与 v2.x 枚举值一致) ==== */
 #define INDURTDB_TYPE_BOOL     0
@@ -76,6 +76,12 @@ typedef struct {
     uint8_t  reserved[8]; /* 24–31 : 保留（须为 0） */
 } __attribute__((packed, aligned(32))) indurtdb_meta_t;
 
+/* 元数据 flags 位定义（v3.7 主题A：死区/RBE + EURange 生效）
+ * 仅新增位，结构体布局不变（仍 32B）。 */
+#define INDURTDB_META_FLAG_EUR          (1u << 0)  /* 启用量程检查（EURange → 量程位） */
+#define INDURTDB_META_FLAG_DEADBAND     (1u << 1)  /* 启用绝对死区 */
+#define INDURTDB_META_FLAG_DEADBAND_PCT (1u << 2)  /* 死区为百分比模式（相对 eur 量程） */
+
 /* ---- 质量位（quality）分层布局 ----
  *   bit 0–3 : 基础质量码（16 种，现有 0–3 取值不变）
  *   bit 4–5 : 量程位（无 / Low / High / Constant）
@@ -112,6 +118,18 @@ uint8_t  indurtdb_status_code_to_quality(uint32_t status_code);
 /* 「值是否可用」只看基础码（量程位是与可用性正交的附加信息） */
 bool     indurtdb_quality_is_usable(uint8_t quality);
 
+/* ==== v3.7 主题A：语义纯函数（无状态，可单测，不触共享内存） ==== */
+/* 点位值 → double 归一化（供死区/RBE 与 EURange 比较；string 不适用，调用方应仅对数值类型使用）。
+ * rtdbd 写权威复用此函数，避免各类型 memcpy 重复。 */
+double  indurtdb_value_to_double(uint8_t type, const void* value_bits);
+/* EURange 量程位：eur 未启用返回 NONE；value<eur_min→LOW，>eur_max→HIGH，区间内（含边界）→NONE。 */
+uint8_t indurtdb_eurange_limit(bool eur_enabled, double eur_min, double eur_max, double value);
+/* 死区是否越过：abs_mode=绝对阈值；否则(百分比)阈值=deadband%*(eur_max-eur_min)。
+ * 严格大于阈值才触发（等号不触发）；百分比模式 eur_max==eur_min 时不触发（除零保护）。 */
+bool    indurtdb_deadband_exceeded(bool abs_mode, double deadband,
+                                   double eur_min, double eur_max,
+                                   double last, double cur);
+
 /* ==== 错误码 (v3.4 起新增接口返回语义化负值) ====
  * 既有接口仍返回 -1（= INDURTDB_ERR_ARG 语义），新增接口使用下列码，
  * 便于调用方区分"参数错 / 没找到 / 空间满 / 未初始化 / 忙"。
@@ -147,6 +165,11 @@ int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns);
 int indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns);
 int indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns);
 int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns);
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用）。value 按 type 解释（与 indurtdb_value_to_double 一致）。
+ * 一次性写入值 + 调用方计算好的 quality（含 EURange 量程位）。默认 indurtdb_write_* 不变（仍 GOOD）。 */
+int indurtdb_write_quality_ts(uint32_t id, uint8_t type, const void* value,
+                              uint64_t source_ts_ns, uint8_t quality);
 
 /* ==== 质量标记 ====
  * 用于显式设置点位质量（如与控制面失联时标记 COMM_FAILURE）。
@@ -246,6 +269,10 @@ int indurtdb_h_write_bool_ts(indurtdb_t* h, uint32_t id, bool value, uint64_t so
 int indurtdb_h_write_int32_ts(indurtdb_t* h, uint32_t id, int32_t value, uint64_t source_ts_ns);
 int indurtdb_h_write_double_ts(indurtdb_t* h, uint32_t id, double value, uint64_t source_ts_ns);
 int indurtdb_h_write_string_ts(indurtdb_t* h, uint32_t id, const char* value, uint64_t source_ts_ns);
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用），句柄化版本 */
+int indurtdb_h_write_quality_ts(indurtdb_t* h, uint32_t id, uint8_t type, const void* value,
+                                uint64_t source_ts_ns, uint8_t quality);
 
 int indurtdb_h_read_bool(indurtdb_t* h, uint32_t id, bool* value);
 int indurtdb_h_read_int32(indurtdb_t* h, uint32_t id, int32_t* value);

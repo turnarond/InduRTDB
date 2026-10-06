@@ -26,6 +26,7 @@
 #include "audit.h"
 #include "policy.h"
 #include "logbuf.h"
+#include "rbe.h"
 
 /* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
  * 否则 rtdbd.c 的 memcpy(&m, &s.meta, sizeof(m)) 会越界/截断（protocol.h:108）。 */
@@ -96,12 +97,14 @@ typedef struct {
     int      fd;
     uint32_t subs[RTDBD_SUB_MAX];
     uint32_t nsubs;
+    rbe_state_t rbe;   /* 每连接 RBE 状态（v3.7 主题A T1） */
 } rtdbd_conn_t;
 
 static void conn_init(rtdbd_conn_t* c)
 {
     c->fd = -1;
     c->nsubs = 0;
+    rbe_state_init(&c->rbe);
 }
 
 static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
@@ -122,6 +125,7 @@ static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id)
 
 static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
 {
+    rbe_clear(&c->rbe, point_id); /* 退订同步清 RBE 状态（重新订阅首值必发） */
     for (uint32_t i = 0; i < c->nsubs; ++i) {
         if (c->subs[i] != point_id) continue;
         c->subs[i] = c->subs[c->nsubs - 1];
@@ -130,8 +134,10 @@ static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
     }
 }
 
-/* 写成功后向所有订阅了该点位的连接广播变更通知（T4） */
-static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t* w)
+/* 写成功后向所有订阅了该点位的连接广播变更通知（T4）。
+ * v3.7 主题A T1：经 RBE 门控——死区未越过则抑制本次通知（值仍已落库）。 */
+static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t* w,
+                             const indurtdb_meta_t* meta)
 {
     rtdbd_req_hdr_t  nh;
     rtdbd_notify_t   nt;
@@ -150,10 +156,16 @@ static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t
     nt.source_ts_ns = w->source_ts_ns;
     nt.timestamp_ns = 0; /* 由服务端在广播前补齐 */
 
+    /* 当前值（double）用于 RBE 死区比较 */
+    double v = indurtdb_value_to_double(w->type, &w->value_bits);
+
     for (int i = 0; i < n; ++i) {
         rtdbd_conn_t* c = &conns[i];
         if (c->fd < 0) continue;
         if (!conn_has_sub(c, w->point_id)) continue;
+
+        /* RBE 门控：死区未越过则抑制本次通知 */
+        if (!rbe_decide(&c->rbe, w->point_id, v, meta)) continue;
 
         /* 取当前值的时间戳，保证通知携带最新入库时刻 */
         indurtdb_point_t pt;
@@ -180,41 +192,29 @@ static int peer_cred(int fd, uint32_t* pid, uint32_t* uid)
     return 0;
 }
 
-/* 执行一次点位写入（携带采集时刻）。返回 0 成功，非 0 失败
+/* 执行一次点位写入（携带采集时刻）。返回 0 成功，非 0 失败。
+ * 同步计算 EURange 量程位并经质量感知入口落值；meta 在返回时填充（供通知侧 RBE 门控复用）。
  *
- * 采集时刻由客户端经协议传入；为 0 表示"未提供"，
- * 库侧语义退化为仅记录入库时刻（与旧行为一致）。
- */
-static int do_write(const rtdbd_write_req_t* w)
+ * 采集时刻由客户端经协议传入；为 0 表示"未提供"，库侧退化为仅记录入库时刻。 */
+static int do_write(const rtdbd_write_req_t* w, indurtdb_meta_t* meta)
 {
-    switch (w->type) {
-    case RTDBD_TYPE_BOOL:
-        return indurtdb_write_bool_ts(w->point_id, (w->value_bits & 1u) ? true : false,
-                                      w->source_ts_ns);
-    case RTDBD_TYPE_INT32:
-        return indurtdb_write_int32_ts(w->point_id, (int32_t)w->value_bits,
-                                       w->source_ts_ns);
-    case RTDBD_TYPE_INT64: {
-        int64_t v = 0;
-        memcpy(&v, &w->value_bits, sizeof(v));
-        return indurtdb_write_int64_ts(w->point_id, v, w->source_ts_ns);
+    memset(meta, 0, sizeof(*meta));
+
+    /* 不支持的类型（STRING 受 8B 负载限制等）→ BAD_REQUEST */
+    if (w->type == RTDBD_TYPE_STRING || w->type > RTDBD_TYPE_FLOAT) return -99;
+
+    /* 取该点 meta（rtdbd 作为写权威，读 meta 属合理开销；核心热路径零 meta 读不变式保持） */
+    uint8_t lim = INDURTDB_LIMIT_NONE;
+    if (indurtdb_get_meta(w->point_id, meta) == 0) {
+        double v = indurtdb_value_to_double(w->type, &w->value_bits);
+        lim = indurtdb_eurange_limit(!!(meta->flags & INDURTDB_META_FLAG_EUR),
+                                     meta->eur_min, meta->eur_max, v);
     }
-    case RTDBD_TYPE_UINT32:
-        return indurtdb_write_uint32_ts(w->point_id, (uint32_t)w->value_bits,
-                                        w->source_ts_ns);
-    case RTDBD_TYPE_FLOAT: {
-        float f = 0.0f;
-        memcpy(&f, &w->value_bits, sizeof(f));
-        return indurtdb_write_float_ts(w->point_id, f, w->source_ts_ns);
-    }
-    case RTDBD_TYPE_DOUBLE: {
-        double d = 0.0;
-        memcpy(&d, &w->value_bits, sizeof(d));
-        return indurtdb_write_double_ts(w->point_id, d, w->source_ts_ns);
-    }
-    default:
-        return -99; /* 不支持的类型（如 STRING 受 8B 负载限制） */
-    }
+
+    /* 一次性落值 + 量程位（quality 基础码恒为 GOOD） */
+    uint8_t quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_GOOD, lim);
+    return indurtdb_write_quality_ts(w->point_id, w->type, &w->value_bits,
+                                     w->source_ts_ns, quality);
 }
 
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
@@ -324,7 +324,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             return send_all(fd, &resp, sizeof(resp));
         }
 
-        int rc = do_write(&w);
+        indurtdb_meta_t m;
+        int rc = do_write(&w, &m);
         if (rc == -99) {
             resp.status      = RTDBD_ST_BAD_REQUEST;
             resp.payload_len = 0;
@@ -341,8 +342,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         resp.payload_len = 0;
         if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
 
-        /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了） */
-        notify_broadcast(conns, nconns, &w);
+        /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了）；RBE 门控在内部 */
+        notify_broadcast(conns, nconns, &w, &m);
         return 0;
     }
 

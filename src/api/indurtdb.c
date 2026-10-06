@@ -190,6 +190,16 @@ int indurtdb_h_write_uint32(indurtdb_t* h, uint32_t id, uint32_t value) {
     ENSURE_H(h);
     return h_write_and_notify(h, irt_pm_write_uint32(&h->pm, id, value), id);
 }
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用）。
+ * value 按 type 解释（与 indurtdb_value_to_double 一致），quality 由调用方计算（含 EURange 量程位）。 */
+int indurtdb_h_write_quality_ts(indurtdb_t* h, uint32_t id, uint8_t type,
+                                const void* value, uint64_t source_ts_ns, uint8_t quality) {
+    ENSURE_H(h);
+    return h_write_and_notify(h,
+        irt_pm_write_quality_ts(&h->pm, id, type, value, source_ts_ns, quality), id);
+}
+
 int indurtdb_h_write_float(indurtdb_t* h, uint32_t id, float value) {
     ENSURE_H(h);
     return h_write_and_notify(h, irt_pm_write_float(&h->pm, id, value), id);
@@ -649,6 +659,12 @@ int indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t ts) {
 }
 int indurtdb_write_float_ts(uint32_t id, float value, uint64_t ts) {
     return v1_int(indurtdb_h_write_float_ts(g_default, id, value, ts));
+}
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用）v1 全局封装 */
+int indurtdb_write_quality_ts(uint32_t id, uint8_t type, const void* value,
+                              uint64_t source_ts_ns, uint8_t quality) {
+    return v1_int(indurtdb_h_write_quality_ts(g_default, id, type, value, source_ts_ns, quality));
 }
 int indurtdb_read_bool(uint32_t id, bool* value) {
     return v1_int(indurtdb_h_read_bool(g_default, id, value));

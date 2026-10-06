@@ -4,6 +4,27 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.7.0] — 2026-10-06「死区/RBE + EURange 生效」(v3.7 主题A，设计见 `docs/plans/2026-10-06-v3.7-themeA-implementation.md`)
+
+让此前"只存不下发"的 `deadband` / `eur_min`/`eur_max` 元数据真正生效：`rtdbd` 作为写权威在写入时施加 EURange 量程位，并按死区 / EURange 边界做**按订阅者**的 Reporting-By-Exception 通知。默认路径行为零变更。
+
+### Added
+- **语义纯函数公共 API**（`src/core/irt_semantics.c`）：`indurtdb_value_to_double`（6 种数值类型归一化）、`indurtdb_eurange_limit`（计算量程位 LOW/HIGH/NONE）、`indurtdb_deadband_exceeded`（绝对/百分比死区，含 `eur_max==eur_min` 除零保护）。
+- **质量感知写入口**：`indurtdb_write_quality_ts` / `indurtdb_h_write_quality_ts`，一次 seqlock 写入「值 + 调用方算好的 quality（含量程位）」。
+- **rtdbd 通知门控（RBE）**：新增 `rtdbd/src/rbe.c`，每连接定长 RBE 状态（内嵌于 `rtdbd_conn_t`），仅在死区越过或 EURange 边界跨越时推送 `NOTIFY`；首值必发、退订/重订阅重置、连接断开清理。状态仅在 rtdbd 进程内存，**零 ABI 变更**。
+- **测试**：`tests/unit/test_c_rbe.cpp`（4 套件，覆盖各类型归一化 / 除零保护 / 双向 / 边界）；`tests/integration/test_rtdbd_proto_v2.cpp` 新增 `EurangeLimitOnWrite`、`RbeSuppressesNotify`、`NotifyEurCrossing`、`NotifyDeadbandPercent`、`NotifyDefaultUnchanged`。
+
+### Changed
+- `rtdbd` 的 `do_write` 改为：读取点位 meta → 计算量程位 → 经质量感知写入口落值（量程位在**写权威**统一计算，跨进程直读者看到一致语义）。
+- 版本号四处同步为 3.7.0（`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 宏 / CHANGELOG）。
+
+### Notes / 已知限制
+- **默认 `indurtdb_write_*` 行为完全不变**：核心热路径仍强制 `quality = GOOD`、**零 meta 读**（守住 v3.4 T3「meta 不进热路径」不变式）；仅 rtdbd 走新入口。`flags=0` 时 RBE 恒通知，由 `NotifyDefaultUnchanged` 守护。
+- 仅开启 `INDURTDB_META_FLAG_EUR`（无死区）时，rtdbd 推送**仅在跨量程边界触发**，区间内变化不推送（值仍落库、GET 轮询可见）——「按订阅者 RBE」预期行为，非缺陷。
+- `indurtdb_value_to_double` 对 `string` 等非数值类型返回 `0.0`，调用方责任仅对数值类型使用（RBE 仅对数值类型生效）。
+
+---
+
 ## [3.6.0] — 2026-10-06「点位管控写 / 命令终端 / 运行日志」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md` Phase 2)
 
 把 `rtdb-monitor` 从「只读监控」推进到「可管理 + 类 Redis CLI + 运行日志」：点位支持运行时增/删/改名，提供命令终端、专业前端工程化界面与运行日志查看。
