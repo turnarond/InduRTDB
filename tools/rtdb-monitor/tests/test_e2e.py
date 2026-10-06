@@ -156,7 +156,18 @@ def main() -> None:
             assert cmd("del Term.CmdPoint") == ["OK"]
             assert cmd("bogus")[0].startswith("未知命令")
 
-        print("E2E OK: REST(list/get/set/meta/CRUD/cmd) + WebSocket(list/update) all passed")
+            # ---- v3.6 运行日志 ----
+            r = client.get("/api/logs")
+            assert r.status_code == 200, r.text
+            logs = r.json()
+            assert isinstance(logs, list) and len(logs) >= 1, logs
+            assert any("listening on" in e["msg"] for e in logs), logs   # 启动日志
+            assert any("create point" in e["msg"] for e in logs), logs   # 建点位入日志
+            assert any("delete point" in e["msg"] for e in logs), logs   # 删点位入日志
+            out = cmd("logs 5")
+            assert 1 <= len(out) <= 5, out
+
+        print("E2E OK: REST(list/get/set/meta/CRUD/logs) + WS(list/update) + cmd all passed")
     finally:
         proc.send_signal(signal.SIGTERM)
         try:

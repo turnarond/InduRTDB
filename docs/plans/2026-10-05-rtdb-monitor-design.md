@@ -12,11 +12,15 @@
 > **Phase 2（已实施，v3.6）**：点位管控写与命令终端——新增 `OP_CREATE_POINT`(12)/
 > `OP_DELETE_POINT`(13)/`OP_RENAME_POINT`(14)（管控写，uid 鉴权，deny by default），
 > `indurtdb` 库新增 `create/delete/rename_point` API；后端提供 REST 增删改与
-> `POST /api/cmd` 命令终端（`ping/list/find/get/set/meta/create/del/rename`，参数可用点位名）；
+> `POST /api/cmd` 命令终端（`ping/list/find/get/set/meta/create/del/rename/logs`，参数可用点位名）；
+> 新增 `OP_GET_LOG`(15) 运行日志（rtdbd 侧 `logbuf.c/h` 定长环形缓冲），`GET /api/logs` 与终端 `logs` 命令。
 > 前端迁移至 **Vite + Vue3 SFC + Element Plus**（`web/`，构建产物 `web/dist` 由 FastAPI 托管），
-> 点位表支持分页/过滤/行内重命名/删除/新建对话框，新增命令终端页、详情抽屉实时曲线、深色模式。
-> 验证：`test_rtdbd_proto_v2`（含 `PointCrud`、`PointCrudRequiresAuth`）通过、
-> `test_e2e.py`（REST CRUD + 终端命令）通过、`test_rtdb_client.py` 通过。
+> 点位表支持分页/过滤/行内重命名/删除/新建对话框，新增命令终端页、运行日志页、详情抽屉实时曲线、深色模式。
+> 验证：`test_rtdbd_proto_v2`（含 `PointCrud`、`PointCrudRequiresAuth`、`GetLog`）通过、
+> `test_e2e.py`（REST CRUD/日志 + 终端命令）通过、`test_rtdb_client.py` 通过。
+>
+> **合并前评审**：修复前端权限显示/筛选对齐库常量（1=只读/3=读写）、`app.py` 写类端点由 `async` 改同步（避免阻塞事件循环）、
+> `create` 索引插入失败回滚、`access` 约束、启动连接容错、详情抽屉元数据用真实字段；`-Wall -Wextra -Werror` 构建干净、版本四处一致。
 >
 > **未纳入（v3.7 规划，见白皮书）**：点位分区/命名空间（类 Redis db0/db1）——属数据模型层改动
 > （id 空间、name→id 索引、uid 策略均需引入分区维度），需独立评估与重构评审，本期不做。
@@ -41,7 +45,7 @@ InduRTDB 当前对外暴露能力的通道有两条：
 ## 2. 总体架构
 
 ```
-浏览器 (原生 JS 单页, 无构建)  ⇄  WebSocket / HTTP  ⇄  Python Web 服务 (FastAPI)
+浏览器 (Vite + Vue3 SFC + Element Plus)  ⇄  WebSocket / HTTP  ⇄  Python Web 服务 (FastAPI)
                                                           │ UDS 二进制协议 (纯 Python 复刻 protocol.h)
                                                           ▼
                                                        rtdbd 守护进程  ⇄  共享内存 (RTDB)
@@ -50,8 +54,8 @@ InduRTDB 当前对外暴露能力的通道有两条：
 - 新增目录 `tools/rtdb-monitor/`（与 `tools/irt_diag` 同级的独立 Python 工程）。
 - **零 C 依赖**：Web 服务用 Python `socket` + `struct` 复刻 `rtdbd/include/rtdbd/protocol.h` 的报文，
   不引入 protobuf / VSOA / 任何第三方 RPC 栈。
-- 前端用原生 HTML/JS，由 FastAPI 以 `StaticFiles` 直接托管，**无需 Node 构建链**；
-  部署只需 `pip install fastapi uvicorn`（可选 `pydantic`）。
+- 前端用 **Vite + Vue3 SFC + Element Plus** 工程化（`web/`，`npm run build` 产出 `dist/`），
+  由 FastAPI 优先托管 `web/dist`，未构建时回退原生 `static/`；部署需 `pip install fastapi uvicorn` + 一次前端构建。
 - **分层解耦**：
   - 监控后端 ↔ rtdbd 走 UDS 二进制协议（内部通道，与 node-server 无关）。
   - 浏览器 ↔ 监控后端走 WebSocket/HTTP，JSON 报文在 schema 层对齐 node-server HMI DTO。

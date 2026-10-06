@@ -458,6 +458,65 @@ TEST(ProtoV2, PointCrudRequiresAuth)
     p.stop();
 }
 
+/* 9. v3.6 运行日志：GET_LOG 返回启动事件，且管控写会记入日志 */
+TEST(ProtoV2, GetLog)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("log", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_log_req_t q;
+    memset(&q, 0, sizeof(q));
+    q.max = 0; /* 全部（上限 RTDBD_LOG_CAPACITY） */
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET_LOG, &q, sizeof(q), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_GE(body.size(), sizeof(rtdbd_log_entry_t));
+
+    uint32_t n = (uint32_t)(body.size() / sizeof(rtdbd_log_entry_t));
+    EXPECT_LE(n, RTDBD_LOG_CAPACITY);
+    EXPECT_EQ(body.size(), n * sizeof(rtdbd_log_entry_t));
+
+    /* 最旧→最新：首条应为启动事件 */
+    rtdbd_log_entry_t e;
+    memcpy(&e, body.data(), sizeof(e));
+    EXPECT_NE(std::string(e.msg).find("rtdbd listening on"), std::string::npos)
+        << "unexpected first entry: " << e.msg;
+
+    /* 管控写(create)应记入日志 */
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 20;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Log.Test", sizeof(c.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET_LOG, &q, sizeof(q), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    uint32_t n2 = (uint32_t)(body.size() / sizeof(rtdbd_log_entry_t));
+    EXPECT_GT(n2, n);
+
+    bool found = false;
+    for (uint32_t i = 0; i < n2; ++i) {
+        rtdbd_log_entry_t le;
+        memcpy(&le, body.data() + i * sizeof(le), sizeof(le));
+        if (std::string(le.msg).find("create point") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "create point event should appear in runtime log";
+
+    close(fd);
+    p.stop();
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

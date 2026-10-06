@@ -4,25 +4,28 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.6.0] — 2026-10-05「点位管控写与命令终端」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md` Phase 2)
+## [3.6.0] — 2026-10-06「点位管控写 / 命令终端 / 运行日志」(设计见 `docs/plans/2026-10-05-rtdb-monitor-design.md` Phase 2)
 
-把 `rtdb-monitor` 从「只读监控」推进到「可管理 + 类 Redis CLI」：点位支持运行时增/删/改名，并提供命令终端与前端工程化界面。
+把 `rtdb-monitor` 从「只读监控」推进到「可管理 + 类 Redis CLI + 运行日志」：点位支持运行时增/删/改名，提供命令终端、专业前端工程化界面与运行日志查看。
 
 ### Added
 - **rtdbd 协议扩展（加法式，协议主版本仍为 2）**：新增三个**管控写** opcode（与 `OP_WRITE`/`OP_SET_META` 同权，走 `SO_PEERCRED` + uid 策略，deny by default）
   - `RTDBD_OP_CREATE_POINT`(12)：`id + type + access + name[64]` 注册点位（72B）。
   - `RTDBD_OP_DELETE_POINT`(13)：注销点位（清空 `name[0]` 并移除 name→id 索引）。
   - `RTDBD_OP_RENAME_POINT`(14)：`id + name[64]` 改名并同步索引（持写锁内原子完成）。
+  - `RTDBD_OP_GET_LOG`(15)：拉取 rtdbd 运行日志（定长环形缓冲 128 条），`LOG_REQ` 4B / `LOG_ENTRY` 128B（`ts_ns` + `level` + `msg[116]`）。**只读、未走 uid 鉴权**，与 `OP_AUDIT_DUMP` 同策略（日志无 point 维度，且只含进程运行事件、不含点位值）；Web 层 `/api/logs` 仍受 `--token` 网关保护。
 - **indurtdb 库新增 CRUD API**：`indurtdb_h_create_point/delete_point/rename_point` 及 v1 同名薄封装；复用 `load_config` 的 seqlock 写锁模式，索引用 `_locked` 变体保证原子性；建点位时拒绝同名（指其他 id）与已占用 id，删除/改名对不存在的点位返回 `NOT_FOUND`。
 - **布局静态断言**：`CREATE_REQ` 72B / `DELETE_REQ` 4B / `RENAME_REQ` 68B 与 Python 客户端逐字节对齐。
-- **Python 客户端**：`create_point`（支持类型名如 `int32`）/ `delete_point` / `rename_point`。
-- **Web 后端**：REST `POST /api/points`（新建）、`DELETE /api/points/{id}`、`POST /api/points/{id}/rename`（改名）；`POST /api/cmd` 命令终端支持 `ping/list/find/get/set/meta/create/del/rename`（参数可用点位名）。
-- **前端工程化**：迁移到 **Vite + Vue3 SFC + Element Plus**（构建产物 `web/dist` 由 FastAPI 托管）；点位表支持分页、名称/类型/权限过滤、行内重命名与删除、新建点位对话框；新增**命令终端**页（历史/上下键/清屏）；点位详情抽屉含实时曲线；深色模式与专业布局。
-- **测试**：`tests/integration/test_rtdbd_proto_v2.cpp` 新增 `PointCrud`（create→get→rename→find→delete）与 `PointCrudRequiresAuth`（默认策略须拒绝）；`tests/test_rtdb_client.py` 新增 CRUD 编解码/类型解析用例；`tests/test_e2e.py` 覆盖 REST CRUD 与终端命令。
+- **rtdbd 运行日志**：新增 `logbuf.c/h` 定长环形缓冲（128 条、无堆分配、墙上时钟 CLOCK_REALTIME）；启动/监听/策略与配置加载失败、worker 重启、以及建/删/改名点位均写入日志，并保留既有控制台输出。
+- **Python 客户端**：`create_point`（支持类型名如 `int32`）/ `delete_point` / `rename_point`；`get_logs(max_n)`。
+- **Web 后端**：REST `POST /api/points`（新建）、`DELETE /api/points/{id}`、`POST /api/points/{id}/rename`（改名）、`GET /api/logs`；`POST /api/cmd` 命令终端支持 `ping/list/find/get/set/meta/create/del/rename/logs`（参数可用点位名）。
+- **前端工程化**：迁移到 **Vite + Vue3 SFC + Element Plus**（构建产物 `web/dist` 由 FastAPI 托管）；点位表支持分页、名称/类型/**权限**（1=只读/3=读写）过滤、行内重命名与删除、新建点位对话框；新增**命令终端**页（历史/上下键/清屏）与**运行日志**页（时间/级别/消息、3s 自动刷新）；点位详情抽屉含实时曲线；深色模式与专业布局。
+- **测试**：`tests/integration/test_rtdbd_proto_v2.cpp` 新增 `PointCrud`（create→get→rename→find→delete）、`PointCrudRequiresAuth`（默认策略须拒绝）、`GetLog`（首条为启动事件、create 后日志增长且含 `create point`）；`tests/test_rtdb_client.py` 新增 CRUD/日志编解码与类型解析用例；`tests/test_e2e.py` 覆盖 REST CRUD/日志与终端命令。
 
 ### Changed
 - 前端由原生 HTML/JS（`static/`）迁至 `web/` 工程；`app.py` 优先托管 `web/dist`，未构建时回退 `static/`。
 - 版本号四处同步为 3.6.0（`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 宏 / CHANGELOG）。
+- 合并前评审修复：`app.py` 的写类端点（`set`/`create`/`rename`/`cmd`）由 `async` 改为同步 `def`（避免阻塞事件循环，rtdbd 无响应时不再冻结 WS 推送）；启动连接 rtdbd 失败仅告警、Web 照常启动；`indurtdb_h_create_point` 索引插入失败（含 BUSY）一律回滚注册、约束 `access` 仅 1/3；前端权限显示/筛选对齐库常量（1=只读/3=读写），详情抽屉元数据改用真实字段（范围/死区/标志）。
 
 ### Notes / 已知限制
 - 运行时 CRUD 落在**共享内存注册表**，进程重启后不保留（需持久化则另立版本规划，配合配置回写）。

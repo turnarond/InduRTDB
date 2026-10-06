@@ -10,7 +10,8 @@ from rtdb_client import (  # noqa: E402
     REQ_HDR, RESP_HDR, WRITE_REQ, GET_REQ, GET_RESP, LIST_REQ, POINT_INFO,
     NOTIFY, FIND_REQ, FIND_RESP, META_REQ, META_PAYLOAD,
     CREATE_REQ, DELETE_REQ, RENAME_REQ,
-    OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT,
+    LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
+    OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
     RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
@@ -35,6 +36,9 @@ def test_struct_sizes_match_c_layout():
     assert CREATE_REQ.size == 72
     assert DELETE_REQ.size == 4
     assert RENAME_REQ.size == 68
+    # v3.6 运行日志
+    assert LOG_REQ.size == 4
+    assert LOG_ENTRY.size == 128
 
 
 def test_crud_opcodes():
@@ -56,6 +60,21 @@ def test_crud_payload_roundtrip():
 
     b3 = DELETE_REQ.pack(20)
     assert len(b3) == 4 and DELETE_REQ.unpack(b3)[0] == 20
+
+
+def test_log_entry_roundtrip():
+    b = LOG_ENTRY.pack(1700000000123456789, LOG_WARN,
+                       b"rtdbd: worker 42 exited, respawning".ljust(116, b"\x00"))
+    assert len(b) == 128
+    ts, level, msg = LOG_ENTRY.unpack(b)
+    assert ts == 1700000000123456789 and level == LOG_WARN
+    assert msg.rstrip(b"\x00") == b"rtdbd: worker 42 exited, respawning"
+
+    b2 = LOG_REQ.pack(0)
+    assert len(b2) == 4 and LOG_REQ.unpack(b2)[0] == 0
+    assert OP_GET_LOG == 15
+    assert LOG_LEVEL_NAME[LOG_INFO] == "INFO"
+    assert LOG_LEVEL_NAME[LOG_ERROR] == "ERROR"
 
 
 def test_create_point_type_resolution():
@@ -142,5 +161,6 @@ if __name__ == "__main__":
     test_point_info_roundtrip()
     test_crud_opcodes()
     test_crud_payload_roundtrip()
+    test_log_entry_roundtrip()
     test_create_point_type_resolution()
     print("ALL OK")

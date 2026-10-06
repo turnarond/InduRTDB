@@ -25,6 +25,7 @@
 
 #include "audit.h"
 #include "policy.h"
+#include "logbuf.h"
 
 /* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
  * 否则 rtdbd.c 的 memcpy(&m, &s.meta, sizeof(m)) 会越界/截断（protocol.h:108）。 */
@@ -40,6 +41,10 @@ static volatile sig_atomic_t g_stop = 0;
 static uint32_t g_max_points = 0;
 #define RTDBD_LIST_CHUNK 1024u
 static uint8_t g_list_buf[RTDBD_LIST_CHUNK * sizeof(rtdbd_point_info_t)];
+
+/* 运行日志环形缓冲 + GET_LOG 导出缓冲（定长，无堆分配） */
+static irt_logbuf_t      g_logbuf;
+static rtdbd_log_entry_t g_log_out[RTDBD_LOG_CAPACITY];
 
 static void on_signal(int sig)
 {
@@ -502,6 +507,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL;
         else {
             irt_audit_record(audit, pid, uid, c.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "create point id=%u name=%s (uid=%u)", c.point_id, c.name, uid);
             resp.status = RTDBD_ST_OK;
         }
         resp.payload_len = 0;
@@ -532,6 +539,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL;
         else {
             irt_audit_record(audit, pid, uid, d.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "delete point id=%u (uid=%u)", d.point_id, uid);
             resp.status = RTDBD_ST_OK;
         }
         resp.payload_len = 0;
@@ -563,6 +572,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL;
         else {
             irt_audit_record(audit, pid, uid, r.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "rename point id=%u -> %s (uid=%u)", r.point_id, r.name, uid);
             resp.status = RTDBD_ST_OK;
         }
         resp.payload_len = 0;
@@ -611,6 +622,25 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         return 0;
     }
 
+    /* ---- v3.6 运行日志（只读；与 AUDIT_DUMP 同类，无点位维度故不按 point 鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET_LOG) {
+        rtdbd_log_req_t q;
+        if (req.payload_len != sizeof(q) || recv_all(fd, &q, sizeof(q)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+        uint32_t cap = (q.max == 0 || q.max > RTDBD_LOG_CAPACITY) ? RTDBD_LOG_CAPACITY : q.max;
+        uint32_t n = irt_logbuf_dump(&g_logbuf, g_log_out, cap);
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = n * (uint32_t)sizeof(rtdbd_log_entry_t);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        if (n > 0 && send_all(fd, g_log_out, resp.payload_len) != 0) return 1;
+        return 0;
+    }
+
     resp.status      = RTDBD_ST_BAD_REQUEST;
     resp.payload_len = 0;
     (void)send_all(fd, &resp, sizeof(resp));
@@ -654,8 +684,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
     }
     wargv[n] = NULL;
 
-    printf("rtdbd supervisor started\n");
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor started");
 
     for (;;) {
         if (g_stop) break;
@@ -671,8 +700,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
         }
 
         write_pidfile(pidfile, child);
-        printf("rtdbd worker pid=%d\n", (int)child);
-        fflush(stdout);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd worker pid=%d", (int)child);
 
         int status = 0;
         pid_t r = waitpid(child, &status, 0);
@@ -683,14 +711,13 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
             break;
         }
 
-        printf("rtdbd: worker %d exited, respawning\n", (int)child);
-        fflush(stdout);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_WARN,
+                        "rtdbd: worker %d exited, respawning", (int)child);
         usleep(1000); /* 极短退避，优先保证快速恢复 */
     }
 
     if (pidfile) unlink(pidfile);
-    printf("rtdbd supervisor stopped\n");
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor stopped");
     return 0;
 }
 
@@ -733,6 +760,7 @@ int main(int argc, char** argv)
     }
 
     g_max_points = max_points; /* 供监控 LIST 遍历点位表使用 */
+    irt_logbuf_init(&g_logbuf);
 
     if (supervise) {
         return supervise_loop(argc, argv, pidfile);
@@ -745,7 +773,8 @@ int main(int argc, char** argv)
     irt_policy_t policy;
     irt_policy_init(&policy);
     if (policy_path && irt_policy_load(&policy, policy_path) != 0) {
-        fprintf(stderr, "rtdbd: failed to load policy: %s\n", policy_path);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                        "rtdbd: failed to load policy: %s", policy_path);
         return 1;
     }
 
@@ -753,7 +782,8 @@ int main(int argc, char** argv)
     irt_audit_init(&audit);
 
     if (indurtdb_initialize(instance, max_points, max_subs) != 0) {
-        fprintf(stderr, "rtdbd: indurtdb_initialize failed: %s\n", indurtdb_get_last_error());
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                        "rtdbd: indurtdb_initialize failed: %s", indurtdb_get_last_error());
         return 1;
     }
 
@@ -761,7 +791,8 @@ int main(int argc, char** argv)
      * 失败不致命：仅告警，守护进程继续提供写/读能力。 */
     if (config_path) {
         if (indurtdb_load_config(config_path) != 0) {
-            fprintf(stderr, "rtdbd: load config failed: %s\n", indurtdb_get_last_error());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                            "rtdbd: load config failed: %s", indurtdb_get_last_error());
         }
     }
 
@@ -784,8 +815,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("rtdbd listening on %s (instance=%s)\n", sock_path, instance);
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                    "rtdbd listening on %s (instance=%s)", sock_path, instance);
 
     rtdbd_conn_t conns[RTDBD_MAX_CLIENTS];
     for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_init(&conns[i]);

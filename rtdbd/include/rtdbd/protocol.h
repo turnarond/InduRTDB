@@ -44,6 +44,10 @@
 #define RTDBD_OP_DELETE_POINT 13u /* 请求：point_id；管控写，须鉴权 */
 #define RTDBD_OP_RENAME_POINT 14u /* 请求：point_id+name[64]；管控写，须鉴权 */
 
+/* v3.6 运行日志（只读。与 AUDIT_DUMP 同类：无点位维度，故不按 point 鉴权）。
+ * 仅含进程运行事件，不含点位值。 */
+#define RTDBD_OP_GET_LOG      15u /* 请求：max；响应：日志条目数组（最旧→最新） */
+
 /* 单连接最大订阅点数 */
 #define RTDBD_SUB_MAX 32u
 
@@ -209,5 +213,34 @@ typedef struct {
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_create_req_t) == 72, "rtdbd_create_req_t must be 72B");
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_delete_req_t) == 4, "rtdbd_delete_req_t must be 4B");
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_rename_req_t) == 68, "rtdbd_rename_req_t must be 68B");
+
+/* ---- v3.6 运行日志 ---- */
+
+/* 单条日志消息上限（含结尾 '\0'） */
+#define RTDBD_LOG_ENTRY_MSG_MAX 116u
+
+/* 日志级别 */
+#define RTDBD_LOG_INFO  0u
+#define RTDBD_LOG_WARN  1u
+#define RTDBD_LOG_ERROR 2u
+
+/* 服务端环形缓冲容量（监控台最多可见条数） */
+#define RTDBD_LOG_CAPACITY 128u
+
+/* GET_LOG 请求负载 4B */
+typedef struct {
+    uint32_t max;   /* 最多返回条数，0 = 全部（上限 RTDBD_LOG_CAPACITY） */
+} rtdbd_log_req_t;
+
+/* GET_LOG 单条日志 128B */
+typedef struct {
+    uint64_t ts_ns;                          /* 墙上时钟(CLOCK_REALTIME) 纳秒 */
+    uint8_t  level;                          /* RTDBD_LOG_* */
+    uint8_t  reserved[3];
+    char     msg[RTDBD_LOG_ENTRY_MSG_MAX];
+} rtdbd_log_entry_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_log_req_t) == 4, "rtdbd_log_req_t must be 4B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_log_entry_t) == 128, "rtdbd_log_entry_t must be 128B");
 
 #endif /* RTDBD_PROTOCOL_H_ */

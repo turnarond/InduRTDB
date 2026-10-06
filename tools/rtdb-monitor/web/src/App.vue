@@ -47,6 +47,7 @@
           @delete="onDelete"
         />
         <TerminalView v-else-if="view === 'terminal'" @changed="refresh" />
+        <LogsView v-else-if="view === 'logs'" />
         <div v-else class="placeholder">
           <el-result icon="info" :title="placeholderTitle" sub-title="该功能规划中，需要 rtddb 后端协议扩展（Phase 2）。">
             <template #extra>
@@ -101,6 +102,7 @@ import { api, RtdbSocket } from './api.js'
 import PointTable from './components/PointTable.vue'
 import PointDetailDrawer from './components/PointDetailDrawer.vue'
 import TerminalView from './components/TerminalView.vue'
+import LogsView from './components/LogsView.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const view = ref('points')
@@ -116,9 +118,7 @@ const isDark = ref(false)
 let socket = null
 
 const placeholderMap = {
-  partitions: ['点位分区', '类似 Redis db0/db1 的命名空间分区（需后端支持）'],
-  terminal: ['命令终端', '常用 rtdb 命令解释器（需后端支持）'],
-  logs: ['运行日志', 'rtdbd 运行日志流（需后端支持）']
+  partitions: ['点位分区', '类似 Redis db0/db1 的命名空间分区（需后端支持，v3.7 规划）']
 }
 const placeholderTitle = computed(() => (placeholderMap[view.value] ? placeholderMap[view.value][0] : ''))
 const placeholderHint = computed(() => (placeholderMap[view.value] ? placeholderMap[view.value][1] : ''))
@@ -134,7 +134,7 @@ const typeNames = ['bool', 'int32', 'double', 'string', 'int64', 'uint32', 'floa
 
 function nextFreeId() {
   const used = new Set(points.value.map((p) => p.id))
-  let i = 0
+  let i = 1
   while (used.has(i)) i++
   return i
 }

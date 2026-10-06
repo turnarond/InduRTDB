@@ -21,14 +21,14 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime
 import json
 import os
 
 from fastapi import FastAPI, Query, Header, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from rtdb_client import RtdbClient, NotifyListener, ST_DENIED, ST_NOT_FOUND, TYPE_NAME
+from rtdb_client import RtdbClient, NotifyListener
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -93,7 +93,12 @@ async def _safe_send(ws: WebSocket, msg: dict) -> None:
 async def _startup() -> None:
     global api_client, listener, loop
     loop = asyncio.get_event_loop()
-    api_client = RtdbClient(SOCK).connect()
+    api_client = RtdbClient(SOCK)
+    try:
+        api_client.connect()
+    except Exception as e:  # noqa: BLE001
+        # rtdb 尚未就绪：Web 仍启动，API 调用会返回错误；rtdbd 就绪后自动恢复。
+        print(f"[warn] rtdb-monitor: 初始连接 rtdb 失败（{e}），API 暂不可用", flush=True)
     # 订阅全量点位（先拿清单，再订阅其 id）
     try:
         pts = api_client.list_points()
@@ -137,8 +142,8 @@ def api_point(point_id: int, token: str | None = Query(default=None),
 
 
 @app.post("/api/points/{point_id}/set")
-async def api_set(point_id: int, payload: dict, token: str | None = Query(default=None),
-                 authorization: str | None = Header(default=None)):
+def api_set(point_id: int, payload: dict, token: str | None = Query(default=None),
+            authorization: str | None = Header(default=None)):
     if not _authed(token, authorization):
         return _deny()
     value = payload.get("value")
@@ -191,8 +196,8 @@ def _refresh_registry() -> None:
 
 
 @app.post("/api/points")
-async def api_create(payload: dict, token: str | None = Query(default=None),
-                    authorization: str | None = Header(default=None)):
+def api_create(payload: dict, token: str | None = Query(default=None),
+               authorization: str | None = Header(default=None)):
     if not _authed(token, authorization):
         return _deny()
     pid = payload.get("id")
@@ -222,8 +227,8 @@ def api_delete(point_id: int, token: str | None = Query(default=None),
 
 
 @app.post("/api/points/{point_id}/rename")
-async def api_rename(point_id: int, payload: dict, token: str | None = Query(default=None),
-                     authorization: str | None = Header(default=None)):
+def api_rename(point_id: int, payload: dict, token: str | None = Query(default=None),
+               authorization: str | None = Header(default=None)):
     if not _authed(token, authorization):
         return _deny()
     name = payload.get("name")
@@ -247,6 +252,15 @@ def _resolve_id(tok: str) -> int:
     return api_client.find_by_name(s)
 
 
+def _fmt_log(e: dict) -> str:
+    """把日志条目格式化为一行（墙上时钟转本地可读时间）。"""
+    try:
+        t = datetime.datetime.fromtimestamp(e["ts"] / 1e9).strftime("%H:%M:%S.%f")[:-3]
+    except Exception:  # noqa: BLE001
+        t = str(e["ts"])
+    return f"{t} [{e.get('levelName', '?')}] {e.get('msg', '')}"
+
+
 def _run_cmd(line: str) -> list[str]:
     """执行一条终端命令，返回输出行。失败统一以 ERR: 前缀返回，不抛异常。"""
     parts = line.strip().split()
@@ -266,6 +280,7 @@ def _run_cmd(line: str) -> list[str]:
                 "  create <id> <name> [type] [access] 新建点位",
                 "  del <id|name>                     删除点位",
                 "  rename <id|name> <newname>        重命名点位",
+                "  logs [n]                          查看运行日志（默认全部，上限 128）",
             ]
         if cmd == "ping":
             return ["PONG" if api_client.ping() else "ERR: ping failed"]
@@ -313,14 +328,30 @@ def _run_cmd(line: str) -> list[str]:
             api_client.rename_point(_resolve_id(args[0]), args[1])
             _refresh_registry()
             return ["OK"]
+        if cmd == "logs":
+            n = int(args[0]) if args else 0
+            entries = api_client.get_logs(n)
+            return [_fmt_log(e) for e in entries] or ["(无日志)"]
         return [f"未知命令: {cmd}（输入 help 查看可用命令）"]
     except Exception as e:  # noqa: BLE001
         return [f"ERR: {e}"]
 
 
+@app.get("/api/logs")
+def api_logs(max_n: int = 0, token: str | None = Query(default=None),
+             authorization: str | None = Header(default=None)):
+    """rtdbd 运行日志（最旧→最新）。max_n=0 表示全部（服务端上限 128 条）。"""
+    if not _authed(token, authorization):
+        return _deny()
+    try:
+        return api_client.get_logs(max_n)
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}, 400
+
+
 @app.post("/api/cmd")
-async def api_cmd(payload: dict, token: str | None = Query(default=None),
-                  authorization: str | None = Header(default=None)):
+def api_cmd(payload: dict, token: str | None = Query(default=None),
+            authorization: str | None = Header(default=None)):
     if not _authed(token, authorization):
         return _deny()
     line = str(payload.get("cmd", ""))

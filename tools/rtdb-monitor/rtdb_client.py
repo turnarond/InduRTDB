@@ -34,6 +34,7 @@ OP_LIST = 11
 OP_CREATE_POINT = 12
 OP_DELETE_POINT = 13
 OP_RENAME_POINT = 14
+OP_GET_LOG = 15
 
 # 状态码
 ST_OK = 0
@@ -68,6 +69,14 @@ META_PAYLOAD = struct.Struct("<ddfI8x")   # eur_min, eur_max, deadband, flags, r
 CREATE_REQ = struct.Struct("<IBB2x64s")   # point_id, type, access, reserved[2], name[64]
 DELETE_REQ = struct.Struct("<I")          # point_id
 RENAME_REQ = struct.Struct("<I64s")        # point_id, name[64]
+LOG_REQ = struct.Struct("<I")             # max
+LOG_ENTRY = struct.Struct("<QB3x116s")    # ts_ns, level, reserved[3], msg[116]
+
+# 日志级别（与 protocol.h 的 RTDBD_LOG_* 一致）
+LOG_INFO = 0
+LOG_WARN = 1
+LOG_ERROR = 2
+LOG_LEVEL_NAME = {LOG_INFO: "INFO", LOG_WARN: "WARN", LOG_ERROR: "ERROR"}
 
 TYPE_NAME = {
     TYPE_BOOL: "bool", TYPE_INT32: "int32", TYPE_DOUBLE: "double", TYPE_STRING: "string",
@@ -258,6 +267,22 @@ class RtdbClient:
         self._ok(OP_RENAME_POINT, RENAME_REQ.pack(
             int(point_id), name.encode("utf-8")[:64].ljust(64, b"\x00"),
         ))
+
+    def get_logs(self, max_n: int = 0) -> list[dict]:
+        """读取 rtdbd 运行日志（最旧→最新）。max_n=0 表示全部（服务端上限 128 条）。"""
+        body = self._ok(OP_GET_LOG, LOG_REQ.pack(int(max_n)))
+        out = []
+        for i in range(len(body) // LOG_ENTRY.size):
+            ts, level, msg = LOG_ENTRY.unpack(
+                body[i * LOG_ENTRY.size:(i + 1) * LOG_ENTRY.size]
+            )
+            out.append({
+                "ts": ts,
+                "level": level,
+                "levelName": LOG_LEVEL_NAME.get(level, str(level)),
+                "msg": msg.rstrip(b"\x00").decode("utf-8", "replace"),
+            })
+        return out
 
 
 class NotifyListener:
