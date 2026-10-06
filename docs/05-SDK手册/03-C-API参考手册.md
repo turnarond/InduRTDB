@@ -565,14 +565,16 @@ bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m);
 ### indurtdb_validate_config（B3）
 
 ```c
-uint32_t indurtdb_validate_config(int* err_code, uint32_t* err_field,
-                                  const char** err_reason);
+int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
+                             const char** err_reason);
 ```
 
-遍历默认实例已注册点位，逐点校验（名称非空 + `type`/`access` 合法 + 元数据语义）。
+遍历默认实例已注册点位，逐点校验（`type`/`access` 合法 + 元数据语义）。
 
-- 返回首个非法点 id；全部合法返回 `0`；未初始化返回 `UINT32_MAX`。
-- 三个输出参数可选（`NULL` 可省），用于打印明确原因。
+- 返回 `INDURTDB_CFG_OK` 表示全部合法；否则返回错误码，并把首个非法点 id 写入 `*bad_id`。
+- 三个输出参数均可为 `NULL`。
+- **契约为何用返回值区分而非用点 id**：点 id 0 是合法点位，若以返回值 `0` 表示"全部合法"，
+  则 id 为 0 的非法点会被误判为配置合法、绕过 fail-fast。
 
 ### indurtdb_cfg_error_reason
 

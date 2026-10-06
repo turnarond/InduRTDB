@@ -106,7 +106,35 @@ All notable changes to InduRTDB.
 - 连接关闭的静默通知丢失 → 计入 `notify_drop`。
 - `DEGRADED` 永久锁存 → 60s 滑动窗口。
 - 连接表占栈 → 移入 `.bss`。
-- supervisor EINTR 路径遗漏 `kill(child)` 导致孤儿 worker 挂死 ctest → 跨循环保留 `cur` 并兜底 kill。
+- supervisor 留孤儿 worker → 新增 `terminate_and_reap()`（SIGTERM→退避等待→SIGKILL→回收）。
+
+#### 复审（第二轮，针对上述修复本身）
+- Critical：**部分发送帧混合**。队列满时若淘汰"已部分上线"的队首（`outq_sent > 0`），
+  下轮会用新帧从旧偏移续发，线上出现「旧帧前缀 + 新帧后缀」的混合帧（长度仍 44B，
+  只数帧数的测试会漏）。修复：队首已部分发送时**禁止淘汰**，改丢弃本次新通知。
+- Critical：**supervisor 仍可能留活 worker**。`recv_all()` 的 EINTR 分支是
+  `continue` 重试 recv、不检查 `g_stop`，故阻塞在 recv 的 worker 无法被 SIGTERM 终止。
+  修复：`terminate_and_reap()` 用 SIGKILL 兜底；且内层 waitpid 重试循环在
+  EINTR 且 `g_stop` 时改为主动终止回收（否则 supervisor 自己卡死在 waitpid，
+  实测使 `test_rtdbd_recovery` 从 67ms 涨到 15.2s 并每测试留 1 个孤儿）。
+- Important：优雅退出超时路径的剩余队列计入 `notify_drop`；`conn_discard_outq`
+  触发健康窗口；config 数值严格解析（拒 NaN / 畸形 / 溢出，经 `bad_value` 判为配置非法）；
+  `validate_point_meta` 加 `isfinite` 纵深防御；CLI `parse_u32_cli`（挡 `-1` → UINT32_MAX）
+  与 `--max-points` 上界 1e6；supervisor fatal 路径清理 socket；supervisor 注册 SIGUSR1
+  （避免文档中的 `kill -USR1` 打到 supervisor 时默认终止整个服务）。
+- **API 修正**：`indurtdb_validate_config` 改为「返回状态码 + 输出 `bad_id`」——
+  原契约用返回值 `0` 表示全部合法，但点 id 0 是合法点，非法点若为 id 0 会被误判为
+  配置合法而绕过 fail-fast。
+
+#### 测试护栏（复审新增）
+- `test_rtdbd_recovery.NoOrphanWorkerAfterStop`：supervisor 停止后断言 worker 一并消失
+  （**已验证回退修复后该用例挂死**，确为有效护栏）。
+- `test_rtdbd_backpressure.FramesStayIntactUnderBackpressure`：重背压下逐帧校验
+  magic / version / opcode / payload_len 与取值单调性。
+  **诚实边界**：已实测该用例**不能**确定性复现帧混合（回退修复后仍通过）——
+  该缺陷需「发送缓冲剩余空间 >0 且 <44B」的窄窗口，而 `MSG_DONTWAIT` 下缓冲满时
+  `send` 直接返回 `EAGAIN`（0 字节），`outq_sent` 恒为 0。故此处仅作"帧结构完整性"
+  回归守卫，不宣称覆盖该窄窗口；修复本身由代码评审确认（构造上禁止淘汰已部分上线的队首）。
 
 ---
 

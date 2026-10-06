@@ -37,6 +37,11 @@ RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
 #define RTDBD_MAX_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
+/* --max-points 的硬上限（B3 参数校验）：点位区按 128B/点计算，
+ * 100 万点 ≈ 128MB；再大既无实用意义，也会让 layout 的 uint32 偏移与
+ * mmap/ftruncate 规模失控。用于挡住 -1 → UINT32_MAX 之类的非法输入。 */
+#define RTDBD_MAX_POINTS_LIMIT 1000000u
+
 /* 语义退出码（v3.7 主题B B2/B3）：区分致命错误，供 supervisor/systemd 判定。
  * 2（配置）与 4（自检）为致命：supervisor 停止 respawn，避免坏配置无限重启。 */
 #define RTDBD_EXIT_OK        0
@@ -180,7 +185,12 @@ static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
  * notify_drop 又是 0，排查会被直接带偏（不可观测的静默丢失）。 */
 static void conn_discard_outq(rtdbd_conn_t* c)
 {
-    if (c->outq_count > 0) g_stats.notify_drop += c->outq_count;
+    if (c->outq_count > 0) {
+        g_stats.notify_drop += c->outq_count;
+        /* 丢弃未送达的通知是错误类事件：不计入窗口的话，运维会看到
+         * n_writes 在涨、通知收不到、而 health 仍是 OK，排查被带偏。 */
+        rtdbd_stats_note_error();
+    }
     c->outq_count = 0;
     c->outq_head  = 0;
     c->outq_tail  = 0;
@@ -191,6 +201,16 @@ static void conn_discard_outq(rtdbd_conn_t* c)
 static void outq_push(rtdbd_conn_t* c, const rtdbd_notify_t* nt)
 {
     if (c->outq_count == RTDBD_OUTQ_CAP) {
+        /* 队首已部分上线（socket 缓冲不足导致 outq_sent > 0）时**禁止淘汰**它：
+         * 否则下轮 flush 会用新队首的帧、却从旧的 outq_sent 偏移续发，
+         * 线上变成「旧帧前缀 + 新帧后缀」的混合帧（长度仍是 44B，
+         * 但 magic/opcode/payload 已被拼接破坏，是对端无法解析的坏帧）。
+         * 此时改为丢弃**本次新通知**——它最旧、价值最低，且尚未上线。 */
+        if (c->outq_sent > 0) {
+            g_stats.notify_drop++;
+            rtdbd_stats_note_error();
+            return;
+        }
         c->outq_head = (uint16_t)((c->outq_head + 1u) % RTDBD_OUTQ_CAP);
         c->outq_count--;
         g_stats.notify_drop++;   /* 慢消费者：丢最旧，值仍在库内可被 GET 读到 */
@@ -829,11 +849,55 @@ static void write_pidfile(const char* path, pid_t pid)
     fclose(f);
 }
 
+/* 终止并回收一个子进程：SIGTERM → 有界等待 → 超时 SIGKILL → 最终回收。
+ *
+ * 为什么不能只发 SIGTERM 就走：worker 可能正阻塞在 recv_all() 里，而
+ * recv_all 的 EINTR 分支是 `continue` 重试 recv、并不检查 g_stop——
+ * 此时 SIGTERM 只是打断了 recv，进程根本不会回到 poll 循环去看 g_stop，
+ * 于是**永远不退出**而成孤儿（占着 shm 段、socket，且继承的 stdout/stderr
+ * 管道写端不关闭，会把等 EOF 的调用方永久挂住）。故必须 SIGKILL 兜底。
+ *
+ * 返回 0 = 已确认回收；-1 = 仍无法回收（ECHILD 等，视为已不存在）。 */
+static int terminate_and_reap(pid_t pid)
+{
+    if (pid <= 0) return -1;
+
+    /* 先试 SIGTERM，给优雅退出（排空出站队列）的机会。
+     * 轮询用指数退避而非固定 10ms×200：绝大多数 worker 会在几十毫秒内退出，
+     * 固定 2s 预算会把每个"停止 supervisor"的动作都拖慢 2 秒（实测让
+     * test_rtdbd_recovery 从 67ms 涨到 15s），故总预算压到 500ms。 */
+    kill(pid, SIGTERM);
+    {
+        int waited_us = 0;
+        int step_us   = 200;   /* 0.2ms → 1ms → 5ms → 10ms … */
+        while (waited_us < 500000) {
+            int st = 0;
+            pid_t r = waitpid(pid, &st, WNOHANG);
+            if (r == pid) return 0;                    /* 已回收 */
+            if (r < 0 && errno == ECHILD) return -1;   /* 已不存在 */
+            usleep((useconds_t)step_us);
+            waited_us += step_us;
+            if (step_us < 10000) step_us *= 5;
+        }
+    }
+
+    /* 仍不退出（阻塞在 recv / 排空卡住）→ SIGKILL 强退并阻塞回收 */
+    kill(pid, SIGKILL);
+    for (;;) {
+        int st = 0;
+        pid_t r = waitpid(pid, &st, 0);
+        if (r == pid) return 0;
+        if (r < 0 && errno == EINTR) continue;
+        return -1;                             /* ECHILD：已不存在 */
+    }
+}
+
 /* ---- supervisor：worker 挂了立刻拉起，实现"马上起来继续运行"（T2） ----
  * 用 fork + execv 自身（去掉 --supervise）的方式拉起 worker，
  * 保证每次都是干净的进程，避免残留状态。
  */
-static int supervise_loop(int argc, char** argv, const char* pidfile)
+static int supervise_loop(int argc, char** argv, const char* pidfile,
+                          const char* sock_path)
 {
     /* 不用 SA_RESTART：确保 SIGTERM 能打断 waitpid */
     struct sigaction sa;
@@ -843,6 +907,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
     sa.sa_flags = 0;
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    sigaction(SIGUSR1, &sa, NULL);   /* 仅置标志：避免 SIGUSR1 默认终止掉 supervisor */
     signal(SIGPIPE, SIG_IGN);
 
     /* 构造 worker 参数：去掉 --supervise / --pidfile */
@@ -867,7 +932,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
 
     for (;;) {
         if (g_stop) {
-            if (cur > 0) { kill(cur, SIGTERM); }
+            if (cur > 0) { terminate_and_reap(cur); cur = -1; }
             break;
         }
 
@@ -885,18 +950,28 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
         write_pidfile(pidfile, child);
         irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd worker pid=%d", (int)child);
 
+        /* 内层重试 waitpid：EINTR 只应重试本次等待，不能跳回 fork 层
+         * （否则会重新 fork 并覆盖 cur，彻底失去对旧 worker 的追踪）。
+         * 但 EINTR 往往正是 SIGTERM 置位 g_stop 造成的 —— 此时必须改为
+         * 主动终止并回收，否则会一直阻塞在 waitpid 里，supervisor 永不退出
+         * （实测表现为调用方超时后强杀 supervisor，worker 反成孤儿）。 */
         int status = 0;
-        pid_t r = waitpid(child, &status, 0);
-        if (r < 0) {
-            if (errno == EINTR) continue;   /* 未回收，保留 cur，重试 waitpid */
-            kill(cur, SIGTERM);             /* waitpid 异常失败也要收拾 child */
+        for (;;) {
+            pid_t r = waitpid(child, &status, 0);
+            if (r == child) break;          /* 已回收 */
+            if (r < 0 && errno == EINTR) {
+                if (g_stop) { terminate_and_reap(child); cur = -1; goto supervisor_done; }
+                continue;                   /* 非停止信号：继续等待 */
+            }
+            /* waitpid 失败（含 ECHILD）：确认回收不了也要收拾掉 worker */
+            terminate_and_reap(child);
             cur = -1;
-            break;
+            goto supervisor_done;
         }
         cur = -1;   /* 已回收 */
 
         if (g_stop) {
-            kill(child, SIGTERM);
+            /* 已回收场景下的 g_stop：无需再 kill，直接退出 */
             break;
         }
 
@@ -911,7 +986,11 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
                                 "not respawning", (int)child, code);
                 irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
                                 "rtdbd: supervisor stopped due to fatal config/self-check");
-                if (pidfile) unlink(pidfile);
+                /* pidfile 与 socket 都要清：worker 是在 bind 之前退出的，
+                 * 若只清 pidfile，前一轮遗留的 socket 会残留在文件系统上，
+                 * 监控/测试可能仅凭 socket 存在就误判服务已启动。 */
+                if (pidfile)    unlink(pidfile);
+                if (sock_path)  unlink(sock_path);
                 return code;   /* 透传给 systemd */
             }
         }
@@ -921,8 +1000,23 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
         usleep(1000); /* 极短退避，优先保证快速恢复 */
     }
 
+supervisor_done:
     if (pidfile) unlink(pidfile);
     irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor stopped");
+    return 0;
+}
+
+/* 严格解析 CLI 数值参数：拒绝空串、负号、非数字、尾随字符与溢出/超 uint32。
+ * 直接用 strtoul(optarg, NULL, 10) 会把 "-1" 变成 UINT32_MAX、把 "abc" 变 0。 */
+static int parse_u32_cli(const char* s, uint32_t* out)
+{
+    if (!s || !out || s[0] == '\0') return -1;
+    errno = 0;
+    char* end = NULL;
+    unsigned long v = strtoul(s, &end, 10);
+    if (end == s || !end || *end != '\0') return -1;   /* 非数字 / 尾随字符 */
+    if (errno == ERANGE || v > UINT32_MAX) return -1;  /* 溢出（含 "-1"） */
+    *out = (uint32_t)v;
     return 0;
 }
 
@@ -957,8 +1051,18 @@ int main(int argc, char** argv)
         case 'i': instance = optarg; break;
         case 'p': policy_path = optarg; break;
         case 'c': config_path = optarg; break;
-        case 'm': max_points = (uint32_t)strtoul(optarg, NULL, 10); break;
-        case 'b': max_subs = (uint32_t)strtoul(optarg, NULL, 10); break;
+        case 'm':
+            if (parse_u32_cli(optarg, &max_points) != 0) {
+                fprintf(stderr, "rtdbd: invalid --max-points '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            break;
+        case 'b':
+            if (parse_u32_cli(optarg, &max_subs) != 0) {
+                fprintf(stderr, "rtdbd: invalid --max-subs '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            break;
         case 'S': supervise = true; break;
         case 'P': pidfile = optarg; break;
         case 'F':
@@ -989,8 +1093,12 @@ int main(int argc, char** argv)
             }
         }
     }
-    if (max_points == 0) {
-        fprintf(stderr, "rtdbd: invalid --max-points (must be >= 1)\n");
+    /* --max-points 上界：段布局偏移存在 uint32 字段，且 mmap/ftruncate 规模
+     * 直接由点数决定。给一个远大于实用（默认 10000）但不会溢出布局的硬上限，
+     * 挡住 --max-points -1（会变 UINT32_MAX）这类输入。 */
+    if (max_points == 0 || max_points > RTDBD_MAX_POINTS_LIMIT) {
+        fprintf(stderr, "rtdbd: invalid --max-points (must be in [1,%u])\n",
+                (unsigned)RTDBD_MAX_POINTS_LIMIT);
         return RTDBD_EXIT_ERROR;
     }
     if (max_subs == 0 || max_subs > RTDBD_SUB_MAX) {
@@ -1005,7 +1113,7 @@ int main(int argc, char** argv)
     }
 
     if (supervise) {
-        return supervise_loop(argc, argv, pidfile);
+        return supervise_loop(argc, argv, pidfile, sock_path);
     }
 
     signal(SIGPIPE, SIG_IGN);
@@ -1046,11 +1154,11 @@ int main(int argc, char** argv)
     }
 
     {
-        int verr = 0;
+        uint32_t bad = 0;
         uint32_t vfield = 0;
         const char* vreason = NULL;
-        uint32_t bad = indurtdb_validate_config(&verr, &vfield, &vreason);
-        if (bad != 0 && config_path) {
+        int verr = indurtdb_validate_config(&bad, &vfield, &vreason);
+        if (verr != INDURTDB_CFG_OK && config_path) {
             fprintf(stderr,
                     "rtdbd: invalid point config: point %u: %s (field=%u)\n",
                     (unsigned)bad,
@@ -1245,6 +1353,9 @@ int main(int argc, char** argv)
             }
         }
     }
+
+    /* 排空超时仍未发完的：统一计入 notify_drop，不静默丢弃 */
+    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_discard_outq(&conns[i]);
 
     for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
         if (conns[i].fd >= 0) close(conns[i].fd);

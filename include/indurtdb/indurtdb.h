@@ -382,11 +382,15 @@ int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field);
  * 供 rtdbd 启动时打 WARN 提示（不拒绝启动）。 */
 bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m);
 
-/* 遍历默认实例已注册点位，逐点校验（名称非空 + type/access 合法 + 元数据语义）。
- * 返回首个非法点 id；全部合法返回 0；未初始化返回 UINT32_MAX。
- * 可选输出首个错误的详细原因（错误码 + 字段标识 + 原因文本），便于打印明确错误。 */
-uint32_t indurtdb_validate_config(int* err_code, uint32_t* err_field,
-                                  const char** err_reason);
+/* 遍历默认实例已注册点位，逐点校验（type/access 合法 + 元数据语义）。
+ *
+ * 返回 INDURTDB_CFG_OK 表示全部合法；否则返回错误码，并把首个非法点 id 写入
+ * *bad_id（可为 NULL）。err_field / err_reason 亦可为空。
+ *
+ * 注：用返回值区分「合法 / 非法」而非用点 id，是因为点 id 0 是合法点——
+ * 若以 0 表示"全合法"，则 id 为 0 的非法点会被误判为配置合法而绕过 fail-fast。 */
+int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
+                             const char** err_reason);
 
 /* 字段标识 → 人类可读原因文本（静态字符串，零分配）。 */
 const char* indurtdb_cfg_error_reason(int err_code);

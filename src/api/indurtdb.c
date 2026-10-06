@@ -17,6 +17,7 @@
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <unistd.h>
 
 /* ---- 实例 (不透明句柄的内部定义) ---- */
@@ -356,6 +357,17 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
         if (pm->id >= maxp) continue;
         if (pm->type > INDURTDB_TYPE_STRING) continue;
 
+        /* v3.7 B3：某字段值无法解析（非数字 / 溢出 / NaN）→ 判为配置非法。
+         * 否则 `deadband: abc` 会被当 0 而"看起来合法"，与 fail-fast 目标冲突。 */
+        if (pm->bad_value) {
+            char cbuf[128];
+            snprintf(cbuf, sizeof(cbuf), "config point %u: malformed numeric value",
+                     pm->id);
+            set_error(cbuf);
+            irt_point_config_free(&batch);
+            return INDURTDB_ERR_ARG;
+        }
+
         /* 写锁冲突(他人持写锁)或索引忙时有限重试；仍失败则如实上报，
          * 不再静默丢弃该点位（否则 find_by_name 对这些"已配置"点会误报 NOT_FOUND）。 */
         int configured = 0;
@@ -654,10 +666,9 @@ int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field)
      * span <= 0 时阈值退化为 0（永不触发），属可观测的静默失效，用
      * indurtdb_meta_pct_without_range() 给出提示而非致命拒绝。 */
 
-    /* 启用量程时上下限必须有序 */
+    /* 启用量程时上下限必须有序（NaN 亦非法：NaN 的任何比较都返回 false，会绕过校验） */
     if (m->flags & INDURTDB_META_FLAG_EUR) {
-        if (!(m->eur_min < m->eur_max)) {
-            /* eur_min 越界优先报 EUR_MIN，便于定位 */
+        if (!isfinite(m->eur_min) || !isfinite(m->eur_max) || !(m->eur_min < m->eur_max)) {
             if (err_field) *err_field = (m->eur_min >= m->eur_max)
                                           ? INDURTDB_CFG_FLD_EUR_MIN
                                           : INDURTDB_CFG_FLD_EUR_MAX;
@@ -665,14 +676,14 @@ int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field)
         }
     }
 
-    /* 死区阈值非负 */
-    if (m->deadband < 0.0f) {
+    /* 死区阈值非负（用 !(x >= 0) 而非 x < 0，使 NaN 一并被拒） */
+    if (!(m->deadband >= 0.0f)) {
         if (err_field) *err_field = INDURTDB_CFG_FLD_DEADBAND;
         return INDURTDB_CFG_ERR_DEADBAND;
     }
 
-    /* 百分比死区限定 [0,100] */
-    if ((m->flags & INDURTDB_META_FLAG_DEADBAND_PCT) && m->deadband > 100.0f) {
+    /* 百分比死区限定 [0,100]（同样用 !(x <= 100) 拒 NaN） */
+    if ((m->flags & INDURTDB_META_FLAG_DEADBAND_PCT) && !(m->deadband <= 100.0f)) {
         if (err_field) *err_field = INDURTDB_CFG_FLD_DEADBAND;
         return INDURTDB_CFG_ERR_DEADBAND_PCT;
     }
@@ -705,23 +716,21 @@ bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m)
     return !(m->eur_max > m->eur_min);
 }
 
-uint32_t indurtdb_validate_config(int* err_code, uint32_t* err_field,
-                                  const char** err_reason)
+int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
+                             const char** err_reason)
 {
-    if (err_code)   *err_code   = INDURTDB_CFG_OK;
+    if (bad_id)     *bad_id     = 0;
     if (err_field)  *err_field  = INDURTDB_CFG_FLD_NONE;
     if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_OK);
 
     if (!g_default || !__atomic_load_n(&g_default->initialized, __ATOMIC_ACQUIRE)) {
-        if (err_code)   *err_code   = INDURTDB_CFG_ERR_NULL;
         if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_NULL);
-        return UINT32_MAX;
+        return INDURTDB_CFG_ERR_NULL;
     }
     irt_header_t* hdr = irt_shm_header(&g_default->shm);
     if (!hdr) {
-        if (err_code)   *err_code   = INDURTDB_CFG_ERR_NULL;
         if (err_reason) *err_reason = "shm header unavailable";
-        return UINT32_MAX;
+        return INDURTDB_CFG_ERR_NULL;
     }
     uint32_t max_points = __atomic_load_n(&hdr->max_points, __ATOMIC_RELAXED);
 
@@ -730,31 +739,28 @@ uint32_t indurtdb_validate_config(int* err_code, uint32_t* err_field,
         if (indurtdb_read_point(id, &pt) != 0) continue;  /* 未注册 */
         if (pt.name[0] == '\0') continue;                /* 空名视为未注册 */
 
+        int rc = INDURTDB_CFG_OK;
         if (pt.type > INDURTDB_TYPE_FLOAT) {
-            if (err_code)   *err_code   = INDURTDB_CFG_ERR_TYPE;
-            if (err_field)  *err_field  = INDURTDB_CFG_FLD_TYPE;
-            if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_TYPE);
-            return id;
-        }
-        if (pt.access != INDURTDB_ACCESS_READ_ONLY &&
-            pt.access != INDURTDB_ACCESS_READ_WRITE) {
-            if (err_code)   *err_code   = INDURTDB_CFG_ERR_ACCESS;
-            if (err_field)  *err_field  = INDURTDB_CFG_FLD_ACCESS;
-            if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_ACCESS);
-            return id;
+            rc = INDURTDB_CFG_ERR_TYPE;
+            if (err_field) *err_field = INDURTDB_CFG_FLD_TYPE;
+        } else if (pt.access != INDURTDB_ACCESS_READ_ONLY &&
+                   pt.access != INDURTDB_ACCESS_READ_WRITE) {
+            rc = INDURTDB_CFG_ERR_ACCESS;
+            if (err_field) *err_field = INDURTDB_CFG_FLD_ACCESS;
+        } else {
+            indurtdb_meta_t m;
+            memset(&m, 0, sizeof(m));
+            (void)indurtdb_get_meta(id, &m);
+            rc = indurtdb_validate_point_meta(&m, err_field);
         }
 
-        indurtdb_meta_t m;
-        memset(&m, 0, sizeof(m));
-        (void)indurtdb_get_meta(id, &m);
-        int rc = indurtdb_validate_point_meta(&m, err_field);
         if (rc != INDURTDB_CFG_OK) {
-            if (err_code)   *err_code   = rc;
+            if (bad_id)     *bad_id     = id;
             if (err_reason) *err_reason = indurtdb_cfg_error_reason(rc);
-            return id;
+            return rc;
         }
     }
-    return 0;
+    return INDURTDB_CFG_OK;
 }
 
 int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id) {

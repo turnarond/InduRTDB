@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <sys/mman.h>
 #include <string>
 
 #include <signal.h>
@@ -231,7 +232,78 @@ TEST(RtdbdRecovery, ReclaimsOwnershipAfterRestart)
     EXPECT_EQ(v, 99);
 }
 
-/* 3. 恢复时间预算：≤ 1s（设计目标 ≤100ms） */
+/* 若某实例的共享内存段仍存在则删除（用例收尾，避免 /dev/shm 累积） */
+void drop_segment_if_exists(const std::string& instance)
+{
+    char name[128];
+    snprintf(name, sizeof(name), "/indurtdb_%s", instance.c_str());
+    if (shm_unlink(name) != 0) return;   /* 本就不存在：忽略 */
+}
+
+/* 3. supervisor 退出后不得留下 worker（孤儿护栏）。
+ *    评审发现：worker 可能阻塞在 recv_all() 中，而 recv_all 的 EINTR 分支是
+ *    continue 重试 recv、不检查 g_stop —— 只发 SIGTERM 便退出的 supervisor
+ *    会留下永不退出的孤儿（占 shm 段/socket，且继承的 stdout/stderr 管道写端
+ *    不关闭，会把等 EOF 的调用方永久挂住）。本用例钉死"两个 PID 都消失"。 */
+static bool pid_alive(int pid, bool* unknown = nullptr)
+{
+    if (pid <= 0) return false;
+    if (kill((pid_t)pid, 0) != 0) return false;   /* 已退出 */
+    /* 存活：排除僵尸（已终止但未回收） */
+    char path[64];
+    snprintf(path, sizeof(path), "/proc/%d/stat", pid);
+    FILE* f = fopen(path, "r");
+    if (!f) { if (unknown) *unknown = true; return true; }
+    char state = '?';
+    if (fscanf(f, "%*d %*s %c", &state) != 1) state = '?';
+    fclose(f);
+    return (state != 'Z');
+}
+
+TEST(RtdbdRecovery, NoOrphanWorkerAfterStop)
+{
+    SupProc p;
+    ASSERT_TRUE(p.start("orphan", policy_for_self()));
+
+    int worker = p.worker_pid();
+    ASSERT_GT(worker, 0);
+
+    /* 连一个客户端并保持半开请求，让 worker 有机会停在 recv_all() 内 */
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic       = RTDBD_MAGIC;
+    req.version     = RTDBD_PROTO_VERSION;
+    req.opcode      = RTDBD_OP_WRITE;
+    req.payload_len = (uint32_t)sizeof(rtdbd_write_req_t);
+    (void)send(fd, &req, sizeof(req), 0);   /* 只发头，不发负载 → 服务端停在 recv_all */
+
+    usleep(50000);   /* 让 worker 进入 recv_all */
+
+    int sup = p.pid;
+    ASSERT_GT(sup, 0);
+
+    p.stop();   /* SIGTERM supervisor → 必须连带回收 worker */
+
+    /* 两者都必须消失（留 1s 观察窗） */
+    bool sup_gone = false, wk_gone = false;
+    for (int i = 0; i < 100; ++i) {
+        if (!pid_alive(sup))    sup_gone = true;
+        if (!pid_alive(worker)) wk_gone = true;
+        if (sup_gone && wk_gone) break;
+        usleep(10000);
+    }
+    EXPECT_TRUE(sup_gone)  << "supervisor should exit on SIGTERM";
+    EXPECT_TRUE(wk_gone)   << "worker must not be left as an orphan "
+                              "(holds shm segment, socket, and inherited stdout pipe)";
+
+    close(fd);
+    /* 段也应随 worker 退出而释放（owner 关闭 unlink） */
+    drop_segment_if_exists(p.instance);
+}
+
+/* 4. 恢复时间预算：≤ 1s（设计目标 ≤100ms） */
 TEST(RtdbdRecovery, RtoWithinBudget)
 {
     SupProc p;

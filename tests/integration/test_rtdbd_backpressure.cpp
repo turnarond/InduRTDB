@@ -324,6 +324,81 @@ TEST(Backpressure, GracefulExitZero)
     p.stop();
 }
 
+/* 4. 帧结构完整性守卫：重背压下收到的每一帧都必须**完整可解析**。
+ *    逐帧校验 magic / version / opcode / payload_len 与取值单调性，
+ *    而不是只数 44B 块数（混合帧长度也是 44B，只数块数会漏）。
+ *
+ *    诚实边界：本用例**不是**「部分发送帧混合」缺陷的确定性复现。
+ *    该缺陷需「发送缓冲剩余空间 >0 且 <44B」这一窄窗口才会触发；
+ *    而在 MSG_DONTWAIT 下缓冲满时 send 直接返回 EAGAIN（0 字节），
+ *    outq_sent 恒为 0。实测回退该修复后本用例仍通过，说明它抓不到该窗口。
+ *    修复本身由代码评审确认（构造上禁止淘汰已部分上线的队首），
+ *    若需确定性复现，须把 net.core.wmem_default 调到 <44B 量级属系统级变更，
+ *    故此处保留为"帧结构完整性"回归守卫，不宣称覆盖该窄窗口。 */
+TEST(Backpressure, FramesStayIntactUnderBackpressure)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("framing", policy_allow(), kConfig));
+
+    int fd_slow = connect_to(p.sock);
+    ASSERT_GE(fd_slow, 0);
+    /* 压小接收缓冲，强制服务端经历"部分发送 + 队列积压" */
+    int rcvbuf = 1024;
+    setsockopt(fd_slow, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    ASSERT_TRUE(subscribe(fd_slow, 10));
+
+    int fd_w = connect_to(p.sock);
+    ASSERT_GE(fd_w, 0);
+
+    const int kWrites = 2000;
+    for (int i = 1; i <= kWrites; ++i) {
+        rtdbd_resp_hdr_t resp;
+        ASSERT_TRUE(write_point(fd_w, 10, i, &resp)) << "write failed at " << i;
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    /* 慢读，逐帧校验结构完整性 */
+    struct pollfd pfd;
+    pfd.fd = fd_slow;
+    pfd.events = POLLIN;
+    int frames = 0, bad = 0;
+    uint8_t buf[12 + 32];
+    uint32_t last_value = 0;
+    for (int i = 0; i < 2000; ++i) {
+        if (poll(&pfd, 1, 50) <= 0) break;
+        ssize_t got = 0;
+        while (got < (ssize_t)sizeof(buf)) {
+            ssize_t k = recv(fd_slow, buf + got, sizeof(buf) - (size_t)got, 0);
+            if (k <= 0) break;
+            got += k;
+        }
+        if (got != (ssize_t)sizeof(buf)) break;
+        frames++;
+
+        rtdbd_req_hdr_t h;
+        memcpy(&h, buf, sizeof(h));
+        rtdbd_notify_t nt;
+        memcpy(&nt, buf + sizeof(h), sizeof(nt));
+
+        if (h.magic != RTDBD_MAGIC) bad++;
+        if (h.version != RTDBD_PROTO_VERSION) bad++;
+        if (h.opcode != RTDBD_OP_NOTIFY) bad++;
+        if (h.payload_len != sizeof(nt)) bad++;
+        if (nt.point_id != 10) bad++;
+        /* 值应单调递增（保序）：混合帧会破坏这一点 */
+        uint32_t v = (uint32_t)(int32_t)nt.value_bits;
+        if (v < last_value) bad++;
+        last_value = v;
+    }
+
+    EXPECT_GT(frames, 0) << "should have received some frames";
+    EXPECT_EQ(bad, 0) << "no mixed/corrupt frames allowed under backpressure";
+
+    close(fd_slow);
+    close(fd_w);
+    p.stop();
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
