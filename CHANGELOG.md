@@ -4,7 +4,13 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.7.0] — 2026-10-06「死区/RBE + EURange 生效」(v3.7 主题A，设计见 `docs/plans/2026-10-06-v3.7-themeA-implementation.md`)
+## [3.7.0] — 2026-10-06 / 10-07「核心语义深化 + 运维硬化」
+
+本版本含两个主题：
+- **主题A 死区/RBE + EURange 生效**（设计见 `docs/plans/2026-10-06-v3.7-themeA-implementation.md`）
+- **主题B 运维硬化**（设计见 `docs/plans/2026-10-06-v3.7-themeB-implementation.md`）
+
+### 主题 A：死区/RBE + EURange 生效
 
 让此前"只存不下发"的 `deadband` / `eur_min`/`eur_max` 元数据真正生效：`rtdbd` 作为写权威在写入时施加 EURange 量程位，并按死区 / EURange 边界做**按订阅者**的 Reporting-By-Exception 通知。默认路径行为零变更。
 
@@ -22,6 +28,85 @@ All notable changes to InduRTDB.
 - **默认 `indurtdb_write_*` 行为完全不变**：核心热路径仍强制 `quality = GOOD`、**零 meta 读**（守住 v3.4 T3「meta 不进热路径」不变式）；仅 rtdbd 走新入口。`flags=0` 时 RBE 恒通知，由 `NotifyDefaultUnchanged` 守护。
 - 仅开启 `INDURTDB_META_FLAG_EUR`（无死区）时，rtdbd 推送**仅在跨量程边界触发**，区间内变化不推送（值仍落库、GET 轮询可见）——「按订阅者 RBE」预期行为，非缺陷。
 - `indurtdb_value_to_double` 对 `string` 等非数值类型返回 `0.0`，调用方责任仅对数值类型使用（RBE 仅对数值类型生效）。
+
+### 主题 B：运维硬化（健康 / 背压 / 优雅退出 / 配置 fail-fast）
+
+把"单测全绿但线上偶发"的隐患堵上，分三项。
+
+#### B1 健康 / 错误计数 + 进程自检
+- **核心自检 API**：`indurtdb_h_self_check()` / `indurtdb_self_check()`，纯读校验共享内存段头
+  `magic` / `version`，返回 `INDURTDB_HEALTH_OK` / `UNHEALTHY`（`DEGRADED` 预留给调用方分层）。
+- **rtdbd 运行统计**：新增 `rtdbd/src/stats.{h,c}`，定长计数器单例（零堆）：
+  `n_writes` / `n_notifies` / `decode_fail` / `write_rejected` / `write_error` /
+  `notify_drop` / `notify_send_fail` / `uptime_ns` / `health`。
+- **`RTDBD_OP_HEALTH`（opcode 16）**健康快照：**只读、免鉴权**（同 `GET_LOG`，负载仅计数与
+  连接数，不含点位值）。**协议主版本仍为 2**（仅新增 opcode，v3.6 monitor 行为完全不变）。
+- **SIGUSR1 dump**：写入 `--stats-file`（默认 `/tmp/rtdbd.stats`）。信号处理器**只置
+  `volatile sig_atomic_t` 标志**，实际 dump 在主循环执行（信号安全）。
+- **健康判定用 60s 滑动窗口**：`DEGRADED` 可自愈，避免一次瞬时误请求让进程余生永久告警。
+
+#### B2 背压 + 优雅退出
+- **每连接有界出站队列**（`outq[64]` 定长环形，内嵌于 `rtdbd_conn_t`，零堆）：
+  写成功只入队，队列满则**丢最旧（保序）**并计 `notify_drop`；主循环仅在
+  `outq_count > 0` 时监听 `POLLOUT`。**慢消费者不再拖垮服务端**（消除 head-of-line 阻塞）。
+- **`outq_flush` 用 `MSG_DONTWAIT` + `outq_sent` 做部分发送**：`POLLOUT` 就绪只保证缓冲有
+  *部分*空间，若沿用阻塞 `send_all`，嵌入式小缓冲下会卡死整个单线程服务端。
+- **连接关闭 / flush 失败的待发队列计入 `notify_drop`**，消除不可观测的静默丢失。
+- **优雅退出**：SIGTERM/SIGINT 后**限时（≤ `RTDBD_SHUTDOWN_DELAY_SEC`）排空所有出站队列**
+  再关 fd / unlink socket / 退出（超时不阻塞强退）。该宏此前已定义未启用，本版本正式启用。
+
+#### B3 配置校验 + fail-fast
+- **配置校验 API**：`indurtdb_validate_point_meta()`（纯函数）、`indurtdb_validate_config()`、
+  `indurtdb_cfg_error_reason()`、`indurtdb_meta_pct_without_range()`。
+  规则：EUR 启用时须 `eur_min < eur_max`；`deadband >= 0`；百分比死区 ∈ [0,100]；
+  `flags` 仅含已知位；点位 `type` / `access` / 名称合法。
+- **YAML 点位配置新增可选语义字段** `eur_min` / `eur_max` / `deadband` / `flags`
+  （未声明则保持段内原值，向后兼容）。此前配置无法表达语义，该校验在生产上无从触发。
+- **`indurtdb_h_set_meta()` 增加写入前语义校验**：非法 meta 一律拒写（`INDURTDB_ERR_ARG`），
+  从源头堵住"非法 meta 落盘 → 下次启动 fail-fast"。
+- **rtdbd 启动三阶段 fail-fast**（服务前完成，不进入半初始化态）
+  | 退出码 | 含义 | 场景 |
+  |---|---|---|
+  | 0 | 正常退出 | — |
+  | 1 | 通用 / 启动错误 | 参数解析、policy 加载失败等 |
+  | 2 | 配置校验失败 | `load_config` 失败、点位语义非法 |
+  | 3 | 共享内存损坏 / 初始化失败 | `indurtdb_initialize` 失败 |
+  | 4 | 启动自检失败 | 段头 `magic` / `version` 不通过 |
+- **supervisor 对致命码（2 / 4）停止 respawn** 并透传退出码，避免坏配置陷入重启风暴。
+
+#### 主题 B Added / Changed / Notes
+- **Added**：`indurtdb_detach()`——脱离实例但**保留共享内存段（不 `shm_unlink`）**。
+  fail-fast 退出改用它：此前用 `indurtdb_shutdown()` 会因 owner 语义删除整段，
+  把「配置写错」升级为「数据销毁」（评审 Critical 项）。
+- **Changed**：`conns[]` 连接表移到文件域 `.bss`（B2 后每连接约 2KB，32 连接约 64KB，
+  留在 `main` 栈帧对 SylixOS 小栈配置是隐患）。
+- **Notes / 已知限制**：
+  - 未给 `--config` 时，段内残留的非法 meta **只告警不致命**（避免 v3.6 时代部署被砖化）；
+    给了 `--config` 才按严格模式 exit 2。
+  - 百分比死区与 EUR 位**正交**：不要求二者同时启用。跨度无效（`eur_max <= eur_min`）时
+    阈值退化为 0、死区永不触发，启动时打 WARN 而非拒绝——曾一度做成致命校验并误拒合法配置，已撤销。
+  - **通知为异步投递**：B2 起写响应后通知在下一轮 `POLLOUT` 送达（缓冲有空间时亚毫秒级），
+    不再与写响应同轮同步送达。
+  - systemd 部署需配套 `RestartPreventExitStatus=2 4`：in-process 的「不 respawn」只挡得住
+    rtdbd 自身，若 systemd 配了 `Restart=always`，重启风暴会转移到 systemd 层面。
+
+### 主题 B 测试
+- `tests/unit/test_c_config.cpp`：新增 14 个 `ConfigValidate.*` 用例（并入原 3 个 `CConfig.*`，共 17）。
+- `tests/integration/test_rtdbd_health.cpp`（5）：HEALTH OK、SIGUSR1 dump、`n_notifies` 语义钉定、
+  deny→DEGRADED、坏负载→`decode_fail`。
+- `tests/integration/test_rtdbd_config.cpp`（10）：合法启动、配置缺失→2、EUR 颠倒→2、
+  未知 flags→2、百分比无跨度仍启动、instance 非法→1、max-points 0→1、max-subs 超限→1、
+  **SET_META 非法被拒**、**exit 2 后段仍存在**。
+- `tests/integration/test_rtdbd_backpressure.cpp`（3）：慢消费者丢最旧、快消费者不受影响、优雅退出码 0。
+
+### 主题 B 评审修复（合并前）
+- Critical：exit 2/4 曾 `shm_unlink` 销毁数据段 → 改用 `indurtdb_detach()` 保留段；
+  同时补 `set_meta` 写入前校验 + 残留段降级为告警。
+- `outq_flush` 阻塞风险 → `MSG_DONTWAIT` 部分发送。
+- 连接关闭的静默通知丢失 → 计入 `notify_drop`。
+- `DEGRADED` 永久锁存 → 60s 滑动窗口。
+- 连接表占栈 → 移入 `.bss`。
+- supervisor EINTR 路径遗漏 `kill(child)` 导致孤儿 worker 挂死 ctest → 跨循环保留 `cur` 并兜底 kill。
 
 ---
 

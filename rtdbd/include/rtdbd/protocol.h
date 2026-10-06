@@ -48,6 +48,11 @@
  * 仅含进程运行事件，不含点位值。 */
 #define RTDBD_OP_GET_LOG      15u /* 请求：max；响应：日志条目数组（最旧→最新） */
 
+/* v3.7 主题B B1 健康快照（只读、免鉴权，同 GET_LOG 定位：仅运维观测，无点位值）。
+ * 仅新增 opcode，不改动既有负载布局，故协议主版本仍为 2（v3.6 monitor 不发该
+ * opcode，行为完全不变）。 */
+#define RTDBD_OP_HEALTH      16u /* 请求：无负载；响应：rtdbd_health_t 快照 */
+
 /* 单连接最大订阅点数 */
 #define RTDBD_SUB_MAX 32u
 
@@ -242,5 +247,28 @@ typedef struct {
 
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_log_req_t) == 4, "rtdbd_log_req_t must be 4B");
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_log_entry_t) == 128, "rtdbd_log_entry_t must be 128B");
+
+/* ---- v3.7 主题B B1：健康快照 ---- */
+
+/* 健康状态（与核心 indurtdb.h 的 INDURTDB_HEALTH_* 数值一致） */
+#define RTDBD_HEALTH_OK        0
+#define RTDBD_HEALTH_DEGRADED  1
+#define RTDBD_HEALTH_UNHEALTHY 2
+
+/* HEALTH 响应负载 72B（在 rtdbd_stats_t 基础上补充 n_conns；无请求负载） */
+typedef struct {
+    uint64_t n_writes;          /* 成功写次数 */
+    uint64_t n_notifies;        /* 成功发出的 NOTIFY 数 */
+    uint64_t decode_fail;       /* 请求解析失败 */
+    uint64_t write_rejected;    /* 鉴权拒绝 */
+    uint64_t write_error;       /* 写入返回非 0（非类型不支持） */
+    uint64_t notify_drop;       /* 背压丢弃 */
+    uint64_t notify_send_fail;  /* 出站发送失败 */
+    uint64_t uptime_ns;         /* 进程启动至今纳秒 */
+    uint32_t health;            /* RTDBD_HEALTH_* */
+    uint32_t n_conns;           /* 当前连接数 */
+} rtdbd_health_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_health_t) == 72, "rtdbd_health_t must be 72B");
 
 #endif /* RTDBD_PROTOCOL_H_ */

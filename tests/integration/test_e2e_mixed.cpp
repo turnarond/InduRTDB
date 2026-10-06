@@ -114,8 +114,12 @@ struct Proc {
     {
         if (pid > 0) {
             kill(pid, SIGKILL);
-            int status = 0;
-            waitpid(pid, &status, 0);
+            int status = 0, reaped = 0;
+            for (int i = 0; i < 500; ++i) {          /* 最多 5s，勿阻塞 CI */
+                if (waitpid(pid, &status, WNOHANG) == pid) { reaped = 1; break; }
+                usleep(10000);
+            }
+            if (!reaped) { kill(pid, SIGKILL); waitpid(pid, &status, 0); }
             pid = -1;
         }
     }
@@ -124,8 +128,12 @@ struct Proc {
     {
         if (pid > 0) {
             kill(pid, SIGTERM);
-            int status = 0;
-            waitpid(pid, &status, 0);
+            int status = 0, reaped = 0;
+            for (int i = 0; i < 500; ++i) {          /* 最多 5s，勿阻塞 CI */
+                if (waitpid(pid, &status, WNOHANG) == pid) { reaped = 1; break; }
+                usleep(10000);
+            }
+            if (!reaped) { kill(pid, SIGKILL); waitpid(pid, &status, 0); }
             pid = -1;
         }
         unlink(sock.c_str());

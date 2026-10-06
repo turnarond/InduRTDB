@@ -77,9 +77,20 @@ struct SupProc {
     void stop()
     {
         if (pid > 0) {
+            /* 有界等待 + SIGKILL 兜底：绝不让 CI 挂死在 waitpid 上
+             * （supervisor 若卡住，阻塞 waitpid 会把整个 ctest 拖死）。 */
             kill(pid, SIGTERM);
-            int status = 0;
-            waitpid(pid, &status, 0);
+            int reaped = 0;
+            for (int i = 0; i < 500; ++i) {          /* 最多 5s */
+                int st = 0;
+                if (waitpid(pid, &st, WNOHANG) == pid) { reaped = 1; break; }
+                usleep(10000);
+            }
+            if (!reaped) {
+                kill(pid, SIGKILL);
+                int st = 0;
+                waitpid(pid, &st, 0);
+            }
             pid = -1;
         }
         unlink(sock.c_str());

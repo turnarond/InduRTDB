@@ -148,7 +148,14 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
 /* ==== 生命周期 ==== */
 int  indurtdb_initialize(const char* instance_id,
                          uint32_t max_points, uint32_t max_subscribers);
+/* 关闭并释放实例。owner 关闭时会 shm_unlink 该实例段（POSIX 语义）。 */
 void indurtdb_shutdown(void);
+
+/* v3.7 主题B B3：脱离实例但**保留共享内存段**（不 shm_unlink）。
+ * 供 fail-fast 退出等「放弃接管但必须保留数据」的场景：段内已有点位与值
+ * 不会因本次退出而销毁，下一次启动仍可 attach 并由运维修正问题。
+ * 与 indurtdb_shutdown 的区别仅在是否 unlink；两者都会 unmap 并复位句柄。 */
+void indurtdb_detach(void);
 bool indurtdb_is_initialized(void);
 
 /* ==== 单点写 ==== */
@@ -322,6 +329,67 @@ uint64_t indurtdb_h_get_write_count(indurtdb_t* h);
 uint64_t indurtdb_h_get_timeout_count(indurtdb_t* h);
 uint64_t indurtdb_h_get_scan_skipped(indurtdb_t* h);  /* v3.4 T7 */
 int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id);
+
+/* ==== v3.7 主题B B1：进程/实例自检（健康探测） ==== */
+
+/* 健康状态枚举。核心 self_check 当前只产出 OK / UNHEALTHY；
+ * DEGRADED 预留给调用方分层判定（如 rtdbd 依错误计数降级），核心不自行发出。 */
+#define INDURTDB_HEALTH_OK        0
+#define INDURTDB_HEALTH_DEGRADED  1
+#define INDURTDB_HEALTH_UNHEALTHY 2
+
+/* 自检共享内存段头：校验 magic == IRT_MAGIC、version == IRT_SHM_VERSION，
+ * 以及段存在且已初始化。纯读、无锁、不改写任何状态（可在 poll 循环/信号 dump
+ * 路径安全调用）。失败详情见 indurtdb_get_last_error()。
+ * 返回 INDURTDB_HEALTH_OK 或 INDURTDB_HEALTH_UNHEALTHY。 */
+int indurtdb_h_self_check(indurtdb_t* h);
+int indurtdb_self_check(void);   /* v1 薄封装（默认句柄） */
+
+/* ==== v3.7 主题B B3：配置校验 + fail-fast ==== */
+
+/* 元数据/点位语义校验结果（indurtdb_validate_point_meta 返回值） */
+#define INDURTDB_CFG_OK               0  /* 合法 */
+#define INDURTDB_CFG_ERR_NULL         1  /* meta 指针为空 */
+#define INDURTDB_CFG_ERR_EUR_RANGE    2  /* 启用量程但 eur_min >= eur_max */
+#define INDURTDB_CFG_ERR_DEADBAND     3  /* deadband 为负 */
+#define INDURTDB_CFG_ERR_DEADBAND_PCT 4  /* 百分比死区不在 [0,100] */
+#define INDURTDB_CFG_ERR_FLAGS        5  /* flags 含未知位 */
+#define INDURTDB_CFG_ERR_TYPE         6  /* 点位 type 非法 */
+#define INDURTDB_CFG_ERR_NAME         7  /* 点位名为空 */
+#define INDURTDB_CFG_ERR_ACCESS       8  /* access 非法 */
+
+/* 出错字段标识（写入 *err_field，便于打印明确原因） */
+#define INDURTDB_CFG_FLD_NONE     0
+#define INDURTDB_CFG_FLD_EUR_MIN  1
+#define INDURTDB_CFG_FLD_EUR_MAX  2
+#define INDURTDB_CFG_FLD_DEADBAND 3
+#define INDURTDB_CFG_FLD_FLAGS    4
+#define INDURTDB_CFG_FLD_TYPE     5
+#define INDURTDB_CFG_FLD_NAME     6
+#define INDURTDB_CFG_FLD_ACCESS   7
+
+/* 纯函数：校验单点元数据语义（不触共享内存，可单测）。
+ * 规则：EUR 启用时 eur_min < eur_max；deadband >= 0；百分比死区 ∈ [0,100]；
+ *       flags 仅含 INDURTDB_META_FLAG_* 已知位。
+ * 合法返回 INDURTDB_CFG_OK；否则返回错误码，并把字段标识写入 *err_field
+ * （err_field 可为 NULL）。
+ * 注：百分比死区只借用 eur_min/eur_max 作跨度基准，与 EUR 位（quality 量程位）
+ *     正交，故不强制二者同时启用；跨度 <= 0 的静默失效用下面的谓词提示。 */
+int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field);
+
+/* 便捷谓词：置了百分比死区但量程跨度无效（eur_max <= eur_min）。
+ * 此时阈值为 0，死区永不触发 —— 属可观测的静默失效，非致命配置错误。
+ * 供 rtdbd 启动时打 WARN 提示（不拒绝启动）。 */
+bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m);
+
+/* 遍历默认实例已注册点位，逐点校验（名称非空 + type/access 合法 + 元数据语义）。
+ * 返回首个非法点 id；全部合法返回 0；未初始化返回 UINT32_MAX。
+ * 可选输出首个错误的详细原因（错误码 + 字段标识 + 原因文本），便于打印明确错误。 */
+uint32_t indurtdb_validate_config(int* err_code, uint32_t* err_field,
+                                  const char** err_reason);
+
+/* 字段标识 → 人类可读原因文本（静态字符串，零分配）。 */
+const char* indurtdb_cfg_error_reason(int err_code);
 
 /* v1 全局函数 (= 默认句柄的薄封装) 仍全部保留, 行为不变 ——
  * 仅在 v3.5 起标注 INDURTDB_DEPRECATED 并移除 (届时同步迁移测试/调用方)。 */

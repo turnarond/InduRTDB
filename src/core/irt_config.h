@@ -34,6 +34,14 @@ typedef struct {
     uint16_t unit;
     uint8_t  access;
     char     name[64];
+    /* v3.7 主题B B3：可选点位语义（YAML 中给出 eur_min/eur_max/deadband/flags
+     * 时写入共享元数据区，供 indurtdb_validate_config 启动即校验）。
+     * has_meta=0 表示配置未声明语义，保持段内原值不动（向后兼容）。 */
+    double   eur_min;
+    double   eur_max;
+    float    deadband;
+    uint32_t flags;
+    uint8_t  has_meta;
 } irt_point_meta_t;
 
 typedef struct {

@@ -175,6 +175,21 @@ int irt_point_config_parse_yaml(const char* path, irt_point_meta_batch_t* out) {
             cur.unit = (uint16_t)strtoul(val, NULL, 10);
         else if (strcmp(key, "access") == 0)
             cur.access = (uint8_t)strtoul(val, NULL, 10);
+        /* v3.7 B3：可选点位语义。任一出现即 has_meta=1，
+         * 由 indurtdb_load_config 写入元数据区并接受启动校验。 */
+        else if (strcmp(key, "eur_min") == 0) {
+            cur.eur_min = strtod(val, NULL);
+            cur.has_meta = 1;
+        } else if (strcmp(key, "eur_max") == 0) {
+            cur.eur_max = strtod(val, NULL);
+            cur.has_meta = 1;
+        } else if (strcmp(key, "deadband") == 0) {
+            cur.deadband = (float)strtod(val, NULL);
+            cur.has_meta = 1;
+        } else if (strcmp(key, "flags") == 0) {
+            cur.flags = (uint32_t)strtoul(val, NULL, 0);   /* 支持 0x 前缀 */
+            cur.has_meta = 1;
+        }
     }
 
     /* 保存最后一个条目 */

@@ -80,7 +80,38 @@ cmake .. && make -j$(nproc)
 ctest --output-on-failure
 ```
 
+## 运维（rtdbd）
+
+### 退出码
+
+| 码 | 含义 | 场景 |
+|---|---|---|
+| 0 | 正常退出 | — |
+| 1 | 通用 / 启动错误 | 参数解析、policy 加载失败等 |
+| 2 | 配置校验失败 | `load_config` 失败、点位语义非法 |
+| 3 | 共享内存损坏 / 初始化失败 | `indurtdb_initialize` 失败 |
+| 4 | 启动自检失败 | 段头 `magic` / `version` 不通过 |
+
+配置或自检失败退出时 **保留共享内存段**（不销毁已有点位与值），修正后重启即可恢复。
+`--supervise` 模式下，supervisor 对**致命码 2 / 4 停止 respawn** 并透传退出码；
+systemd 部署需配套 `RestartPreventExitStatus=2 4`。
+
+### 可观测性
+
+- `RTDBD_OP_HEALTH`（opcode 16）：运行时健康快照，**只读免鉴权**；协议主版本仍为 2。
+- `kill -USR1 <pid>`：把运行统计写入 `--stats-file`（默认 `/tmp/rtdbd.stats`）。
+- 运行日志：`RTDBD_OP_GET_LOG`（128 条定长环形缓冲）。
+
+### 背压
+
+每连接定长 64 槽出站队列（零堆）：慢消费者队列满则**丢最旧（保序）**并计入 `notify_drop`，
+**不拖垮服务端**；值仍落库，GET 轮询可读到。
+
 ## 版本
+
+**v3.7.0** — 核心语义深化 + 运维硬化：
+- **主题A**：死区/RBE 过滤 + EURange→量程位生效（语义纯函数公共 API、质量感知写入口、rtdbd 按订阅者 RBE 通知门控）。
+- **主题B**：运维硬化（健康/错误计数 + `RTDBD_OP_HEALTH` + SIGUSR1 dump、每连接有界出站队列背压 + 优雅退出、配置校验 fail-fast + 语义退出码、`indurtdb_detach()` 保留段）。
 
 **v3.3.0** — 读写分离与双通道：新增 `rtdbd` 写权威守护进程（UDS 串行写 + 本机 UID 鉴权 + 审计）与 `indurtdb-client`（写队列，fail-operational），支持跨进程变更通知；点位新增 `source_timestamp_ns`（采集时刻）与 `COMM_FAILURE` 质量码。**共享内存布局与 v2.x 仍逐字节兼容，ABI 保持 v1。**
 

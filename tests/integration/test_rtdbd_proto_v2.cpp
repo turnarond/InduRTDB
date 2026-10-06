@@ -90,8 +90,17 @@ struct RtdbdProc {
     {
         if (pid > 0) {
             kill(pid, SIGTERM);
-            int status = 0;
-            waitpid(pid, &status, 0);
+            int reaped = 0;
+            for (int i = 0; i < 500; ++i) {          /* 最多 5s */
+                int st = 0;
+                if (waitpid(pid, &st, WNOHANG) == pid) { reaped = 1; break; }
+                usleep(10000);
+            }
+            if (!reaped) {                            /* 卡死则 SIGKILL 强退 */
+                kill(pid, SIGKILL);
+                int st = 0;
+                waitpid(pid, &st, 0);
+            }
             pid = -1;
         }
         unlink(sock.c_str());
