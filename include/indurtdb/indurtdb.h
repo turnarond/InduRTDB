@@ -282,7 +282,7 @@ int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta)
 
 /* v3.6 管控写通道：点位 CRUD（运行时注册表增删改名；须配合 rtdbd 的 uid 鉴权使用）。
  * create: 在空闲槽(id 对应点位 name[0]=='\0')注册；同名已存在(指其他 id)返回 ERR_ARG；
- *         同 id 重注册按幂等更新。
+ *         同 id 已注册返回 ERR_FULL（非幂等更新）。索引插入失败(BUSY/FULL)会回滚注册。
  * delete: 清空 name[0] 并注销 name→id 索引；点位不存在返回 ERR_NOT_FOUND。
  * rename: 改 name 并同步索引（原子）；点位不存在返回 ERR_NOT_FOUND；同名(同 id)为幂等 no-op。
  * 返回 INDURTDB_OK / INDURTDB_ERR_ARG / INDURTDB_ERR_NOT_FOUND / INDURTDB_ERR_FULL / INDURTDB_ERR_BUSY。 */

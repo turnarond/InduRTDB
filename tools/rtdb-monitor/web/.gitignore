@@ -1,3 +1,5 @@
 node_modules/
 dist/
 *.local
+# 根 .gitignore 的 *.json 会忽略 lock 文件，这里强制纳入以保证可复现构建
+!package-lock.json

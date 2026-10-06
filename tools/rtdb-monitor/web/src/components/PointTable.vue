@@ -11,8 +11,8 @@
       </el-form-item>
       <el-form-item label="权限">
         <el-select v-model="accessFilter" placeholder="全部" clearable style="width: 120px">
-          <el-option label="只读" :value="0" />
-          <el-option label="读写" :value="1" />
+          <el-option label="只读" :value="1" />
+          <el-option label="读写" :value="3" />
         </el-select>
       </el-form-item>
       <el-form-item>
@@ -40,8 +40,8 @@
       </el-table-column>
       <el-table-column label="权限" width="90">
         <template #default="{ row }">
-          <el-tag size="small" :type="row.access === 0 ? 'success' : 'warning'">
-            {{ row.access === 0 ? '只读' : '读写' }}
+          <el-tag size="small" :type="row.access === 1 ? 'success' : 'warning'">
+            {{ row.access === 1 ? '只读' : '读写' }}
           </el-tag>
         </template>
       </el-table-column>

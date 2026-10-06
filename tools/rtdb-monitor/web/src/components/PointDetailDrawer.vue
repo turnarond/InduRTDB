@@ -13,8 +13,8 @@
           <el-tag size="small">{{ point.typeName }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="访问权限">
-          <el-tag size="small" :type="point.access === 0 ? 'success' : 'warning'">
-            {{ point.access === 0 ? '只读' : '读写' }}
+          <el-tag size="small" :type="point.access === 1 ? 'success' : 'warning'">
+            {{ point.access === 1 ? '只读' : '读写' }}
           </el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="当前值">
@@ -54,8 +54,8 @@
         <el-descriptions-item label="范围">
           {{ fmt(meta.eurMin) }} ~ {{ fmt(meta.eurMax) }}
         </el-descriptions-item>
-        <el-descriptions-item label="单位">{{ meta.unit || '—' }}</el-descriptions-item>
-        <el-descriptions-item label="描述">{{ meta.desc || '—' }}</el-descriptions-item>
+        <el-descriptions-item label="死区">{{ fmt(meta.deadband) }}</el-descriptions-item>
+        <el-descriptions-item label="标志位">{{ meta.flags }}</el-descriptions-item>
       </el-descriptions>
       <el-empty v-else description="无元数据" :image-size="60" />
     </template>

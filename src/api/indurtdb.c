@@ -439,6 +439,8 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
     ENSURE_H(h);
     if (!name || name[0] == '\0') { set_error("empty name"); return INDURTDB_ERR_ARG; }
     if (type < 0 || type > INDURTDB_TYPE_FLOAT) { set_error("bad type"); return INDURTDB_ERR_ARG; }
+    if (access != INDURTDB_ACCESS_READ_ONLY && access != INDURTDB_ACCESS_READ_WRITE)
+        { set_error("bad access (1=read-only,3=read-write)"); return INDURTDB_ERR_ARG; }
     if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
 
     /* 同名已注册到其他 id → 拒绝（管理面低并发，锁外探测可接受） */
@@ -462,9 +464,12 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
 
-        /* 索引插入锁释放后单独取锁（与 load_config 同模式，避免嵌套自锁） */
+        /* 索引插入锁释放后单独取锁（与 load_config 同模式，避免嵌套自锁）。
+         * 注：调用方须为低并发/单线程（rtdbd 串行 poll 循环）；此间存在短暂窗口——
+         * 点已 name 注册（LIST/GET 可见）但尚在索引中（FIND_BY_NAME 暂不可见），
+         * 单线程下无并发可观察到该中间态，故无害。 */
         int irc = irt_index_insert(&h->shm, name, id);
-        if (irc == INDURTDB_ERR_FULL) {       /* 索引满：回滚注册，避免不一致 */
+        if (irc != 0) {                        /* 索引插入失败：回滚注册，避免孤儿点 */
             for (int a2 = 0; a2 < IRT_SEQLOCK_MAX_RETRY; ++a2) {
                 uint64_t s2 = irt_seqlock_write_begin(&hdr->write_seq);
                 if (s2 & 1ULL) { sched_yield(); continue; }
@@ -472,7 +477,8 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
                 irt_seqlock_write_end(&hdr->write_seq, s2);
                 break;
             }
-            set_error("index full"); return INDURTDB_ERR_FULL;
+            set_error(irc == INDURTDB_ERR_FULL ? "index full" : "index busy");
+            return irc;
         }
         return irc;
     }
