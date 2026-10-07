@@ -10,6 +10,10 @@ foreach(src ${UNIT_TEST_SOURCES})
     target_include_directories(${name} PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src)
+    # v3.7 B5：v1 全局 API 已标注 deprecated，但测试**刻意保留 v1 覆盖**——
+    # v1 到 v4.0 前都是受支持的公共 API，测试正是它的回归网。故关闭弃用告警，
+    # 而非把约 500 处调用机械改写成 v2（零行为收益却担全量 churn 风险）。
+    target_compile_definitions(${name} PRIVATE INDURTDB_NO_DEPRECATE_WARN)
     set_target_properties(${name} PROPERTIES
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME ${name} COMMAND ${name})

@@ -1030,6 +1030,9 @@ int main(int argc, char** argv)
     uint32_t    max_subs   = 32;
     bool        supervise  = false;
     const char* pidfile    = NULL;
+    /* v3.7 B4：运行时变更 delta 日志。**默认关闭**（未指定则不启用），
+     * 以保持既有部署"运行时点位重启即丢"的语义不变。 */
+    const char* delta_path = NULL;
 
     static struct option long_opts[] = {
         {"socket",     required_argument, 0, 's'},
@@ -1041,11 +1044,12 @@ int main(int argc, char** argv)
         {"supervise",  no_argument,       0, 'S'},
         {"pidfile",    required_argument, 0, 'P'},
         {"stats-file", required_argument, 0, 'F'},
+        {"delta-file", required_argument, 0, 'D'},
         {0, 0, 0, 0}
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:SP:F:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:SP:F:D:", long_opts, NULL)) != -1) {
         switch (c) {
         case 's': sock_path = optarg; break;
         case 'i': instance = optarg; break;
@@ -1068,6 +1072,7 @@ int main(int argc, char** argv)
         case 'F':
             snprintf(g_stats_file, sizeof(g_stats_file), "%s", optarg);
             break;
+        case 'D': delta_path = optarg; break;
         default: break;
         }
     }
@@ -1136,6 +1141,31 @@ int main(int argc, char** argv)
         irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
                         "rtdbd: indurtdb_initialize failed: %s", indurtdb_get_last_error());
         return RTDBD_EXIT_SHM;
+    }
+
+    /* ---- B4：回放 delta（在 base 之上叠加运行时变更），随后启用后续追加 ----
+     * 顺序：load_config(base) → replay(delta) → 校验 → 服务。
+     * base 保持不可变可审计；delta 只追加。 */
+    if (delta_path) {
+        int applied = indurtdb_delta_replay(delta_path);
+        if (applied < 0) {
+            fprintf(stderr, "rtdbd: delta replay failed for '%s': %s\n",
+                    delta_path, indurtdb_get_last_error());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                            "rtdbd: delta replay failed: %s", indurtdb_get_last_error());
+            indurtdb_detach();
+            return RTDBD_EXIT_CONFIG;
+        }
+        if (indurtdb_enable_delta(delta_path) != INDURTDB_OK) {
+            fprintf(stderr, "rtdbd: cannot open delta file '%s': %s\n",
+                    delta_path, indurtdb_get_last_error());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                            "rtdbd: delta enable failed: %s", indurtdb_get_last_error());
+            indurtdb_detach();
+            return RTDBD_EXIT_CONFIG;
+        }
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                        "rtdbd: delta '%s' replayed %d record(s)", delta_path, applied);
     }
 
     /* ---- B3 fail-fast 阶段 2/3：点位配置校验 ----

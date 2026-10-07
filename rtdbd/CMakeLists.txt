@@ -22,6 +22,11 @@ target_link_libraries(rtdbd PRIVATE indurtdb)
 # getopt_long / POSIX 扩展
 target_compile_definitions(rtdbd PRIVATE _GNU_SOURCE)
 
+# v3.7 B5：rtdbd 是 v1 全局 API 的消费方（整体按单例风格编写，数百处调用）。
+# v1 到 v4.0 前仍受支持且行为不变，机械改写为零行为收益却担全量 churn 风险，
+# 故标注为"刻意使用 v1"，统一迁移推迟到 v4.0 真正移除 v1 时。
+target_compile_definitions(rtdbd PRIVATE INDURTDB_NO_DEPRECATE_WARN)
+
 set_target_properties(rtdbd PROPERTIES
     C_STANDARD 11
     C_STANDARD_REQUIRED ON

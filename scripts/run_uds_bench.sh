@@ -56,6 +56,7 @@ echo "== [1/2] Compiling uds_latency.c =="
 mkdir -p "$BUILD_DIR/bench"
 CC="${CC:-gcc}"
 "$CC" -std=gnu11 -Wall -Wextra -Werror -O2 \
+    -DINDURTDB_NO_DEPRECATE_WARN \
     -DBENCH_WARMUP="$WARMUP" -DBENCH_ITERATIONS="$ITERS" \
     -DBENCH_MSG_SIZE="$MSG_SIZE" \
     "$BENCH_DIR/uds_latency.c" -o "$BUILD_DIR/bench/uds_latency"
