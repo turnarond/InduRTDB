@@ -14,6 +14,7 @@
 #include "core/irt_subscription.h"
 #include "core/irt_config.h"
 #include "core/irt_index.h"
+#include "core/irt_delta.h"
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
@@ -27,6 +28,7 @@ struct indurtdb {
     irt_sub_t sub;
     bool      initialized;
     int32_t   owner_pid;   /* fork 检测: 非零时 compare getpid() */
+    int       delta_fd;    /* v3.7 B4: 运行时变更 delta 日志（追加写）；-1 = 未启用 */
 };
 
 /* 定长实例表, 零堆分配 (满足"核心层无堆"不变式) */
@@ -93,6 +95,7 @@ static void inst_shutdown(indurtdb_t* h) {
     if (!__atomic_load_n(&h->initialized, __ATOMIC_ACQUIRE)) return;
     /* 先标记未初始化 (RELEASE), 阻止并发 ENSURE 通过; 之后 ACQUIRE 读到 false 即不再访问 shm */
     __atomic_store_n(&h->initialized, false, __ATOMIC_RELEASE);
+    if (h->delta_fd >= 0) { close(h->delta_fd); h->delta_fd = -1; }
     irt_shm_shutdown(&h->shm);
     memset(h, 0, sizeof(*h));
 }
@@ -467,6 +470,27 @@ int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta)
 
 /* ---- v3.6 管控写通道：点位 CRUD（运行时注册表增删改名） ---- */
 
+/* v3.7 B4：追加一条运行时变更记录。未启用 delta 时是 no-op（热路径无开销）。
+ * 定义必须在三个 CRUD 之前（C 要求先声明后使用）。 */
+static void delta_log(indurtdb_t* h, uint16_t op, uint32_t id,
+                      uint8_t type, uint8_t access, const char* name)
+{
+    if (!h || h->delta_fd < 0) return;
+    irt_delta_rec_t rec;
+    memset(&rec, 0, sizeof(rec));
+    rec.magic    = IRT_DELTA_MAGIC;
+    rec.version  = IRT_DELTA_VERSION;
+    rec.op       = op;
+    rec.point_id = id;
+    rec.type     = type;
+    rec.access   = access;
+    if (name) {
+        strncpy(rec.name, name, sizeof(rec.name) - 1);
+        rec.name[sizeof(rec.name) - 1] = '\0';
+    }
+    (void)irt_delta_append(h->delta_fd, &rec);
+}
+
 /* 在指定槽写入点位静态属性（不触索引）。调用方须持写锁。 */
 static int h_point_register(irt_shm_t* shm, uint32_t id, const char* name, int type, int access)
 {
@@ -516,7 +540,9 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
          * 点已 name 注册（LIST/GET 可见）但尚在索引中（FIND_BY_NAME 暂不可见），
          * 单线程下无并发可观察到该中间态，故无害。 */
         int irc = irt_index_insert(&h->shm, name, id);
-        if (irc != 0) {                        /* 索引插入失败：回滚注册，避免孤儿点 */
+        if (irc == 0) {
+            delta_log(h, IRT_DELTA_OP_CREATE, id, (uint8_t)type, (uint8_t)access, name);
+        } else {                               /* 索引插入失败：回滚注册，避免孤儿点 */
             for (int a2 = 0; a2 < IRT_SEQLOCK_MAX_RETRY; ++a2) {
                 uint64_t s2 = irt_seqlock_write_begin(&hdr->write_seq);
                 if (s2 & 1ULL) { sched_yield(); continue; }
@@ -530,6 +556,19 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
         return irc;
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+
+/* v3.7 B4：启用 delta 日志（追加写）。path 为 NULL / 打开失败 → 保持未启用。
+ * 默认不启用：既有部署的重启语义完全不变（运行时点位仍"重启即丢"）。 */
+int indurtdb_h_enable_delta(indurtdb_t* h, const char* path)
+{
+    ENSURE_H(h);
+    if (!path) { set_error("null delta path"); return INDURTDB_ERR_ARG; }
+    if (h->delta_fd >= 0) { close(h->delta_fd); h->delta_fd = -1; }
+    int fd = irt_delta_open_append(path);
+    if (fd < 0) { set_error("cannot open delta file"); return INDURTDB_ERR_ARG; }
+    h->delta_fd = fd;
+    return INDURTDB_OK;
 }
 
 int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
@@ -552,6 +591,7 @@ int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
         p->name[0] = '\0';                      /* 先标记空闲 */
         irt_index_remove_locked(&h->shm, old); /* 持锁内用 _locked 变体（原子） */
         irt_seqlock_write_end(&hdr->write_seq, seq0);
+        delta_log(h, IRT_DELTA_OP_DELETE, id, 0, 0, NULL);
         return INDURTDB_OK;
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
@@ -593,9 +633,45 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
         strncpy(p->name, name, sizeof(p->name) - 1);
         p->name[sizeof(p->name) - 1] = '\0';
         irt_seqlock_write_end(&hdr->write_seq, seq0);
+        delta_log(h, IRT_DELTA_OP_RENAME, id, p->type, p->access, name);
         return INDURTDB_OK;
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+
+/* v3.7 B4：delta 回放 —— 把历史运行时变更重新施加到点位表。
+ * 回放中的失败（如 base 已删该点、索引满）只 WARN 式跳过，不致命：
+ * delta 是"尽力恢复"的增量，不应让一次坏记录导致整个实例起不来。 */
+static int delta_apply(const irt_delta_rec_t* rec, void* ctx)
+{
+    indurtdb_t* h = (indurtdb_t*)ctx;
+    if (!h) return -1;
+
+    switch (rec->op) {
+    case IRT_DELTA_OP_CREATE:
+        /* 已存在同名或同 id → 视为幂等成功（重复回放同一序列结果一致） */
+        if (indurtdb_h_create_point(h, rec->point_id, rec->name,
+                                    rec->type, rec->access) == INDURTDB_ERR_FULL)
+            return 0;
+        return 0;
+    case IRT_DELTA_OP_DELETE:
+        (void)indurtdb_h_delete_point(h, rec->point_id);   /* 不存在则忽略 */
+        return 0;
+    case IRT_DELTA_OP_RENAME:
+        (void)indurtdb_h_rename_point(h, rec->point_id, rec->name);
+        return 0;
+    default:
+        return -1;
+    }
+}
+
+int indurtdb_h_delta_replay(indurtdb_t* h, const char* path)
+{
+    ENSURE_H(h);
+    if (!path) { set_error("null delta path"); return INDURTDB_ERR_ARG; }
+    int n = irt_delta_replay(path, delta_apply, h);
+    if (n < 0) { set_error("delta replay failed"); return INDURTDB_ERR_ARG; }
+    return n;   /* 已应用记录数 */
 }
 
 /* ---- 校验/统计 ---- */
@@ -736,7 +812,8 @@ int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
 
     for (uint32_t id = 0; id < max_points; ++id) {
         indurtdb_point_t pt;
-        if (indurtdb_read_point(id, &pt) != 0) continue;  /* 未注册 */
+        /* 用 _h_ 变体：v1 已标注弃用，库内部不得使用自身弃用接口 */
+        if (indurtdb_h_read_point(g_default, id, &pt) != 0) continue;  /* 未注册 */
         if (pt.name[0] == '\0') continue;                /* 空名视为未注册 */
 
         int rc = INDURTDB_CFG_OK;
@@ -750,7 +827,7 @@ int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
         } else {
             indurtdb_meta_t m;
             memset(&m, 0, sizeof(m));
-            (void)indurtdb_get_meta(id, &m);
+            (void)indurtdb_h_get_meta(g_default, id, &m);
             rc = indurtdb_validate_point_meta(&m, err_field);
         }
 
@@ -926,8 +1003,14 @@ int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta) {
 int indurtdb_create_point(uint32_t id, const char* name, int type, int access) {
     return v1_int(indurtdb_h_create_point(g_default, id, name, type, access));
 }
+int indurtdb_enable_delta(const char* path) {
+    return v1_int(indurtdb_h_enable_delta(g_default, path));
+}
 int indurtdb_delete_point(uint32_t id) {
     return v1_int(indurtdb_h_delete_point(g_default, id));
+}
+int indurtdb_delta_replay(const char* path) {
+    return v1_int(indurtdb_h_delta_replay(g_default, path));
 }
 int indurtdb_rename_point(uint32_t id, const char* name) {
     return v1_int(indurtdb_h_rename_point(g_default, id, name));

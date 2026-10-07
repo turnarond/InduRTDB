@@ -73,7 +73,9 @@ echo "== [2/3] Compiling bench.c =="
 mkdir -p "$BUILD_DIR/bench"
 
 CC="${CC:-gcc}"
-CFLAGS="-std=c11 -Wall -Wextra -Werror -O2 -I$REPO_ROOT/include"
+# v3.7 B5：bench 沿用 v1 全局 API（v1 到 v4.0 前受支持），关闭弃用告警
+# 以免 -Werror 下编译失败。
+CFLAGS="-std=c11 -Wall -Wextra -Werror -O2 -I$REPO_ROOT/include -DINDURTDB_NO_DEPRECATE_WARN"
 LDFLAGS="-L$BUILD_DIR -lindurtdb -lpthread -lrt -lm"
 
 # 编译期参数通过 -D 传入

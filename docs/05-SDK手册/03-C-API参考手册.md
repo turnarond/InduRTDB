@@ -584,6 +584,39 @@ const char* indurtdb_cfg_error_reason(int err_code);
 
 错误码 → 人类可读原因文本（静态字符串，零分配）。
 
+### indurtdb_enable_delta / indurtdb_delta_replay（B4 配置持久化）
+
+```c
+int indurtdb_h_enable_delta(indurtdb_t* h, const char* path);
+int indurtdb_h_delta_replay(indurtdb_t* h, const char* path);
+int indurtdb_enable_delta(const char* path);
+int indurtdb_delta_replay(const char* path);
+```
+
+让运行时 `CREATE/DELETE/RENAME` 的点位**跨重启保留**（默认"重启即丢"）。
+
+- `enable_delta`：打开 `path` 用于追加写；此后三个 CRUD 成功后各追加一条定长记录。
+  **不调用则不启用**，行为与现状完全一致。
+- `delta_replay`：回放历史记录，返回已应用条数（0 = 无历史）。
+- 启动顺序应为 `load_config(base)` → `delta_replay` → 校验 → 服务。
+- **base 配置不可变**：只追加 delta，不回写 YAML。
+- 崩溃安全：记录定长 80B；末尾残片丢弃，坏 `magic`/`version`/`op` 停止回放（已应用部分保留）。
+- rtdbd 侧：`--delta-file <path>`（默认关闭）。
+
+### v1 全局 API 弃用说明（B5）
+
+v3.7 起，51 个 v1 单例封装函数（`indurtdb_write_*` / `indurtdb_read_*` /
+`indurtdb_initialize` / `indurtdb_shutdown` 等）标注 `INDURTDB_DEPRECATED`：
+
+- **v4.0 之前仍然受支持且行为不变**，仅产生编译期告警；真正删除在 v4.0。
+- 新代码请用 v2 句柄 API：`indurtdb_h_open()` 取句柄 + `indurtdb_h_*`。
+- **纯函数不弃用**（无实例语义、无 v2 对应者）：
+  `indurtdb_value_to_double` / `indurtdb_eurange_limit` / `indurtdb_deadband_exceeded` /
+  `indurtdb_validate_point_meta` / `indurtdb_meta_pct_without_range` /
+  `indurtdb_validate_config` / `indurtdb_cfg_error_reason` /
+  `indurtdb_quality_to_status_code` / `indurtdb_get_last_error`。
+- 确需继续使用 v1 且不想看到告警：定义 `INDURTDB_NO_DEPRECATE_WARN`。
+
 ### rtdbd 运维语义（主题B）
 
 **背压（B2）**：每连接定长 64 槽出站环形队列（零堆）。写成功只入队，队列满则**丢最旧（保序）**

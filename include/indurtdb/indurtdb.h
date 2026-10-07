@@ -17,6 +17,28 @@
 extern "C" {
 #endif
 
+/* ==== v3.7 主题B B5：v1 全局 API 弃用标记 ====
+ *
+ * v1 `indurtdb_*` 全局函数是"默认实例（g_default）"的薄封装，与 v2
+ * `indurtdb_h_*` 句柄 API 签名同构。v3.7 起正式标注弃用：
+ *   - 新代码请用 `indurtdb_h_*`（配合 `indurtdb_h_open()` 取得句柄）；
+ *   - v1 在 v4.0 之前**仍然受支持且行为不变**，仅产生编译期告警；
+ *   - 真正删除推迟到 v4.0。
+ *
+ * 纯函数（无实例语义、无 v2 对应者）**不标注**弃用，例如
+ * `indurtdb_value_to_double` / `indurtdb_validate_point_meta` /
+ * `indurtdb_quality_to_status_code` / `indurtdb_get_last_error`。
+ *
+ * 若确需继续使用 v1 且不想看到告警，可定义 `INDURTDB_NO_DEPRECATE_WARN`
+ * （测试套件即如此，以便保留对 v1 的回归覆盖）。 */
+#if defined(INDURTDB_NO_DEPRECATE_WARN)
+#  define INDURTDB_DEPRECATED
+#elif defined(__GNUC__) || defined(__clang__)
+#  define INDURTDB_DEPRECATED __attribute__((deprecated))
+#else
+#  define INDURTDB_DEPRECATED
+#endif
+
 /* ==== 版本 (须与 VERSION 文件、CMake project(VERSION) 一致) ==== */
 #define INDURTDB_VERSION_MAJOR 3
 #define INDURTDB_VERSION_MINOR 7
@@ -146,104 +168,104 @@ typedef void (*indurtdb_callback_t)(uint32_t id,
     const indurtdb_point_t* data, void* user_data);
 
 /* ==== 生命周期 ==== */
-int  indurtdb_initialize(const char* instance_id,
+int  INDURTDB_DEPRECATED indurtdb_initialize(const char* instance_id,
                          uint32_t max_points, uint32_t max_subscribers);
 /* 关闭并释放实例。owner 关闭时会 shm_unlink 该实例段（POSIX 语义）。 */
-void indurtdb_shutdown(void);
+void INDURTDB_DEPRECATED indurtdb_shutdown(void);
 
 /* v3.7 主题B B3：脱离实例但**保留共享内存段**（不 shm_unlink）。
  * 供 fail-fast 退出等「放弃接管但必须保留数据」的场景：段内已有点位与值
  * 不会因本次退出而销毁，下一次启动仍可 attach 并由运维修正问题。
  * 与 indurtdb_shutdown 的区别仅在是否 unlink；两者都会 unmap 并复位句柄。 */
-void indurtdb_detach(void);
-bool indurtdb_is_initialized(void);
+void INDURTDB_DEPRECATED indurtdb_detach(void);
+bool INDURTDB_DEPRECATED indurtdb_is_initialized(void);
 
 /* ==== 单点写 ==== */
-int indurtdb_write_bool(uint32_t id, bool value);
-int indurtdb_write_int32(uint32_t id, int32_t value);
-int indurtdb_write_double(uint32_t id, double value);
-int indurtdb_write_string(uint32_t id, const char* value);
+int INDURTDB_DEPRECATED indurtdb_write_bool(uint32_t id, bool value);
+int INDURTDB_DEPRECATED indurtdb_write_int32(uint32_t id, int32_t value);
+int INDURTDB_DEPRECATED indurtdb_write_double(uint32_t id, double value);
+int INDURTDB_DEPRECATED indurtdb_write_string(uint32_t id, const char* value);
 
 /* ==== 单点写（携带采集时刻 SourceTimestamp） ====
  * source_ts_ns 为数据在现场被采集的时刻；传 0 表示"未提供"，
  * 此时点位语义退化为仅使用入库时刻 timestamp_ns（旧行为不变）。
  */
-int indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns);
-int indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns);
-int indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns);
-int indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_bool_ts(uint32_t id, bool value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_int32_ts(uint32_t id, int32_t value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_double_ts(uint32_t id, double value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_string_ts(uint32_t id, const char* value, uint64_t source_ts_ns);
 
 /* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用）。value 按 type 解释（与 indurtdb_value_to_double 一致）。
  * 一次性写入值 + 调用方计算好的 quality（含 EURange 量程位）。默认 indurtdb_write_* 不变（仍 GOOD）。 */
-int indurtdb_write_quality_ts(uint32_t id, uint8_t type, const void* value,
+int INDURTDB_DEPRECATED indurtdb_write_quality_ts(uint32_t id, uint8_t type, const void* value,
                               uint64_t source_ts_ns, uint8_t quality);
 
 /* ==== 质量标记 ====
  * 用于显式设置点位质量（如与控制面失联时标记 COMM_FAILURE）。
  * 取值见 INDURTDB_QUALITY_* 与 INDURTDB_QUALITY_MAKE()。
  */
-int indurtdb_set_quality(uint32_t id, uint8_t quality);
+int INDURTDB_DEPRECATED indurtdb_set_quality(uint32_t id, uint8_t quality);
 
 /* ==== 单点读 ==== */
-int indurtdb_read_bool(uint32_t id, bool* value);
-int indurtdb_read_int32(uint32_t id, int32_t* value);
-int indurtdb_read_double(uint32_t id, double* value);
-int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
-int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
+int INDURTDB_DEPRECATED indurtdb_read_bool(uint32_t id, bool* value);
+int INDURTDB_DEPRECATED indurtdb_read_int32(uint32_t id, int32_t* value);
+int INDURTDB_DEPRECATED indurtdb_read_double(uint32_t id, double* value);
+int INDURTDB_DEPRECATED indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
+int INDURTDB_DEPRECATED indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
 
 /* ==== v3.4 T6: 类型扩展（int64 / uint32 / float，复用 value union 32B，布局不变） ==== */
-int indurtdb_write_int64(uint32_t id, int64_t value);
-int indurtdb_write_uint32(uint32_t id, uint32_t value);
-int indurtdb_write_float(uint32_t id, float value);
-int indurtdb_read_int64(uint32_t id, int64_t* value);
-int indurtdb_read_uint32(uint32_t id, uint32_t* value);
-int indurtdb_read_float(uint32_t id, float* value);
-int indurtdb_write_int64_ts(uint32_t id, int64_t value, uint64_t source_ts_ns);
-int indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t source_ts_ns);
-int indurtdb_write_float_ts(uint32_t id, float value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_int64(uint32_t id, int64_t value);
+int INDURTDB_DEPRECATED indurtdb_write_uint32(uint32_t id, uint32_t value);
+int INDURTDB_DEPRECATED indurtdb_write_float(uint32_t id, float value);
+int INDURTDB_DEPRECATED indurtdb_read_int64(uint32_t id, int64_t* value);
+int INDURTDB_DEPRECATED indurtdb_read_uint32(uint32_t id, uint32_t* value);
+int INDURTDB_DEPRECATED indurtdb_read_float(uint32_t id, float* value);
+int INDURTDB_DEPRECATED indurtdb_write_int64_ts(uint32_t id, int64_t value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_uint32_ts(uint32_t id, uint32_t value, uint64_t source_ts_ns);
+int INDURTDB_DEPRECATED indurtdb_write_float_ts(uint32_t id, float value, uint64_t source_ts_ns);
 /** 单拷贝快速读取点位数据 (seqlock 保护, 拷贝到线程本地缓冲后返回其指针).
  * 返回的指针在下一次 indurtdb_peek() 调用时被覆盖 (同线程).
  * 如需长期持有数据, 请用 indurtdb_read_point() 拷贝到自管理的缓冲区. */
-const indurtdb_point_t* indurtdb_peek(uint32_t id);
+const indurtdb_point_t* INDURTDB_DEPRECATED indurtdb_peek(uint32_t id);
 
 /* ==== 批量 (返回实际处理点数, 负值=参数错误) ==== */
-int indurtdb_read_range(uint32_t start_id, uint16_t count,
+int INDURTDB_DEPRECATED indurtdb_read_range(uint32_t start_id, uint16_t count,
                         indurtdb_point_t* out_buf, uint16_t out_cap);
-int indurtdb_write_range_bool(uint32_t start_id, const bool* values, uint16_t count);
-int indurtdb_write_range_int32(uint32_t start_id, const int32_t* values, uint16_t count);
-int indurtdb_write_range_double(uint32_t start_id, const double* values, uint16_t count);
+int INDURTDB_DEPRECATED indurtdb_write_range_bool(uint32_t start_id, const bool* values, uint16_t count);
+int INDURTDB_DEPRECATED indurtdb_write_range_int32(uint32_t start_id, const int32_t* values, uint16_t count);
+int INDURTDB_DEPRECATED indurtdb_write_range_double(uint32_t start_id, const double* values, uint16_t count);
 
 /* ==== 订阅 ==== */
-int indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data);
-int indurtdb_unsubscribe(uint32_t id);
+int INDURTDB_DEPRECATED indurtdb_subscribe(uint32_t id, indurtdb_callback_t cb, void* user_data);
+int INDURTDB_DEPRECATED indurtdb_unsubscribe(uint32_t id);
 
 /* ==== 配置/心跳 ==== */
-int  indurtdb_load_config(const char* config_path);
-void indurtdb_update_heartbeat(void);
+int  INDURTDB_DEPRECATED indurtdb_load_config(const char* config_path);
+void INDURTDB_DEPRECATED indurtdb_update_heartbeat(void);
 
 /* ==== 校验/统计/错误 ==== */
-int indurtdb_validate_id(uint32_t id);
+int INDURTDB_DEPRECATED indurtdb_validate_id(uint32_t id);
 
 /* v3.4: 按点位名查找 id（共享内存内 name→id 索引，全局一致）。
  * 成功返回 INDURTDB_OK(0) 并写 *out_id；未找到返回 INDURTDB_ERR_NOT_FOUND；
  * 参数非法 INDURTDB_ERR_ARG；并发冲突重试耗尽 INDURTDB_ERR_BUSY。
  * 点位名须先经 indurtdb_load_config() 注册（或由 rtdbd 注册，T9）。 */
-int indurtdb_find_by_name(const char* name, uint32_t* out_id);
+int INDURTDB_DEPRECATED indurtdb_find_by_name(const char* name, uint32_t* out_id);
 
 /* v3.4 T3: 读写点位元数据 (每点 32B: eur_min/max/deadband/flags)。
  * 冷数据, 按 id O(1) 索引, 不进入读写热路径, 也不上送执行。
  * set 成功返回 INDURTDB_OK(0); 越界 id / 空指针返回 INDURTDB_ERR_ARG;
  * 未初始化 INDURTDB_ERR_NOT_INIT; 并发写冲突重试耗尽 INDURTDB_ERR_BUSY。
  * 读/写前须确保 id 对应的点已存在 (注册), 否则数据无意义。 */
-int indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta);
-int indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
-int indurtdb_create_point(uint32_t id, const char* name, int type, int access);
-int indurtdb_delete_point(uint32_t id);
-int indurtdb_rename_point(uint32_t id, const char* name);
-int  indurtdb_check_timeouts(uint64_t timeout_ns);
-uint64_t indurtdb_get_write_count(void);
-uint64_t indurtdb_get_timeout_count(void);
-uint64_t indurtdb_get_scan_skipped(void);  /* v3.4 T7: 被超时扫描跳过的点数（可观测） */
+int INDURTDB_DEPRECATED indurtdb_get_meta(uint32_t id, indurtdb_meta_t* meta);
+int INDURTDB_DEPRECATED indurtdb_set_meta(uint32_t id, const indurtdb_meta_t* meta);
+int INDURTDB_DEPRECATED indurtdb_create_point(uint32_t id, const char* name, int type, int access);
+int INDURTDB_DEPRECATED indurtdb_delete_point(uint32_t id);
+int INDURTDB_DEPRECATED indurtdb_rename_point(uint32_t id, const char* name);
+int  INDURTDB_DEPRECATED indurtdb_check_timeouts(uint64_t timeout_ns);
+uint64_t INDURTDB_DEPRECATED indurtdb_get_write_count(void);
+uint64_t INDURTDB_DEPRECATED indurtdb_get_timeout_count(void);
+uint64_t INDURTDB_DEPRECATED indurtdb_get_scan_skipped(void);  /* v3.4 T7: 被超时扫描跳过的点数（可观测） */
 const char* indurtdb_get_last_error(void);
 
 /* ==== API v2: 句柄化 (v3.4 新增) ====
@@ -343,7 +365,7 @@ int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id);
  * 路径安全调用）。失败详情见 indurtdb_get_last_error()。
  * 返回 INDURTDB_HEALTH_OK 或 INDURTDB_HEALTH_UNHEALTHY。 */
 int indurtdb_h_self_check(indurtdb_t* h);
-int indurtdb_self_check(void);   /* v1 薄封装（默认句柄） */
+int INDURTDB_DEPRECATED indurtdb_self_check(void);   /* v1 薄封装（默认句柄） */
 
 /* ==== v3.7 主题B B3：配置校验 + fail-fast ==== */
 
@@ -391,6 +413,20 @@ bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m);
  * 若以 0 表示"全合法"，则 id 为 0 的非法点会被误判为配置合法而绕过 fail-fast。 */
 int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
                              const char** err_reason);
+
+/* v3.7 主题B B4：运行时变更 delta 日志（配置持久化）。
+ *
+ * 解决「v3.6 CRUD 重启即丢」：运行时 CREATE/DELETE/RENAME 追加写定长记录到
+ * <path>，启动时在 load_config(base) 之后回放，使点位跨重启存在。
+ *
+ * - **base 配置不可变**：不回写 YAML，只追加 delta（保审计性、避免并发写冲突）。
+ * - **默认不启用**：不调用 enable_delta 时行为与现状完全一致（运行时点位重启即丢）。
+ * - delta_replay 返回已应用记录数（0 表示无历史）。
+ */
+int indurtdb_h_enable_delta(indurtdb_t* h, const char* path);
+int indurtdb_h_delta_replay(indurtdb_t* h, const char* path);
+int INDURTDB_DEPRECATED indurtdb_enable_delta(const char* path);
+int INDURTDB_DEPRECATED indurtdb_delta_replay(const char* path);
 
 /* 字段标识 → 人类可读原因文本（静态字符串，零分配）。 */
 const char* indurtdb_cfg_error_reason(int err_code);

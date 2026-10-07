@@ -90,6 +90,35 @@ All notable changes to InduRTDB.
   - systemd 部署需配套 `RestartPreventExitStatus=2 4`：in-process 的「不 respawn」只挡得住
     rtdbd 自身，若 systemd 配了 `Restart=always`，重启风暴会转移到 systemd 层面。
 
+### 主题 B 延展：B4 配置持久化 + B5 v1 API 退役（2026-10-07）
+
+#### B4 运行时配置持久化（delta 日志）
+解决「v3.6 CRUD 重启即丢」：运行时 `CREATE/DELETE/RENAME` 的点位跨重启保留。
+- 新增 `src/core/irt_delta.{h,c}`：**定长 80B 记录**（静态断言锁死）、追加写 + `fsync`、
+  回放解析（末尾残片丢弃；坏 `magic`/`version`/`op` 停止，已应用部分保留）。
+- 新增 `indurtdb_enable_delta()` / `indurtdb_delta_replay()` 及 `_h_` 版本。
+- `rtdbd --delta-file <path>`：**默认关闭**（未指定则行为与现状完全一致）；
+  启用时启动顺序 `load_config(base)` → 回放 delta → 校验 → 服务。
+- **base 配置不可变**：只追加 delta，不回写 YAML（保审计性、避免并发写冲突）。**ABI 不变**。
+
+#### B5 v1 API 退役（技术债，**不含删除**）
+- 新增 `INDURTDB_DEPRECATED` 宏，为 **51 个 v1 单例封装函数**标注弃用（编译期告警）。
+- **`examples/` 与 `demo/` 已迁移到 v2 句柄 API**。
+- 测试 / rtdbd / 诊断 harness / bench 脚本**刻意保留 v1**，经 `INDURTDB_NO_DEPRECATE_WARN` 关告警。
+- **真正删除推迟到 v4.0**；v1 在此之前仍受支持且行为不变。
+
+**为何不把测试整体迁到 v2（对 roadmap §3.4 的偏离，已评审确认）**：
+roadmap 原文为「迁移 `examples/`、`demo/`、测试到 v2」，本版本只迁 examples/demo——
+v1 到 v4.0 前都是受支持公共 API，测试正是它的回归网，整体迁移反而**减少**覆盖；
+且约 500 处 / 35 文件的机械改动零行为收益却担全量 churn 风险；
+消除告警用一行宏即可达成，成本收益不对称。
+
+#### 延展项测试
+- `tests/unit/test_c_delta.cpp`（8）：布局、空/缺失文件、顺序回放、残片丢弃、
+  坏 magic/version/op 停止、append-replay 往返。
+- `tests/integration/test_rtdbd_delta.cpp`（4）：CREATE 跨重启存活、DELETE/RENAME 持久化、
+  未启用 delta 时行为不变、残片可容忍。
+
 ### 主题 B 测试
 - `tests/unit/test_c_config.cpp`：新增 14 个 `ConfigValidate.*` 用例（并入原 3 个 `CConfig.*`，共 17）。
 - `tests/integration/test_rtdbd_health.cpp`（5）：HEALTH OK、SIGUSR1 dump、`n_notifies` 语义钉定、

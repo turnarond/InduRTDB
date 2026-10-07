@@ -1,5 +1,10 @@
 find_package(GTest REQUIRED)
 
+# v3.7 B5：v1 全局 API 已标注 deprecated，但测试**刻意保留 v1 覆盖**
+# （v1 到 v4.0 前都是受支持公共 API，测试是其回归网），故关闭弃用告警。
+# 对该目录下所有测试目标统一生效。
+add_compile_definitions(INDURTDB_NO_DEPRECATE_WARN)
+
 add_executable(test_c_multi_process test_c_multi_process.cpp)
 target_link_libraries(test_c_multi_process PRIVATE
     GTest::gtest GTest::gtest_main indurtdb)
@@ -165,4 +170,21 @@ if(TARGET rtdbd)
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_dependencies(test_rtdbd_backpressure rtdbd)
     add_test(NAME test_rtdbd_backpressure COMMAND test_rtdbd_backpressure)
+endif()
+
+# ---- 运行时变更 delta 持久化（v3.7 主题B B4） ----
+if(TARGET rtdbd)
+    add_executable(test_rtdbd_delta test_rtdbd_delta.cpp)
+    target_link_libraries(test_rtdbd_delta PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb)
+    target_include_directories(test_rtdbd_delta PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_rtdbd_delta PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_delta PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_delta rtdbd)
+    add_test(NAME test_rtdbd_delta COMMAND test_rtdbd_delta)
 endif()
