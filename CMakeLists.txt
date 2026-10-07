@@ -1,6 +1,6 @@
 # InduRTDB - Industrial Real-Time Database (pure C core)
 cmake_minimum_required(VERSION 3.15)
-project(InduRTDB VERSION 3.3.0 LANGUAGES C CXX)
+project(InduRTDB VERSION 3.7.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -26,8 +26,10 @@ endif()
 set(IRT_CORE_SRC
     src/core/irt_shm.c
     src/core/irt_point_manager.c
+    src/core/irt_semantics.c
     src/core/irt_subscription.c
     src/core/irt_config.c
+    src/core/irt_index.c
     src/api/indurtdb.c
     ${IRT_OSAL_SRC}
 )
@@ -45,6 +47,15 @@ else()
 endif()
 option(INDURTDB_BUILD_TESTS    "Build InduRTDB tests"    ${_indurtdb_default})
 option(INDURTDB_BUILD_EXAMPLES "Build InduRTDB examples" ${_indurtdb_default})
+
+# --- 覆盖率插桩（T8） ---
+# 开启后库以 --coverage 构建，配合 `coverage` 目标生成报告（需 gcovr/lcov）。
+option(INDURTDB_ENABLE_COVERAGE "Build with --coverage instrumentation" OFF)
+if(INDURTDB_ENABLE_COVERAGE)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0 -g")
+    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+endif()
 
 include(GNUInstallDirs)
 
@@ -86,6 +97,19 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 endif()
 
+# --- 诊断工具 C harness（T8：供 irt-diag 的 smoke/leak 驱动） ---
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(INDURTDB_IS_TOP_LEVEL)
+        set(_diag_default ON)
+    else()
+        set(_diag_default OFF)
+    endif()
+    option(INDURTDB_BUILD_DIAG "Build irt_diag harness (diagnostics tooling)" ${_diag_default})
+    if(INDURTDB_BUILD_DIAG)
+        add_subdirectory(tools/irt_diag)
+    endif()
+endif()
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(INDURTDB_BUILD_TESTS)
         enable_testing()
@@ -93,6 +117,23 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
     if(INDURTDB_BUILD_EXAMPLES)
         add_subdirectory(examples)
+    endif()
+endif()
+
+# --- 覆盖率目标（T8）：仅当开启插桩且构建测试时可用 ---
+if(INDURTDB_ENABLE_COVERAGE AND INDURTDB_BUILD_TESTS)
+    find_program(GCOVR gcovr)
+    add_custom_target(coverage
+        COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+        WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+        COMMENT "Run tests under coverage instrumentation")
+    if(GCOVR)
+        add_custom_command(TARGET coverage POST_BUILD
+            COMMAND ${GCOVR} -r ${CMAKE_SOURCE_DIR} -s
+                    --xml -o ${CMAKE_BINARY_DIR}/coverage.xml
+                    --html-details -o ${CMAKE_BINARY_DIR}/coverage.html
+            WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+            COMMENT "Generate coverage report (coverage.xml / coverage.html)")
     endif()
 endif()
 

@@ -1,0 +1,834 @@
+/**
+ * @file test_rtdbd_proto_v2.cpp
+ * @brief rtdbd / irtcli 协议 v2 集成测试（T9 红→绿）
+ *
+ * 覆盖 T9 验收用例：
+ *   - FindByName                客户端经服务端按名查到 id（共享索引）
+ *   - MetaWriteRequiresAuth     未授权 uid 写元数据被拒（默认拒绝）
+ *   - MetaWriteAuthorizedSucceeds  授权 uid 写元数据成功且可读回
+ *   - RejectsV1Client           协议版本不匹配（v1 客户端）即断连，不静默
+ */
+#include <gtest/gtest.h>
+
+#include <cerrno>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include <poll.h>
+#include <signal.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+#include <indurtdb/indurtdb.h>
+#include <irtcli/client.h>
+#include <rtdbd/protocol.h>
+
+#ifndef RTDBD_BIN
+#define RTDBD_BIN ""
+#endif
+
+namespace {
+
+std::string make_tmp_file(const std::string& name, const std::string& content)
+{
+    std::string path = "/tmp/" + name;
+    FILE* f = fopen(path.c_str(), "w");
+    if (f) {
+        fwrite(content.data(), 1, content.size(), f);
+        fclose(f);
+    }
+    return path;
+}
+
+/* 启动 rtdbd 子进程（RAII：析构必定回收，避免 ASSERT 提前返回导致进程泄漏） */
+struct RtdbdProc {
+    std::string sock;
+    std::string instance;
+    std::string policy_path;
+    std::string config_path;
+    pid_t       pid = -1;
+
+    ~RtdbdProc() { stop(); }
+
+    bool start(const std::string& tag, const std::string& policy_body,
+               const std::string& config_body)
+    {
+        sock     = "/tmp/indurtdb_proto2_" + tag + ".sock";
+        instance = "proto2_test_" + tag;
+        policy_path = make_tmp_file("proto2_policy_" + tag + ".txt", policy_body);
+        config_path = make_tmp_file("proto2_cfg_" + tag + ".yaml", config_body);
+
+        unlink(sock.c_str());
+
+        pid = fork();
+        if (pid < 0) return false;
+        if (pid == 0) {
+            execl(RTDBD_BIN, "rtdbd",
+                  "--socket", sock.c_str(),
+                  "--instance", instance.c_str(),
+                  "--policy", policy_path.c_str(),
+                  "--config", config_path.c_str(),
+                  "--max-points", "64",
+                  "--max-subs", "4",
+                  (char*)NULL);
+            _exit(127);
+        }
+
+        for (int i = 0; i < 500; ++i) {
+            struct stat st;
+            if (stat(sock.c_str(), &st) == 0) return true;
+            usleep(10000);
+        }
+        return false;
+    }
+
+    void stop()
+    {
+        if (pid > 0) {
+            kill(pid, SIGTERM);
+            int status = 0;
+            waitpid(pid, &status, 0);
+            pid = -1;
+        }
+        unlink(sock.c_str());
+    }
+};
+
+int connect_to(const std::string& sock)
+{
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_un addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sun_family = AF_UNIX;
+    strncpy(addr.sun_path, sock.c_str(), sizeof(addr.sun_path) - 1);
+
+    for (int i = 0; i < 200; ++i) {
+        if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) return fd;
+        usleep(10000);
+    }
+    close(fd);
+    return -1;
+}
+
+/* 点位配置：注册两个带名的点位，供 FIND_BY_NAME 端到端可用 */
+const char* kConfig =
+    "points:\n"
+    "  - id: 10\n"
+    "    name: \"AHU_01.Supply_Temp\"\n"
+    "    type: int32\n"
+    "    unit: 0\n"
+    "    access: 3\n"
+    "  - id: 11\n"
+    "    name: \"Pump_Start_CMD\"\n"
+    "    type: bool\n"
+    "    access: 3\n";
+
+std::string policy_for_uid(unsigned long uid)
+{
+    char buf[128];
+    snprintf(buf, sizeof(buf), "%lu:0:63\n", uid);
+    return std::string(buf);
+}
+
+/* 裸协议交互：发请求头+负载，收响应头+全部负载体。返回是否成功收完。 */
+bool raw_exchange(int fd, uint16_t op, const void* payload, uint32_t plen,
+                  rtdbd_resp_hdr_t* resp, std::vector<uint8_t>* body)
+{
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic        = RTDBD_MAGIC;
+    req.version      = RTDBD_PROTO_VERSION;
+    req.opcode       = op;
+    req.payload_len  = plen;
+    if (send(fd, &req, sizeof(req), 0) != (ssize_t)sizeof(req)) return false;
+    if (plen && send(fd, payload, plen, 0) != (ssize_t)plen) return false;
+
+    if (recv(fd, resp, sizeof(*resp), 0) != (ssize_t)sizeof(*resp)) return false;
+    body->resize(resp->payload_len);
+    size_t got = 0;
+    while (got < resp->payload_len) {
+        ssize_t n = recv(fd, body->data() + got, resp->payload_len - got, 0);
+        if (n <= 0) return false;
+        got += (size_t)n;
+    }
+    return true;
+}
+
+} // namespace
+
+/* 1. 按名查找：客户端经服务端查到 id（共享索引） */
+TEST(ProtoV2, FindByName)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("find", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+
+    uint32_t id = 0;
+    EXPECT_EQ(irtcli_find_by_name(&c, "AHU_01.Supply_Temp", &id), IRTCLI_OK);
+    EXPECT_EQ(id, 10u);
+
+    uint32_t id2 = 0;
+    EXPECT_EQ(irtcli_find_by_name(&c, "Pump_Start_CMD", &id2), IRTCLI_OK);
+    EXPECT_EQ(id2, 11u);
+
+    /* 不存在的名应返回 NOT_FOUND，而非成功或崩溃 */
+    uint32_t missing = 0;
+    EXPECT_EQ(irtcli_find_by_name(&c, "NoSuch.Point", &missing), IRTCLI_ERR_NOT_FOUND);
+
+    irtcli_close(&c);
+    p.stop();
+}
+
+/* 2. 元数据写鉴权：默认策略拒绝一切 uid */
+TEST(ProtoV2, MetaWriteRequiresAuth)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("denymeta", "# no rules\n", kConfig));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+
+    indurtdb_meta_t m;
+    memset(&m, 0, sizeof(m));
+    m.eur_min = -10.0;
+    m.eur_max = 50.0;
+    m.deadband = 0.5f;
+    m.flags = 0x3u;
+
+    EXPECT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_ERR_DENIED)
+        << "未授权 uid 写元数据必须被拒（SO_PEERCRED 鉴权生效）";
+
+    irtcli_close(&c);
+    p.stop();
+}
+
+/* 3. 授权 uid 写元数据成功，且可读回（round-trip） */
+TEST(ProtoV2, MetaWriteAuthorizedSucceeds)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("okmeta", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+
+    indurtdb_meta_t m;
+    memset(&m, 0, sizeof(m));
+    m.eur_min = -10.0;
+    m.eur_max = 50.0;
+    m.deadband = 0.5f;
+    m.flags = 0x3u;
+
+    ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK)
+        << "授权 uid 写元数据应成功";
+
+    indurtdb_meta_t out;
+    memset(&out, 0, sizeof(out));
+    ASSERT_EQ(irtcli_get_meta(&c, 10, &out), IRTCLI_OK);
+    EXPECT_DOUBLE_EQ(out.eur_min, -10.0);
+    EXPECT_DOUBLE_EQ(out.eur_max, 50.0);
+    EXPECT_FLOAT_EQ(out.deadband, 0.5f);
+    EXPECT_EQ(out.flags, 0x3u);
+
+    irtcli_close(&c);
+    p.stop();
+}
+
+/* 4. 协议版本不匹配（v1 客户端）即断连，不静默 */
+TEST(ProtoV2, RejectsV1Client)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("v1", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_req_hdr_t bad;
+    memset(&bad, 0, sizeof(bad));
+    bad.magic   = RTDBD_MAGIC;
+    bad.version = RTDBD_PROTO_VERSION - 1; /* 模拟 v1 客户端 */
+    bad.opcode  = RTDBD_OP_PING;
+    ASSERT_EQ(send(fd, &bad, sizeof(bad), 0), (ssize_t)sizeof(bad));
+
+    /* 服务端应关闭连接：recv 返回 0 */
+    char buf[64];
+    ssize_t n = recv(fd, buf, sizeof(buf), 0);
+    EXPECT_EQ(n, 0) << "协议版本不匹配（v1 客户端）时服务端应关闭连接";
+
+    close(fd);
+    p.stop();
+}
+
+/* 5. v3.5 监控：按 id 读取当前值（GET，读免鉴权） */
+TEST(ProtoV2, GetPointValue)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("get", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    /* 用裸 WRITE 同步写入一个值（写需鉴权，与监控读路径分离验证） */
+    rtdbd_write_req_t w;
+    memset(&w, 0, sizeof(w));
+    w.point_id    = 10;
+    w.type        = (uint8_t)INDURTDB_TYPE_INT32;
+    w.value_bits  = (uint64_t)(int32_t)12345;
+    w.source_ts_ns = 0;
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+
+    rtdbd_get_req_t g;
+    memset(&g, 0, sizeof(g));
+    g.point_id = 10;
+
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_get_resp_t));
+
+    rtdbd_get_resp_t r;
+    memcpy(&r, body.data(), sizeof(r));
+    EXPECT_EQ(r.point_id, 10u);
+    EXPECT_EQ(r.type, (uint8_t)INDURTDB_TYPE_INT32);
+    EXPECT_EQ(r.value_bits, (uint64_t)12345u);
+
+    /* 未注册 id（仍在 max_points 内）应 NOT_FOUND */
+    g.point_id = 50;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    /* 越界 id 应 NOT_FOUND */
+    g.point_id = 999;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    close(fd);
+    p.stop();
+}
+
+/* 6. v3.5 监控：枚举已注册点位（LIST，读免鉴权） */
+TEST(ProtoV2, ListPoints)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("list", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_list_req_t l;
+    memset(&l, 0, sizeof(l));
+    l.max = 0; l.offset = 0; /* 全量 */
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_LIST, &l, sizeof(l), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), 2u * sizeof(rtdbd_point_info_t));
+
+    rtdbd_point_info_t e[2];
+    memcpy(&e[0], body.data(), sizeof(rtdbd_point_info_t));
+    memcpy(&e[1], body.data() + sizeof(rtdbd_point_info_t), sizeof(rtdbd_point_info_t));
+    EXPECT_EQ(e[0].point_id, 10u);
+    EXPECT_EQ(e[1].point_id, 11u);
+    EXPECT_EQ(std::string(e[0].name), "AHU_01.Supply_Temp");
+    EXPECT_EQ(std::string(e[1].name), "Pump_Start_CMD");
+    EXPECT_EQ(e[0].type, (uint8_t)INDURTDB_TYPE_INT32);
+    EXPECT_EQ(e[1].type, (uint8_t)INDURTDB_TYPE_BOOL);
+    EXPECT_EQ(e[0].access, (uint8_t)INDURTDB_ACCESS_READ_WRITE);
+    EXPECT_EQ(e[1].access, (uint8_t)INDURTDB_ACCESS_READ_WRITE);
+
+    /* 分页：单包 max=1 只回 1 条 */
+    l.max = 1;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_LIST, &l, sizeof(l), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    EXPECT_EQ(body.size(), 1u * sizeof(rtdbd_point_info_t));
+
+    close(fd);
+    p.stop();
+}
+
+/* 7. v3.6 管控写：点位 CRUD（create → get → rename → find → delete） */
+TEST(ProtoV2, PointCrud)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("crud", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    /* create id=20 int32 读写 */
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 20;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Test.New_Point", sizeof(c.name) - 1);
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    /* 建完即可读（GET 读免鉴权） */
+    rtdbd_get_req_t g;
+    memset(&g, 0, sizeof(g));
+    g.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_get_resp_t));
+
+    /* rename 为新名 */
+    rtdbd_rename_req_t rn;
+    memset(&rn, 0, sizeof(rn));
+    rn.point_id = 20;
+    strncpy(rn.name, "Test.Renamed", sizeof(rn.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_RENAME_POINT, &rn, sizeof(rn), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    /* 旧名应失效，新名应解析到 20 */
+    rtdbd_find_req_t f;
+    memset(&f, 0, sizeof(f));
+    strncpy(f.name, "Test.New_Point", sizeof(f.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_FIND_BY_NAME, &f, sizeof(f), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    memset(&f, 0, sizeof(f));
+    strncpy(f.name, "Test.Renamed", sizeof(f.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_FIND_BY_NAME, &f, sizeof(f), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_EQ(body.size(), sizeof(rtdbd_find_resp_t));
+    rtdbd_find_resp_t fr;
+    memcpy(&fr, body.data(), sizeof(fr));
+    EXPECT_EQ(fr.point_id, 20u);
+
+    /* delete 后 GET 应 NOT_FOUND */
+    rtdbd_delete_req_t d;
+    memset(&d, 0, sizeof(d));
+    d.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_DELETE_POINT, &d, sizeof(d), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    memset(&g, 0, sizeof(g));
+    g.point_id = 20;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND);
+
+    close(fd);
+    p.stop();
+}
+
+/* 8. v3.6 管控写鉴权：默认策略（deny all）下 create/delete 必须被拒 */
+TEST(ProtoV2, PointCrudRequiresAuth)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("denycrud", "# no rules\n", kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 30;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Denied.Point", sizeof(c.name) - 1);
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_DENIED);
+
+    rtdbd_delete_req_t d;
+    memset(&d, 0, sizeof(d));
+    d.point_id = 10;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_DELETE_POINT, &d, sizeof(d), &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_DENIED);
+
+    close(fd);
+    p.stop();
+}
+
+/* 9. v3.6 运行日志：GET_LOG 返回启动事件，且管控写会记入日志 */
+TEST(ProtoV2, GetLog)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("log", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_log_req_t q;
+    memset(&q, 0, sizeof(q));
+    q.max = 0; /* 全部（上限 RTDBD_LOG_CAPACITY） */
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET_LOG, &q, sizeof(q), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    ASSERT_GE(body.size(), sizeof(rtdbd_log_entry_t));
+
+    uint32_t n = (uint32_t)(body.size() / sizeof(rtdbd_log_entry_t));
+    EXPECT_LE(n, RTDBD_LOG_CAPACITY);
+    EXPECT_EQ(body.size(), n * sizeof(rtdbd_log_entry_t));
+
+    /* 最旧→最新：首条应为启动事件 */
+    rtdbd_log_entry_t e;
+    memcpy(&e, body.data(), sizeof(e));
+    EXPECT_NE(std::string(e.msg).find("rtdbd listening on"), std::string::npos)
+        << "unexpected first entry: " << e.msg;
+
+    /* 管控写(create)应记入日志 */
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id = 20;
+    c.type     = RTDBD_TYPE_INT32;
+    c.access   = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(c.name, "Log.Test", sizeof(c.name) - 1);
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET_LOG, &q, sizeof(q), &resp, &body));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    uint32_t n2 = (uint32_t)(body.size() / sizeof(rtdbd_log_entry_t));
+    EXPECT_GT(n2, n);
+
+    bool found = false;
+    for (uint32_t i = 0; i < n2; ++i) {
+        rtdbd_log_entry_t le;
+        memcpy(&le, body.data() + i * sizeof(le), sizeof(le));
+        if (std::string(le.msg).find("create point") != std::string::npos) {
+            found = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "create point event should appear in runtime log";
+
+    close(fd);
+    p.stop();
+}
+
+/* 10. v3.7 主题A T2：EURange→量程位（写权威施加，经 GET 可见） */
+TEST(ProtoV2, EurangeLimitOnWrite)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("eur", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+    irtcli_set_async(&c, false); /* 同步写：写即提交并返回 IRTCLI_OK（默认异步仅入队） */
+
+    indurtdb_meta_t m;
+    memset(&m, 0, sizeof(m));
+    m.eur_min = 0.0;
+    m.eur_max = 100.0;
+    m.flags   = INDURTDB_META_FLAG_EUR; /* 仅启用量程 */
+    ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK);
+
+    /* 区间内值 → 量程位 NONE */
+    ASSERT_EQ(irtcli_write_int32(&c, 10, 50, 0), IRTCLI_OK);
+    {
+        int fd = connect_to(p.sock);
+        rtdbd_get_req_t g; memset(&g, 0, sizeof(g)); g.point_id = 10;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+        rtdbd_get_resp_t r; memcpy(&r, body.data(), sizeof(r));
+        EXPECT_EQ(INDURTDB_QUALITY_LIMIT(r.quality), (uint8_t)INDURTDB_LIMIT_NONE);
+        close(fd);
+    }
+
+    /* 越上界值(150) → 量程位 HIGH，基础码仍为 GOOD */
+    ASSERT_EQ(irtcli_write_int32(&c, 10, 150, 0), IRTCLI_OK);
+    {
+        int fd = connect_to(p.sock);
+        rtdbd_get_req_t g; memset(&g, 0, sizeof(g)); g.point_id = 10;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+        rtdbd_get_resp_t r; memcpy(&r, body.data(), sizeof(r));
+        EXPECT_EQ(INDURTDB_QUALITY_LIMIT(r.quality), (uint8_t)INDURTDB_LIMIT_HIGH);
+        EXPECT_EQ(INDURTDB_QUALITY_BASE(r.quality), (uint8_t)INDURTDB_QUALITY_GOOD);
+        close(fd);
+    }
+
+    /* 越下界值(-5) → 量程位 LOW */
+    ASSERT_EQ(irtcli_write_int32(&c, 10, -5, 0), IRTCLI_OK);
+    {
+        int fd = connect_to(p.sock);
+        rtdbd_get_req_t g; memset(&g, 0, sizeof(g)); g.point_id = 10;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_GET, &g, sizeof(g), &resp, &body));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+        rtdbd_get_resp_t r; memcpy(&r, body.data(), sizeof(r));
+        EXPECT_EQ(INDURTDB_QUALITY_LIMIT(r.quality), (uint8_t)INDURTDB_LIMIT_LOW);
+        close(fd);
+    }
+
+    irtcli_close(&c);
+    p.stop();
+}
+
+/* 11. v3.7 主题A T1：RBE（Reporting By Exception）门控通知 */
+TEST(ProtoV2, RbeSuppressesNotify)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("rbe", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    /* 订阅者连接 */
+    int fd_sub = connect_to(p.sock);
+    ASSERT_GE(fd_sub, 0);
+    rtdbd_sub_req_t sub; memset(&sub, 0, sizeof(sub)); sub.point_id = 10;
+    {
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_sub, RTDBD_OP_SUBSCRIBE, &sub, sizeof(sub), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    /* 写者连接：配置绝对死区=10，启用 RBE */
+    {
+        irtcli_t c;
+        ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+        indurtdb_meta_t m; memset(&m, 0, sizeof(m));
+        m.deadband = 10.0f;
+        m.flags    = INDURTDB_META_FLAG_DEADBAND;
+        ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK);
+        irtcli_close(&c);
+    }
+
+    /* 计数订阅者收到的 NOTIFY 帧数（每帧 = resp_hdr(12) + notify_t(32)），并排空 */
+    auto count_notify = [&](int timeout_ms) -> int {
+        int n = 0;
+        struct pollfd pfd; pfd.fd = fd_sub; pfd.events = POLLIN;
+        while (true) {
+            if (poll(&pfd, 1, timeout_ms) <= 0) break;
+            uint8_t buf[12 + 32];
+            ssize_t got = 0;
+            while (got < (ssize_t)sizeof(buf)) {
+                ssize_t k = recv(fd_sub, buf + got, sizeof(buf) - (size_t)got, 0);
+                if (k <= 0) break;
+                got += k;
+            }
+            if (got == (ssize_t)sizeof(buf)) n++;
+            else break;
+        }
+        return n;
+    };
+
+    auto write_val = [&](int32_t v) {
+        int fd_w = connect_to(p.sock);
+        rtdbd_write_req_t w; memset(&w, 0, sizeof(w));
+        w.point_id = 10; w.type = (uint8_t)INDURTDB_TYPE_INT32;
+        w.value_bits = (uint64_t)(int32_t)v;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_w, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+        close(fd_w);
+    };
+
+    write_val(0);   /* 首值必发 */
+    EXPECT_EQ(count_notify(300), 1);
+    write_val(5);   /* delta 5 <= 死区10，抑制 */
+    EXPECT_EQ(count_notify(300), 0);
+    write_val(20);  /* delta 20 > 死区10，触发 */
+    EXPECT_EQ(count_notify(300), 1);
+
+    close(fd_sub);
+    p.stop();
+}
+
+/* 12. v3.7 主题A：默认行为零变更（flags=0 → 每次写都通知，无 RBE/EUR 抑制） */
+TEST(ProtoV2, NotifyDefaultUnchanged)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("defnotify", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd_sub = connect_to(p.sock);
+    ASSERT_GE(fd_sub, 0);
+    rtdbd_sub_req_t sub; memset(&sub, 0, sizeof(sub)); sub.point_id = 10;
+    {
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_sub, RTDBD_OP_SUBSCRIBE, &sub, sizeof(sub), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    /* flags=0：连续小幅写也应每次都通知 */
+    auto count_notify = [&](int timeout_ms) -> int {
+        int n = 0;
+        struct pollfd pfd; pfd.fd = fd_sub; pfd.events = POLLIN;
+        while (true) {
+            if (poll(&pfd, 1, timeout_ms) <= 0) break;
+            uint8_t buf[12 + 32];
+            ssize_t got = 0;
+            while (got < (ssize_t)sizeof(buf)) {
+                ssize_t k = recv(fd_sub, buf + got, sizeof(buf) - (size_t)got, 0);
+                if (k <= 0) break;
+                got += k;
+            }
+            if (got == (ssize_t)sizeof(buf)) n++;
+            else break;
+        }
+        return n;
+    };
+    auto write_val = [&](int32_t v) {
+        int fd_w = connect_to(p.sock);
+        rtdbd_write_req_t w; memset(&w, 0, sizeof(w));
+        w.point_id = 10; w.type = (uint8_t)INDURTDB_TYPE_INT32;
+        w.value_bits = (uint64_t)(int32_t)v;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_w, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+        close(fd_w);
+    };
+
+    write_val(1);  EXPECT_EQ(count_notify(300), 1);
+    write_val(2);  EXPECT_EQ(count_notify(300), 1); /* flags=0 仍通知 */
+    write_val(3);  EXPECT_EQ(count_notify(300), 1);
+
+    close(fd_sub);
+    p.stop();
+}
+
+/* 13. v3.7 主题A T1：仅启 EUR（无死区）→ 区间内变化抑制通知，仅跨量程边界才通知 */
+TEST(ProtoV2, NotifyEurCrossing)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("eurcross", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd_sub = connect_to(p.sock);
+    ASSERT_GE(fd_sub, 0);
+    rtdbd_sub_req_t sub; memset(&sub, 0, sizeof(sub)); sub.point_id = 10;
+    {
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_sub, RTDBD_OP_SUBSCRIBE, &sub, sizeof(sub), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    { /* 仅启 EUR，eur 0..100 */
+        irtcli_t c;
+        ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+        irtcli_set_async(&c, false);
+        indurtdb_meta_t m; memset(&m, 0, sizeof(m));
+        m.eur_min = 0.0; m.eur_max = 100.0;
+        m.flags = INDURTDB_META_FLAG_EUR;
+        ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK);
+        irtcli_close(&c);
+    }
+
+    auto count_notify = [&](int timeout_ms) -> int {
+        int n = 0;
+        struct pollfd pfd; pfd.fd = fd_sub; pfd.events = POLLIN;
+        while (true) {
+            if (poll(&pfd, 1, timeout_ms) <= 0) break;
+            uint8_t buf[12 + 32];
+            ssize_t got = 0;
+            while (got < (ssize_t)sizeof(buf)) {
+                ssize_t k = recv(fd_sub, buf + got, sizeof(buf) - (size_t)got, 0);
+                if (k <= 0) break;
+                got += k;
+            }
+            if (got == (ssize_t)sizeof(buf)) n++;
+            else break;
+        }
+        return n;
+    };
+    auto write_val = [&](int32_t v) {
+        int fd_w = connect_to(p.sock);
+        rtdbd_write_req_t w; memset(&w, 0, sizeof(w));
+        w.point_id = 10; w.type = (uint8_t)INDURTDB_TYPE_INT32;
+        w.value_bits = (uint64_t)(int32_t)v;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_w, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+        close(fd_w);
+    };
+
+    write_val(50);  EXPECT_EQ(count_notify(300), 1); /* 首值必发 */
+    write_val(80);  EXPECT_EQ(count_notify(300), 0); /* 区间内变化：抑制 */
+    write_val(150); EXPECT_EQ(count_notify(300), 1); /* 跨 HIGH 边界：通知 */
+    write_val(80);  EXPECT_EQ(count_notify(300), 1); /* 回到区间内（HIGH→NONE）：通知 */
+
+    close(fd_sub);
+    p.stop();
+}
+
+/* 14. v3.7 主题A T1：百分比死区门控（阈值 = deadband% × 量程） */
+TEST(ProtoV2, NotifyDeadbandPercent)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("dbpct", policy_for_uid((unsigned long)getuid()), kConfig));
+
+    int fd_sub = connect_to(p.sock);
+    ASSERT_GE(fd_sub, 0);
+    rtdbd_sub_req_t sub; memset(&sub, 0, sizeof(sub)); sub.point_id = 10;
+    {
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_sub, RTDBD_OP_SUBSCRIBE, &sub, sizeof(sub), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    { /* 百分比死区：deadband=10, eur 0..100 → 阈值 = 10%×100 = 10 */
+        irtcli_t c;
+        ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+        irtcli_set_async(&c, false);
+        indurtdb_meta_t m; memset(&m, 0, sizeof(m));
+        m.eur_min = 0.0; m.eur_max = 100.0; m.deadband = 10.0f;
+        m.flags = INDURTDB_META_FLAG_DEADBAND | INDURTDB_META_FLAG_DEADBAND_PCT;
+        ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK);
+        irtcli_close(&c);
+    }
+
+    auto count_notify = [&](int timeout_ms) -> int {
+        int n = 0;
+        struct pollfd pfd; pfd.fd = fd_sub; pfd.events = POLLIN;
+        while (true) {
+            if (poll(&pfd, 1, timeout_ms) <= 0) break;
+            uint8_t buf[12 + 32];
+            ssize_t got = 0;
+            while (got < (ssize_t)sizeof(buf)) {
+                ssize_t k = recv(fd_sub, buf + got, sizeof(buf) - (size_t)got, 0);
+                if (k <= 0) break;
+                got += k;
+            }
+            if (got == (ssize_t)sizeof(buf)) n++;
+            else break;
+        }
+        return n;
+    };
+    auto write_val = [&](int32_t v) {
+        int fd_w = connect_to(p.sock);
+        rtdbd_write_req_t w; memset(&w, 0, sizeof(w));
+        w.point_id = 10; w.type = (uint8_t)INDURTDB_TYPE_INT32;
+        w.value_bits = (uint64_t)(int32_t)v;
+        rtdbd_resp_hdr_t resp; std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd_w, RTDBD_OP_WRITE, &w, sizeof(w), &resp, &body));
+        EXPECT_EQ(resp.status, RTDBD_ST_OK);
+        close(fd_w);
+    };
+
+    write_val(0);  EXPECT_EQ(count_notify(300), 1); /* 首值必发 */
+    write_val(5);  EXPECT_EQ(count_notify(300), 0); /* delta 5 ≤ 阈值10：抑制 */
+    write_val(20); EXPECT_EQ(count_notify(300), 1); /* delta 15 > 阈值10：通知 */
+
+    close(fd_sub);
+    p.stop();
+}
+
+int main(int argc, char** argv)
+{
+    ::testing::InitGoogleTest(&argc, argv);
+    if (std::string(RTDBD_BIN).empty()) {
+        fprintf(stderr, "RTDBD_BIN not defined\n");
+        return 1;
+    }
+    return RUN_ALL_TESTS();
+}

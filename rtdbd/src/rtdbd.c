@@ -25,11 +25,27 @@
 
 #include "audit.h"
 #include "policy.h"
+#include "logbuf.h"
+#include "rbe.h"
+
+/* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
+ * 否则 rtdbd.c 的 memcpy(&m, &s.meta, sizeof(m)) 会越界/截断（protocol.h:108）。 */
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
+               "rtdbd_meta_payload_t must match indurtdb_meta_t size");
 
 #define RTDBD_MAX_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
 static volatile sig_atomic_t g_stop = 0;
+
+/* 监控 LIST 用的实例点位上限与分片缓冲（rtdbd 串行处理，静态缓冲安全） */
+static uint32_t g_max_points = 0;
+#define RTDBD_LIST_CHUNK 1024u
+static uint8_t g_list_buf[RTDBD_LIST_CHUNK * sizeof(rtdbd_point_info_t)];
+
+/* 运行日志环形缓冲 + GET_LOG 导出缓冲（定长，无堆分配） */
+static irt_logbuf_t      g_logbuf;
+static rtdbd_log_entry_t g_log_out[RTDBD_LOG_CAPACITY];
 
 static void on_signal(int sig)
 {
@@ -81,12 +97,14 @@ typedef struct {
     int      fd;
     uint32_t subs[RTDBD_SUB_MAX];
     uint32_t nsubs;
+    rbe_state_t rbe;   /* 每连接 RBE 状态（v3.7 主题A T1） */
 } rtdbd_conn_t;
 
 static void conn_init(rtdbd_conn_t* c)
 {
     c->fd = -1;
     c->nsubs = 0;
+    rbe_state_init(&c->rbe);
 }
 
 static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
@@ -107,6 +125,7 @@ static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id)
 
 static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
 {
+    rbe_clear(&c->rbe, point_id); /* 退订同步清 RBE 状态（重新订阅首值必发） */
     for (uint32_t i = 0; i < c->nsubs; ++i) {
         if (c->subs[i] != point_id) continue;
         c->subs[i] = c->subs[c->nsubs - 1];
@@ -115,8 +134,10 @@ static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
     }
 }
 
-/* 写成功后向所有订阅了该点位的连接广播变更通知（T4） */
-static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t* w)
+/* 写成功后向所有订阅了该点位的连接广播变更通知（T4）。
+ * v3.7 主题A T1：经 RBE 门控——死区未越过则抑制本次通知（值仍已落库）。 */
+static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t* w,
+                             const indurtdb_meta_t* meta)
 {
     rtdbd_req_hdr_t  nh;
     rtdbd_notify_t   nt;
@@ -135,10 +156,16 @@ static void notify_broadcast(rtdbd_conn_t* conns, int n, const rtdbd_write_req_t
     nt.source_ts_ns = w->source_ts_ns;
     nt.timestamp_ns = 0; /* 由服务端在广播前补齐 */
 
+    /* 当前值（double）用于 RBE 死区比较 */
+    double v = indurtdb_value_to_double(w->type, &w->value_bits);
+
     for (int i = 0; i < n; ++i) {
         rtdbd_conn_t* c = &conns[i];
         if (c->fd < 0) continue;
         if (!conn_has_sub(c, w->point_id)) continue;
+
+        /* RBE 门控：死区未越过则抑制本次通知 */
+        if (!rbe_decide(&c->rbe, w->point_id, v, meta)) continue;
 
         /* 取当前值的时间戳，保证通知携带最新入库时刻 */
         indurtdb_point_t pt;
@@ -165,31 +192,81 @@ static int peer_cred(int fd, uint32_t* pid, uint32_t* uid)
     return 0;
 }
 
-/* 执行一次点位写入（携带采集时刻）。返回 0 成功，非 0 失败
+/* 执行一次点位写入（携带采集时刻）。返回 0 成功，非 0 失败。
+ * 同步计算 EURange 量程位并经质量感知入口落值；meta 在返回时填充（供通知侧 RBE 门控复用）。
  *
- * 采集时刻由客户端经协议传入；为 0 表示"未提供"，
- * 库侧语义退化为仅记录入库时刻（与旧行为一致）。
- */
-static int do_write(const rtdbd_write_req_t* w)
+ * 采集时刻由客户端经协议传入；为 0 表示"未提供"，库侧退化为仅记录入库时刻。 */
+static int do_write(const rtdbd_write_req_t* w, indurtdb_meta_t* meta)
 {
-    switch (w->type) {
-    case RTDBD_TYPE_BOOL:
-        return indurtdb_write_bool_ts(w->point_id, (w->value_bits & 1u) ? true : false,
-                                      w->source_ts_ns);
-    case RTDBD_TYPE_INT32:
-        return indurtdb_write_int32_ts(w->point_id, (int32_t)w->value_bits,
-                                       w->source_ts_ns);
-    case RTDBD_TYPE_DOUBLE: {
-        double d = 0.0;
-        memcpy(&d, &w->value_bits, sizeof(d));
-        return indurtdb_write_double_ts(w->point_id, d, w->source_ts_ns);
+    memset(meta, 0, sizeof(*meta));
+
+    /* 不支持的类型（STRING 受 8B 负载限制等）→ BAD_REQUEST */
+    if (w->type == RTDBD_TYPE_STRING || w->type > RTDBD_TYPE_FLOAT) return -99;
+
+    /* 取该点 meta（rtdbd 作为写权威，读 meta 属合理开销；核心热路径零 meta 读不变式保持） */
+    uint8_t lim = INDURTDB_LIMIT_NONE;
+    if (indurtdb_get_meta(w->point_id, meta) == 0) {
+        double v = indurtdb_value_to_double(w->type, &w->value_bits);
+        lim = indurtdb_eurange_limit(!!(meta->flags & INDURTDB_META_FLAG_EUR),
+                                     meta->eur_min, meta->eur_max, v);
     }
-    default:
-        return -99; /* 不支持的类型 */
-    }
+
+    /* 一次性落值 + 量程位（quality 基础码恒为 GOOD） */
+    uint8_t quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_GOOD, lim);
+    return indurtdb_write_quality_ts(w->point_id, w->type, &w->value_bits,
+                                     w->source_ts_ns, quality);
 }
 
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
+/* ---- v3.5 监控只读通道：GET / LIST（读免鉴权） ---- */
+
+/* 读取单点当前值快照；成功返回 0，失败（id 无效/未注册）返回 -1 */
+static int do_get(uint32_t id, rtdbd_get_resp_t* out)
+{
+    indurtdb_point_t pt;
+    if (indurtdb_read_point(id, &pt) != 0) return -1;
+    if (pt.name[0] == '\0') return -1; /* 未注册点位不可读，与 LIST 一致 */
+
+    memset(out, 0, sizeof(*out));
+    out->point_id     = id;
+    out->type         = pt.type;
+    out->quality      = pt.quality;
+    memcpy(&out->value_bits, &pt.value, sizeof(out->value_bits));
+    if (pt.type == INDURTDB_TYPE_STRING)
+        memcpy(out->value_str, pt.value.str, sizeof(out->value_str));
+    out->timestamp_ns   = pt.timestamp_ns;
+    out->source_ts_ns   = pt.source_timestamp_ns;
+    return 0;
+}
+
+/* 枚举已注册点位（name[0]!='\0' 视为已注册）。
+ * 从 offset(id) 起向后扫描，最多收集 max 个已注册点（max=0 表示上限 CHUNK 个），
+ * 结果写入 buf，*out_len 返回字节数。分页时 offset 为起始 id，max 为返回条数上限。 */
+static void do_list(uint32_t max_n, uint32_t offset, uint8_t* buf, size_t* out_len)
+{
+    *out_len = 0;
+    if (offset >= g_max_points) return;
+
+    uint32_t cap = (max_n == 0) ? RTDBD_LIST_CHUNK : max_n;
+    if (cap > RTDBD_LIST_CHUNK) cap = RTDBD_LIST_CHUNK;
+
+    rtdbd_point_info_t* arr = (rtdbd_point_info_t*)buf;
+    uint32_t n = 0;
+    for (uint32_t id = offset; id < g_max_points && n < cap; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_read_point(id, &pt) != 0) continue;
+        if (pt.name[0] == '\0') continue; /* 未注册点位跳过 */
+
+        rtdbd_point_info_t* e = &arr[n++];
+        e->point_id = id;
+        e->type     = pt.type;
+        e->access   = pt.access;
+        memset(e->name, 0, sizeof(e->name));
+        memcpy(e->name, pt.name, sizeof(e->name) - 1);
+    }
+    *out_len = (size_t)n * sizeof(rtdbd_point_info_t);
+}
+
 static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
                           rtdbd_conn_t* conn, rtdbd_conn_t* conns, int nconns)
 {
@@ -247,7 +324,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             return send_all(fd, &resp, sizeof(resp));
         }
 
-        int rc = do_write(&w);
+        indurtdb_meta_t m;
+        int rc = do_write(&w, &m);
         if (rc == -99) {
             resp.status      = RTDBD_ST_BAD_REQUEST;
             resp.payload_len = 0;
@@ -264,8 +342,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         resp.payload_len = 0;
         if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
 
-        /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了） */
-        notify_broadcast(conns, nconns, &w);
+        /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了）；RBE 门控在内部 */
+        notify_broadcast(conns, nconns, &w, &m);
         return 0;
     }
 
@@ -284,6 +362,284 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
         resp.status      = (rc == 0) ? RTDBD_ST_OK : RTDBD_ST_INTERNAL;
         resp.payload_len = 0;
         return send_all(fd, &resp, sizeof(resp));
+    }
+
+    /* ---- v3.4 T9：按名查找（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_FIND_BY_NAME) {
+        rtdbd_find_req_t f;
+        if (req.payload_len != sizeof(f) || recv_all(fd, &f, sizeof(f)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+        f.name[sizeof(f.name) - 1] = '\0';
+
+        uint32_t found_id = 0;
+        int rc = indurtdb_find_by_name(f.name, &found_id);
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        rtdbd_find_resp_t r;
+        memset(&r, 0, sizeof(r));
+        r.point_id = found_id;
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(r);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &r, sizeof(r));
+    }
+
+    /* ---- v3.4 T9：读取元数据（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET_META) {
+        rtdbd_meta_req_t m;
+        if (req.payload_len != sizeof(m) || recv_all(fd, &m, sizeof(m)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        indurtdb_meta_t meta;
+        memset(&meta, 0, sizeof(meta));
+        int rc = indurtdb_get_meta(m.point_id, &meta);
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc == INDURTDB_ERR_ARG) {   /* 越界 id 属请求错误，非"未找到" */
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(meta);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &meta, sizeof(meta));
+    }
+
+    /* ---- v3.4 T9：写入元数据（管控写，须鉴权） ---- */
+    if (req.opcode == RTDBD_OP_SET_META) {
+        rtdbd_set_meta_req_t s;
+        if (req.payload_len != sizeof(s) || recv_all(fd, &s, sizeof(s)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        /* 鉴权：deny by default；元数据写入属管控操作 */
+        if (!irt_policy_allows(policy, uid, s.point_id)) {
+            resp.status      = RTDBD_ST_DENIED;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        indurtdb_meta_t m;
+        memcpy(&m, &s.meta, sizeof(m)); /* 线结构 → 库结构（布局一致） */
+        int rc = indurtdb_set_meta(s.point_id, &m);
+        if (rc == INDURTDB_ERR_NOT_FOUND) {
+            resp.status      = RTDBD_ST_NOT_FOUND;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc == INDURTDB_ERR_ARG) {   /* 越界 id 属请求错误，非"未找到" */
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        if (rc != 0) {
+            resp.status      = RTDBD_ST_INTERNAL;
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        irt_audit_record(audit, pid, uid, s.point_id, now_ns());
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    /* ---- v3.6 管控写通道：点位 CRUD（管控写，须鉴权，deny by default） ---- */
+    if (req.opcode == RTDBD_OP_CREATE_POINT) {
+        rtdbd_create_req_t c;
+        if (req.payload_len != sizeof(c) || recv_all(fd, &c, sizeof(c)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, c.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        c.name[sizeof(c.name) - 1] = '\0';
+        int rc = indurtdb_create_point(c.point_id, c.name, c.type, c.access);
+        if (rc == INDURTDB_ERR_ARG || rc == INDURTDB_ERR_FULL)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, c.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "create point id=%u name=%s (uid=%u)", c.point_id, c.name, uid);
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    if (req.opcode == RTDBD_OP_DELETE_POINT) {
+        rtdbd_delete_req_t d;
+        if (req.payload_len != sizeof(d) || recv_all(fd, &d, sizeof(d)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, d.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        int rc = indurtdb_delete_point(d.point_id);
+        if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc == INDURTDB_ERR_ARG)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, d.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "delete point id=%u (uid=%u)", d.point_id, uid);
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    if (req.opcode == RTDBD_OP_RENAME_POINT) {
+        rtdbd_rename_req_t r;
+        if (req.payload_len != sizeof(r) || recv_all(fd, &r, sizeof(r)) != 0) {
+            resp.status = RTDBD_ST_BAD_REQUEST; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        uint32_t pid = 0, uid = 0;
+        if (peer_cred(fd, &pid, &uid) != 0) {
+            resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp)); return 1;
+        }
+        if (!irt_policy_allows(policy, uid, r.point_id)) {
+            resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+        r.name[sizeof(r.name) - 1] = '\0';
+        int rc = indurtdb_rename_point(r.point_id, r.name);
+        if (rc == INDURTDB_ERR_NOT_FOUND)
+            resp.status = RTDBD_ST_NOT_FOUND;
+        else if (rc == INDURTDB_ERR_ARG || rc == INDURTDB_ERR_FULL)
+            resp.status = RTDBD_ST_BAD_REQUEST;
+        else if (rc != 0)
+            resp.status = RTDBD_ST_INTERNAL;
+        else {
+            irt_audit_record(audit, pid, uid, r.point_id, now_ns());
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "rename point id=%u -> %s (uid=%u)", r.point_id, r.name, uid);
+            resp.status = RTDBD_ST_OK;
+        }
+        resp.payload_len = 0;
+        return send_all(fd, &resp, sizeof(resp));
+    }
+
+    /* ---- v3.5 监控：读取单点当前值（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET) {
+        rtdbd_get_req_t g;
+        if (req.payload_len != sizeof(g) || recv_all(fd, &g, sizeof(g)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        rtdbd_get_resp_t r;
+        if (do_get(g.point_id, &r) != 0) {
+            resp.status      = RTDBD_ST_NOT_FOUND; /* 越界/未注册均按未找到 */
+            resp.payload_len = 0;
+            return send_all(fd, &resp, sizeof(resp));
+        }
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)sizeof(r);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        return send_all(fd, &r, sizeof(r));
+    }
+
+    /* ---- v3.5 监控：枚举已注册点位（读，无需鉴权） ---- */
+    if (req.opcode == RTDBD_OP_LIST) {
+        rtdbd_list_req_t l;
+        if (req.payload_len != sizeof(l) || recv_all(fd, &l, sizeof(l)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+
+        size_t len = 0;
+        do_list(l.max, l.offset, g_list_buf, &len);
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = (uint32_t)len;
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        if (len > 0 && send_all(fd, g_list_buf, len) != 0) return 1;
+        return 0;
+    }
+
+    /* ---- v3.6 运行日志（只读；与 AUDIT_DUMP 同类，无点位维度故不按 point 鉴权） ---- */
+    if (req.opcode == RTDBD_OP_GET_LOG) {
+        rtdbd_log_req_t q;
+        if (req.payload_len != sizeof(q) || recv_all(fd, &q, sizeof(q)) != 0) {
+            resp.status      = RTDBD_ST_BAD_REQUEST;
+            resp.payload_len = 0;
+            (void)send_all(fd, &resp, sizeof(resp));
+            return 1;
+        }
+        uint32_t cap = (q.max == 0 || q.max > RTDBD_LOG_CAPACITY) ? RTDBD_LOG_CAPACITY : q.max;
+        uint32_t n = irt_logbuf_dump(&g_logbuf, g_log_out, cap);
+
+        resp.status      = RTDBD_ST_OK;
+        resp.payload_len = n * (uint32_t)sizeof(rtdbd_log_entry_t);
+        if (send_all(fd, &resp, sizeof(resp)) != 0) return 1;
+        if (n > 0 && send_all(fd, g_log_out, resp.payload_len) != 0) return 1;
+        return 0;
     }
 
     resp.status      = RTDBD_ST_BAD_REQUEST;
@@ -329,8 +685,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
     }
     wargv[n] = NULL;
 
-    printf("rtdbd supervisor started\n");
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor started");
 
     for (;;) {
         if (g_stop) break;
@@ -346,8 +701,7 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
         }
 
         write_pidfile(pidfile, child);
-        printf("rtdbd worker pid=%d\n", (int)child);
-        fflush(stdout);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd worker pid=%d", (int)child);
 
         int status = 0;
         pid_t r = waitpid(child, &status, 0);
@@ -358,14 +712,13 @@ static int supervise_loop(int argc, char** argv, const char* pidfile)
             break;
         }
 
-        printf("rtdbd: worker %d exited, respawning\n", (int)child);
-        fflush(stdout);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_WARN,
+                        "rtdbd: worker %d exited, respawning", (int)child);
         usleep(1000); /* 极短退避，优先保证快速恢复 */
     }
 
     if (pidfile) unlink(pidfile);
-    printf("rtdbd supervisor stopped\n");
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor stopped");
     return 0;
 }
 
@@ -374,6 +727,7 @@ int main(int argc, char** argv)
     const char* sock_path  = "/run/indurtdb/default.sock";
     const char* instance   = "default";
     const char* policy_path = NULL;
+    const char* config_path = NULL;
     uint32_t    max_points = 10000;
     uint32_t    max_subs   = 32;
     bool        supervise  = false;
@@ -383,6 +737,7 @@ int main(int argc, char** argv)
         {"socket",     required_argument, 0, 's'},
         {"instance",   required_argument, 0, 'i'},
         {"policy",     required_argument, 0, 'p'},
+        {"config",     required_argument, 0, 'c'},
         {"max-points", required_argument, 0, 'm'},
         {"max-subs",   required_argument, 0, 'b'},
         {"supervise",  no_argument,       0, 'S'},
@@ -391,11 +746,12 @@ int main(int argc, char** argv)
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "s:i:p:m:b:SP:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:SP:", long_opts, NULL)) != -1) {
         switch (c) {
         case 's': sock_path = optarg; break;
         case 'i': instance = optarg; break;
         case 'p': policy_path = optarg; break;
+        case 'c': config_path = optarg; break;
         case 'm': max_points = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'b': max_subs = (uint32_t)strtoul(optarg, NULL, 10); break;
         case 'S': supervise = true; break;
@@ -403,6 +759,9 @@ int main(int argc, char** argv)
         default: break;
         }
     }
+
+    g_max_points = max_points; /* 供监控 LIST 遍历点位表使用 */
+    irt_logbuf_init(&g_logbuf);
 
     if (supervise) {
         return supervise_loop(argc, argv, pidfile);
@@ -415,7 +774,8 @@ int main(int argc, char** argv)
     irt_policy_t policy;
     irt_policy_init(&policy);
     if (policy_path && irt_policy_load(&policy, policy_path) != 0) {
-        fprintf(stderr, "rtdbd: failed to load policy: %s\n", policy_path);
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                        "rtdbd: failed to load policy: %s", policy_path);
         return 1;
     }
 
@@ -423,8 +783,18 @@ int main(int argc, char** argv)
     irt_audit_init(&audit);
 
     if (indurtdb_initialize(instance, max_points, max_subs) != 0) {
-        fprintf(stderr, "rtdbd: indurtdb_initialize failed: %s\n", indurtdb_get_last_error());
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                        "rtdbd: indurtdb_initialize failed: %s", indurtdb_get_last_error());
         return 1;
+    }
+
+    /* 注册点位名 / 元数据区初始化（写入共享索引，供 FIND_BY_NAME 端到端可用）。
+     * 失败不致命：仅告警，守护进程继续提供写/读能力。 */
+    if (config_path) {
+        if (indurtdb_load_config(config_path) != 0) {
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                            "rtdbd: load config failed: %s", indurtdb_get_last_error());
+        }
     }
 
     unlink(sock_path);
@@ -446,8 +816,8 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    printf("rtdbd listening on %s (instance=%s)\n", sock_path, instance);
-    fflush(stdout);
+    irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                    "rtdbd listening on %s (instance=%s)", sock_path, instance);
 
     rtdbd_conn_t conns[RTDBD_MAX_CLIENTS];
     for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_init(&conns[i]);

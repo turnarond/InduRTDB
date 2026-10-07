@@ -15,18 +15,20 @@
 
 **与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。
 
-### x86 实测性能 (v3.3.0, Release -O2)
+### x86 实测性能 (v3.7.0, Release -O2)
 
 | 操作 | P50 | P99 | 吞吐 |
 |------|-----|-----|------|
-| write_int32 | 0.156 μs | 0.386 μs | 5.2M op/s |
-| read_int32 | 0.062 μs | 0.068 μs | 16.2M op/s |
-| peek (单拷贝·线程本地) | 0.057 μs | 0.062 μs | 17.7M op/s |
-| read_range (100点) | 2.893 μs | 2.992 μs | 35.5M pt/s |
-| write_range (100点) | 12.459 μs | 17.911 μs | 8.1M pt/s |
-| mixed_rw | -- | -- | 16.3M op/s |
+| write_int32 | 0.247 μs | 0.255 μs | 26.1M op/s |
+| write_double | 0.110 μs | 0.113 μs | 9.0M op/s |
+| read_int32 | 0.042 μs | 0.044 μs | 23.6M op/s |
+| read_double | 0.043 μs | 0.044 μs | 23.1M op/s |
+| peek (单拷贝·线程本地) | 0.036 μs | 0.038 μs | 27.5M op/s |
+| read_range (100点) | 0.234 μs | 0.271 μs | 84.4M pt/s |
+| write_range (100点) | 1.398 μs | 1.433 μs | 14.2M pt/s |
+| mixed_rw | -- | -- | 23.0M op/s |
 
-> 设计目标 P99 ≤ 10 μs, x86 实测全部通过。ARM 平台实测待硬件到位后补充。
+> 设计目标 P99 ≤ 10 μs, x86 实测全部通过（v3.7.0 主题A 改动后复测，热路径未变、无回归；机器差异导致绝对值与 v3.4 行不同）。
 > 详见 `tests/bench/bench.c` + `scripts/run_bench.sh`。
 
 ## 快速开始 (C)

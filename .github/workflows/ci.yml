@@ -32,6 +32,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---- API 计数门禁（防文档漂移：头文件与 SDK 手册计数须一致） ----
+      - name: API count guard
+        run: python3 scripts/check_api_count.py
+
       # ---- 依赖 ----
       - name: Install dependencies
         run: |
@@ -54,9 +58,17 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -j$(nproc)
 
-      # ---- 端到端混合角色（v3.3 T6） ----
+      # ---- 端到端混合角色（v3.3 T6 + v3.4 T9/T10） ----
       - name: run_e2e.sh
         run: E2E_BUILD_DIR=build bash scripts/run_e2e.sh
+
+      # ---- 诊断工具（T8）：smoke / leak 纳入 CI ----
+      - name: irt_diag tooling
+        run: |
+          HARNESS="$PWD/build/tools/irt_diag/irt_diag_harness"
+          cd tools/irt_diag
+          python3 -m irt_diag.cli smoke --harness "$HARNESS" --id ci_smoke
+          python3 -m irt_diag.cli leak  --harness "$HARNESS" --id ci_leak --cycles 10
 
       # ---- 外部消费验证 ----
       - name: verify_consume.sh

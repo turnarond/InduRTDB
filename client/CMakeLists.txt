@@ -7,6 +7,7 @@ add_library(irtcli STATIC
 
 target_include_directories(irtcli PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/include
 )
 target_include_directories(irtcli PRIVATE
     ${PROJECT_SOURCE_DIR}/rtdbd/include

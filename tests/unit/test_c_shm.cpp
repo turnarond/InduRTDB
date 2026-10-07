@@ -37,12 +37,15 @@ TEST_F(CShmTest, InitOwner) {
     EXPECT_EQ(hdr->max_points, 64u);
     EXPECT_EQ(hdr->max_subscribers, 8u);
 
-    /* 地址计算: points 在 header 之后, subscribers 在 points 之后 */
+    /* 地址计算: 一律按 Header 中的区段偏移, 不按 sizeof 硬算。
+     * v3.4 布局 v2 起点位区与心跳区之间还有索引区(以及后续元数据区)。 */
     EXPECT_EQ((char*)irt_shm_points(&shm_) - (char*)hdr,
-              (ptrdiff_t)sizeof(irt_header_t));
-    EXPECT_EQ((char*)irt_shm_subscribers(&shm_)
-              - (char*)irt_shm_points(&shm_),
-              (ptrdiff_t)(64 * sizeof(indurtdb_point_t)));
+              (ptrdiff_t)hdr->off_points);
+    EXPECT_EQ((char*)irt_shm_subscribers(&shm_) - (char*)hdr,
+              (ptrdiff_t)hdr->off_subs);
+    /* 心跳区起点 > 点位区末尾: 差值即索引区(当前) + 元数据区(后续) */
+    EXPECT_GT((size_t)hdr->off_subs,
+              (size_t)hdr->off_points + 64u * sizeof(indurtdb_point_t));
 }
 
 TEST_F(CShmTest, AttachNotOwner) {
@@ -79,9 +82,11 @@ TEST_F(CShmTest, InitZeroSubscribers) {
     irt_header_t* hdr = irt_shm_header(&shm_);
     EXPECT_EQ(hdr->max_subscribers, 0u);
 
-    /* 总大小仅 header + points */
+    /* 总大小 = header + points + 索引区 + 元数据区(均定长, 随段预分配) */
     EXPECT_EQ(irt_shm_total_size(16, 0),
-              sizeof(irt_header_t) + 16 * sizeof(indurtdb_point_t));
+              sizeof(irt_header_t) + 16 * sizeof(indurtdb_point_t)
+              + irt_layout_index_size(16)
+              + irt_layout_meta_size(16));
 }
 
 TEST_F(CShmTest, TotalSizeFormula) {
@@ -89,7 +94,11 @@ TEST_F(CShmTest, TotalSizeFormula) {
     size_t sz = irt_shm_total_size(100, 16);
     EXPECT_EQ(sz, sizeof(irt_header_t)
                 + 100 * sizeof(indurtdb_point_t)
+                + irt_layout_index_size(100)
+                + irt_layout_meta_size(100)
                 + 16  * sizeof(irt_subscriber_entry_t));
-    /* IRT_STATIC_ASSERT 已保证各 struct 大小: 64 + 100*128 + 16*16 = 64+12800+256 */
-    EXPECT_EQ(sz, 64u + 12800u + 256u);
+    /* IRT_STATIC_ASSERT 已保证各 struct 大小; 索引区 = 桶数(256) × 8B = 2048,
+     * 元数据区 = 100 × 32B = 3200
+     * v3.4 布局 v2: 128 + 100*128 + 2048(index) + 3200(meta) + 16*16(subs) */
+    EXPECT_EQ(sz, 128u + 12800u + 2048u + 3200u + 256u);
 }

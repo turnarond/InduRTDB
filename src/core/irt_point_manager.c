@@ -24,9 +24,9 @@ bool irt_pm_validate_id(const irt_pm_t* pm, uint32_t id) {
     return hdr && id < hdr->max_points;
 }
 
-static int pm_write_impl(irt_pm_t* pm, uint32_t id,
-                          uint8_t type, const void* value,
-                          uint64_t source_ts_ns) {
+static int pm_write_impl_q(irt_pm_t* pm, uint32_t id,
+                           uint8_t type, const void* value,
+                           uint64_t source_ts_ns, uint8_t quality) {
     if (!irt_pm_validate_id(pm, id)) return -1;
 
     irt_header_t*      hdr = irt_shm_header(pm->shm);
@@ -45,9 +45,12 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     }
     p->type = type;
     switch (type) {
-    case INDURTDB_TYPE_BOOL:   p->value.b = *(const bool*)value;     break;
-    case INDURTDB_TYPE_INT32:  p->value.i = *(const int32_t*)value;  break;
-    case INDURTDB_TYPE_DOUBLE: p->value.d = *(const double*)value;   break;
+    case INDURTDB_TYPE_BOOL:   p->value.b = *(const bool*)value;        break;
+    case INDURTDB_TYPE_INT32:  p->value.i = *(const int32_t*)value;     break;
+    case INDURTDB_TYPE_INT64:  p->value.i64 = *(const int64_t*)value;   break;
+    case INDURTDB_TYPE_UINT32: p->value.u32 = *(const uint32_t*)value;  break;
+    case INDURTDB_TYPE_FLOAT:  p->value.f = *(const float*)value;       break;
+    case INDURTDB_TYPE_DOUBLE: p->value.d = *(const double*)value;      break;
     case INDURTDB_TYPE_STRING:
         strncpy(p->value.str, (const char*)value, 31);
         p->value.str[31] = '\0';
@@ -55,7 +58,7 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     default: break;
     }
     p->timestamp_ns = irt_time_now_ns();
-    p->quality      = INDURTDB_QUALITY_GOOD;
+    p->quality      = quality;
     /* 采集时刻：0 表示"未提供"，语义退化为仅用入库时刻（旧行为不变） */
     p->source_timestamp_ns = source_ts_ns;
 
@@ -69,6 +72,19 @@ static int pm_write_impl(irt_pm_t* pm, uint32_t id,
     return 0;
 }
 
+/* 默认写入口：强制 GOOD，保持热路径纯净、零 meta 读（v3.7 不变式）。
+ * 既有 irt_pm_write_*_ts 封装继续调用本函数，行为完全不变。 */
+static int pm_write_impl(irt_pm_t* pm, uint32_t id, uint8_t type,
+                         const void* value, uint64_t source_ts_ns) {
+    return pm_write_impl_q(pm, id, type, value, source_ts_ns, INDURTDB_QUALITY_GOOD);
+}
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用），一次性落值 + 调用方质量 */
+int irt_pm_write_quality_ts(irt_pm_t* pm, uint32_t id, uint8_t type,
+                            const void* value, uint64_t source_ts_ns, uint8_t quality) {
+    return pm_write_impl_q(pm, id, type, value, source_ts_ns, quality);
+}
+
 int irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_BOOL, &value, 0);
 }
@@ -77,6 +93,15 @@ int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value) {
 }
 int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, 0);
+}
+int irt_pm_write_int64(irt_pm_t* pm, uint32_t id, int64_t value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT64, &value, 0);
+}
+int irt_pm_write_uint32(irt_pm_t* pm, uint32_t id, uint32_t value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_UINT32, &value, 0);
+}
+int irt_pm_write_float(irt_pm_t* pm, uint32_t id, float value) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_FLOAT, &value, 0);
 }
 int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, 0);
@@ -91,6 +116,15 @@ int irt_pm_write_int32_ts(irt_pm_t* pm, uint32_t id, int32_t value, uint64_t sou
 }
 int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_DOUBLE, &value, source_ts_ns);
+}
+int irt_pm_write_int64_ts(irt_pm_t* pm, uint32_t id, int64_t value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_INT64, &value, source_ts_ns);
+}
+int irt_pm_write_uint32_ts(irt_pm_t* pm, uint32_t id, uint32_t value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_UINT32, &value, source_ts_ns);
+}
+int irt_pm_write_float_ts(irt_pm_t* pm, uint32_t id, float value, uint64_t source_ts_ns) {
+    return pm_write_impl(pm, id, INDURTDB_TYPE_FLOAT, &value, source_ts_ns);
 }
 int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns) {
     return pm_write_impl(pm, id, INDURTDB_TYPE_STRING, value, source_ts_ns);
@@ -198,7 +232,11 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
 
         /* 获取写锁, 标记 TIMEOUT */
         uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
-        if (seq0 & 1ULL) continue;  /* 写冲突, 跳过 */
+        if (seq0 & 1ULL) {
+            /* 让步退避后仍冲突: 该点本轮被跳过, 计入可观测计数 (issue #19 L2) */
+            __atomic_fetch_add(&hdr->scan_skipped, 1, __ATOMIC_RELAXED);
+            continue;
+        }
 
         indurtdb_point_t* p = &pts[id];
         /* 二次确认: 可能在等待写锁期间被其它线程更新了 */
@@ -210,7 +248,9 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
             continue;
         }
 
-        p->quality = INDURTDB_QUALITY_TIMEOUT;
+        /* 超时刻保留量程位（T6：量程位与可用性正交，不得被基础码覆盖） */
+        p->quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_TIMEOUT,
+                                           INDURTDB_QUALITY_LIMIT(p->quality));
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
         __atomic_fetch_add(&hdr->stats.timeouts, 1, __ATOMIC_RELAXED);

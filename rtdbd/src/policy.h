@@ -10,6 +10,10 @@
  *
  * 默认拒绝：不在任何规则内的 uid 一律拒绝（deny by default）。
  * 定长数组，无堆分配。
+ *
+ * 运维约束：策略**仅在 rtdbd 启动时加载一次**（irt_policy_load）。
+ * 运行时修改策略文件不会即时生效，须**重启 rtdbd 进程**方能应用新规则。
+ * 当前版本不提供策略热加载 / SIGHUP 重载。
  */
 #ifndef RTDBD_POLICY_H_
 #define RTDBD_POLICY_H_

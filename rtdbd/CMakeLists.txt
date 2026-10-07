@@ -7,6 +7,8 @@ add_executable(rtdbd
     src/rtdbd.c
     src/policy.c
     src/audit.c
+    src/logbuf.c
+    src/rbe.c
 )
 
 target_include_directories(rtdbd PRIVATE

@@ -22,14 +22,24 @@ void irt_pm_init(irt_pm_t* pm, irt_shm_t* shm);
 /* 写入 (成功 0, id 无效 -1, 写冲突 -2, 只读点位 -3) */
 int irt_pm_write_bool(irt_pm_t* pm, uint32_t id, bool value);
 int irt_pm_write_int32(irt_pm_t* pm, uint32_t id, int32_t value);
+int irt_pm_write_int64(irt_pm_t* pm, uint32_t id, int64_t value);
+int irt_pm_write_uint32(irt_pm_t* pm, uint32_t id, uint32_t value);
+int irt_pm_write_float(irt_pm_t* pm, uint32_t id, float value);
 int irt_pm_write_double(irt_pm_t* pm, uint32_t id, double value);
 int irt_pm_write_string(irt_pm_t* pm, uint32_t id, const char* value);
 
 /* 携带采集时刻（SourceTimestamp）的写入，source_ts_ns=0 表示未提供 */
 int irt_pm_write_bool_ts(irt_pm_t* pm, uint32_t id, bool value, uint64_t source_ts_ns);
 int irt_pm_write_int32_ts(irt_pm_t* pm, uint32_t id, int32_t value, uint64_t source_ts_ns);
+int irt_pm_write_int64_ts(irt_pm_t* pm, uint32_t id, int64_t value, uint64_t source_ts_ns);
+int irt_pm_write_uint32_ts(irt_pm_t* pm, uint32_t id, uint32_t value, uint64_t source_ts_ns);
+int irt_pm_write_float_ts(irt_pm_t* pm, uint32_t id, float value, uint64_t source_ts_ns);
 int irt_pm_write_double_ts(irt_pm_t* pm, uint32_t id, double value, uint64_t source_ts_ns);
 int irt_pm_write_string_ts(irt_pm_t* pm, uint32_t id, const char* value, uint64_t source_ts_ns);
+
+/* v3.7 主题A：质量感知写入口（写权威 rtdbd 使用），一次性落值 + 调用方质量 */
+int irt_pm_write_quality_ts(irt_pm_t* pm, uint32_t id, uint8_t type,
+                            const void* value, uint64_t source_ts_ns, uint8_t quality);
 
 /* 显式设置点位质量（如失联标记 COMM_FAILURE） */
 int irt_pm_set_quality(irt_pm_t* pm, uint32_t id, uint8_t quality);

@@ -44,16 +44,23 @@ struct Proc {
     std::string sock;
     std::string instance;
     std::string policy;
+    std::string config;
     pid_t       pid = -1;
 
-    bool start(const std::string& tag, const std::string& policy_body)
+    bool start(const std::string& tag, const std::string& policy_body,
+               const std::string& config_body = "")
     {
         sock     = "/tmp/indurtdb_e2e_" + tag + ".sock";
         instance = "e2e_test_" + tag;
         policy   = "/tmp/e2e_policy_" + tag + ".txt";
+        config   = "/tmp/e2e_config_" + tag + ".yaml";
 
-        FILE* f = fopen(policy.c_str(), "w");
-        if (f) { fwrite(policy_body.data(), 1, policy_body.size(), f); fclose(f); }
+        FILE* fp = fopen(policy.c_str(), "w");
+        if (fp) { fwrite(policy_body.data(), 1, policy_body.size(), fp); fclose(fp); }
+        if (!config_body.empty()) {
+            FILE* fc = fopen(config.c_str(), "w");
+            if (fc) { fwrite(config_body.data(), 1, config_body.size(), fc); fclose(fc); }
+        }
 
         unlink(sock.c_str());
         pid = fork();
@@ -70,13 +77,24 @@ struct Proc {
                 dup2(devnull, STDERR_FILENO);
                 if (devnull > STDERR_FILENO) close(devnull);
             }
-            execl(RTDBD_BIN, "rtdbd",
-                  "--socket", sock.c_str(),
-                  "--instance", instance.c_str(),
-                  "--policy", policy.c_str(),
-                  "--max-points", "64",
-                  "--max-subs", "8",
-                  (char*)NULL);
+            if (config_body.empty()) {
+                execl(RTDBD_BIN, "rtdbd",
+                      "--socket", sock.c_str(),
+                      "--instance", instance.c_str(),
+                      "--policy", policy.c_str(),
+                      "--max-points", "64",
+                      "--max-subs", "8",
+                      (char*)NULL);
+            } else {
+                execl(RTDBD_BIN, "rtdbd",
+                      "--socket", sock.c_str(),
+                      "--instance", instance.c_str(),
+                      "--policy", policy.c_str(),
+                      "--config", config.c_str(),
+                      "--max-points", "64",
+                      "--max-subs", "8",
+                      (char*)NULL);
+            }
             _exit(127);
         }
         return wait_socket(500);
@@ -383,6 +401,69 @@ TEST(E2E, MixedRolesNoFdLeak)
     int after = count_fds(p.pid);
     printf("[FD] before=%d after=%d\n", before, after);
     EXPECT_LE(after, before + 8) << "混合角色反复启停不应累积 fd";
+}
+
+/* 5. 混合角色端到端扩展（v3.4 T10）：客户端经 daemon 按名查找 + 写/读元数据，
+ *    控制面（核心库直读共享内存）能看到同一份元数据 —— 验证读写分离架构下
+ *    "名称 → id → 元数据"全链路，且 daemon 是唯一元数据写者。 */
+const char* kE2EConfig =
+    "points:\n"
+    "  - id: 10\n"
+    "    name: \"AHU_01.Supply_Temp\"\n"
+    "    type: int32\n"
+    "    unit: 0\n"
+    "    access: 3\n"
+    "  - id: 11\n"
+    "    name: \"Pump_Start_CMD\"\n"
+    "    type: bool\n"
+    "    access: 3\n";
+
+TEST(E2E, FindByNameAndMetaThroughDaemon)
+{
+    Proc p;
+    ASSERT_TRUE(p.start("fnm", policy_for_self(), kE2EConfig));
+
+    irtcli_t c;
+    ASSERT_EQ(irtcli_init(&c, p.sock.c_str(), 0, NULL, NULL), IRTCLI_OK);
+    irtcli_set_async(&c, false);
+    ASSERT_EQ(irtcli_connect(&c), IRTCLI_OK);
+
+    /* 按名查找（走 daemon 共享索引） */
+    uint32_t id = 0;
+    ASSERT_EQ(irtcli_find_by_name(&c, "AHU_01.Supply_Temp", &id), IRTCLI_OK);
+    EXPECT_EQ(id, 10u);
+    uint32_t missing = 0;
+    EXPECT_EQ(irtcli_find_by_name(&c, "NoSuch.Point", &missing), IRTCLI_ERR_NOT_FOUND);
+
+    /* 经 daemon 写元数据（管控写，需本机 uid 授权） */
+    indurtdb_meta_t m;
+    memset(&m, 0, sizeof(m));
+    m.eur_min = -10.0;
+    m.eur_max = 50.0;
+    m.deadband = 0.5f;
+    m.flags = 0x3u;
+    ASSERT_EQ(irtcli_set_meta(&c, 10, &m), IRTCLI_OK);
+
+    /* 经 daemon 读回 */
+    indurtdb_meta_t r;
+    memset(&r, 0, sizeof(r));
+    ASSERT_EQ(irtcli_get_meta(&c, 10, &r), IRTCLI_OK);
+    EXPECT_DOUBLE_EQ(r.eur_min, -10.0);
+    EXPECT_DOUBLE_EQ(r.eur_max, 50.0);
+    EXPECT_FLOAT_EQ(r.deadband, 0.5f);
+    EXPECT_EQ(r.flags, 0x3u);
+    irtcli_close(&c);
+
+    /* 控制面直读共享内存：应看到 daemon 写入的同一份元数据（写权威语义） */
+    ASSERT_EQ(indurtdb_initialize(p.instance.c_str(), 64, 8), 0);
+    indurtdb_meta_t ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ASSERT_EQ(indurtdb_get_meta(10, &ctrl), 0);
+    EXPECT_DOUBLE_EQ(ctrl.eur_min, -10.0);
+    EXPECT_DOUBLE_EQ(ctrl.eur_max, 50.0);
+    EXPECT_FLOAT_EQ(ctrl.deadband, 0.5f);
+    EXPECT_EQ(ctrl.flags, 0x3u);
+    indurtdb_shutdown();
 }
 
 int main(int argc, char** argv)

@@ -129,7 +129,8 @@ docker_build/
 docker_cache/
 
 # CI/CD
-.github/workflows/
+# 注意：.github/workflows/ 不再忽略 —— CI 定义随仓库版本化（CI 位置见 README/CHANGELOG），
+# 避免新工作流文件被静默排除导致 CI 漂移。
 .gitlab-ci.yml
 .travis.yml
 
@@ -148,3 +149,10 @@ demo/demo
 # 工具产物
 .omc/
 .codegraph/
+
+# Python 工具（tools/irt_migrate 等）字节码缓存，不入库
+__pycache__/
+*.pyc
+*.pyo
+.mypy_cache/
+.pytest_cache/

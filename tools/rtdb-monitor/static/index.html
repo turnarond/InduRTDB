@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>InduRTDB Monitor</title>
+  <style>
+    :root { --bg:#0f1419; --panel:#1a2230; --row:#141b26; --accent:#3da9fc; --ok:#2ecc71;
+            --warn:#e67e22; --bad:#e74c3c; --text:#e6edf3; --muted:#8b98a5; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+           background: var(--bg); color: var(--text); }
+    header { display:flex; align-items:center; gap:12px; padding:12px 18px;
+             background:var(--panel); border-bottom:1px solid #2a3548; }
+    header h1 { font-size:16px; margin:0; font-weight:600; }
+    header .meta { color:var(--muted); font-size:12px; }
+    header .spacer { flex:1; }
+    #conn { font-size:12px; padding:3px 10px; border-radius:12px; background:#2a3548; }
+    #conn.up { background:rgba(46,204,113,.18); color:var(--ok); }
+    #conn.down { background:rgba(231,76,60,.18); color:var(--bad); }
+    .toolbar { display:flex; gap:10px; padding:10px 18px; background:var(--row); align-items:center; }
+    .toolbar input { background:#0f1419; border:1px solid #2a3548; color:var(--text);
+                     padding:6px 10px; border-radius:6px; width:200px; }
+    .toolbar button { background:var(--accent); color:#06121f; border:0; padding:6px 14px;
+                      border-radius:6px; cursor:pointer; font-weight:600; }
+    .toolbar .count { color:var(--muted); font-size:12px; }
+    .wrap { padding:0 18px 24px; }
+    table { width:100%; border-collapse:collapse; font-size:13px; }
+    th, td { text-align:left; padding:8px 10px; border-bottom:1px solid #202a3a; }
+    th { color:var(--muted); font-weight:600; position:sticky; top:0; background:var(--bg); }
+    tbody tr:hover { background:#16202e; }
+    td.val { font-family: ui-monospace, "SF Mono", Menlo, monospace; }
+    .q { padding:2px 8px; border-radius:10px; font-size:11px; }
+    .q.good { background:rgba(46,204,113,.18); color:var(--ok); }
+    .q.bad  { background:rgba(231,76,60,.18); color:var(--bad); }
+    .q.other{ background:rgba(139,152,165,.18); color:var(--muted); }
+    td.set input { width:120px; background:#0f1419; border:1px solid #2a3548; color:var(--text);
+                   padding:4px 8px; border-radius:5px; }
+    td.set button { background:var(--ok); color:#06210f; border:0; padding:4px 10px;
+                    border-radius:5px; cursor:pointer; margin-left:6px; }
+    .flash { animation: flash 0.6s; }
+    @keyframes flash { from { background:rgba(61,169,252,.35); } to { background:transparent; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>InduRTDB Monitor</h1>
+    <span class="meta" id="meta">—</span>
+    <span class="spacer"></span>
+    <span id="conn" class="down">未连接</span>
+  </header>
+  <div class="toolbar">
+    <input id="filter" placeholder="过滤点名 / id ..." />
+    <button id="refresh">刷新清单</button>
+    <span class="count" id="count"></span>
+  </div>
+  <div class="wrap">
+    <table>
+      <thead>
+        <tr><th>ID</th><th>点名</th><th>类型</th><th>质量</th><th>当前值</th><th>采集时刻</th><th>设置值</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

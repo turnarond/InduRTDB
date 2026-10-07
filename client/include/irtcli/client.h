@@ -22,6 +22,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <indurtdb/indurtdb.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,6 +36,7 @@ extern "C" {
 #define IRTCLI_ERR_IO     -3  /* 连接/收发失败 */
 #define IRTCLI_ERR_DENIED -4  /* 服务端拒绝（鉴权失败） */
 #define IRTCLI_ERR_PROTO  -5  /* 协议错误/版本不匹配 */
+#define IRTCLI_ERR_NOT_FOUND -6 /* 按名未找到 / 越界 id */
 
 #define IRTCLI_QUEUE_CAP_DEFAULT 256u
 #define IRTCLI_QUEUE_CAP_MAX     4096u
@@ -96,6 +99,22 @@ int irtcli_flush(irtcli_t* c);
 
 /* 当前队列长度 */
 uint32_t irtcli_queue_count(const irtcli_t* c);
+
+/* ---- v3.4 T9：协议 v2 管控通道（同步请求-响应） ---- */
+
+/* 按名查找点位 id（走 rtdbd 共享索引）。
+ * 返回 IRTCLI_OK 且 *out_id 填充；未找到返回 IRTCLI_ERR_NOT_FOUND；
+ * 鉴权失败返回 IRTCLI_ERR_DENIED；协议/IO 错误返回对应负码。 */
+int irtcli_find_by_name(irtcli_t* c, const char* name, uint32_t* out_id);
+
+/* 读取点位元数据（32B，与 indurtdb_meta_t 一致）。
+ * 返回 IRTCLI_OK 且 *out 填充；越界/未注册返回 IRTCLI_ERR_NOT_FOUND。 */
+int irtcli_get_meta(irtcli_t* c, uint32_t id, indurtdb_meta_t* out);
+
+/* 写入点位元数据（管控操作，服务端须鉴权）。
+ * 返回 IRTCLI_OK 表示已落库；鉴权失败返回 IRTCLI_ERR_DENIED；
+ * 越界/未注册返回 IRTCLI_ERR_NOT_FOUND。 */
+int irtcli_set_meta(irtcli_t* c, uint32_t id, const indurtdb_meta_t* m);
 
 #ifdef __cplusplus
 }
