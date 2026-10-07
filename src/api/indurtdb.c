@@ -17,6 +17,7 @@
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include <unistd.h>
 
 /* ---- 实例 (不透明句柄的内部定义) ---- */
@@ -356,6 +357,17 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
         if (pm->id >= maxp) continue;
         if (pm->type > INDURTDB_TYPE_STRING) continue;
 
+        /* v3.7 B3：某字段值无法解析（非数字 / 溢出 / NaN）→ 判为配置非法。
+         * 否则 `deadband: abc` 会被当 0 而"看起来合法"，与 fail-fast 目标冲突。 */
+        if (pm->bad_value) {
+            char cbuf[128];
+            snprintf(cbuf, sizeof(cbuf), "config point %u: malformed numeric value",
+                     pm->id);
+            set_error(cbuf);
+            irt_point_config_free(&batch);
+            return INDURTDB_ERR_ARG;
+        }
+
         /* 写锁冲突(他人持写锁)或索引忙时有限重试；仍失败则如实上报，
          * 不再静默丢弃该点位（否则 find_by_name 对这些"已配置"点会误报 NOT_FOUND）。 */
         int configured = 0;
@@ -383,6 +395,19 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
             configured = 1;
         }
         if (!configured) overall_rc = INDURTDB_ERR_BUSY;  /* 持续冲突/忙：记录失败而非静默丢弃 */
+
+        /* v3.7 B3：配置声明了点位语义 → 写入元数据区（供启动校验）。
+         * 放在点位注册之后：即使注册因忙失败，语义也已尽力写入。 */
+        if (pm->has_meta && pm->id < maxp) {
+            indurtdb_meta_t m;
+            memset(&m, 0, sizeof(m));
+            m.eur_min  = pm->eur_min;
+            m.eur_max  = pm->eur_max;
+            m.deadband = pm->deadband;
+            m.flags    = pm->flags;
+            if (irt_meta_set(&h->shm, pm->id, &m) != INDURTDB_OK)
+                overall_rc = INDURTDB_ERR_BUSY;
+        }
     }
     irt_point_config_free(&batch);
     return overall_rc;
@@ -421,6 +446,18 @@ int indurtdb_h_get_meta(indurtdb_t* h, uint32_t id, indurtdb_meta_t* meta) {
 int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta) {
     ENSURE_H(h);
     if (!meta) { set_error("null meta"); return INDURTDB_ERR_ARG; }
+    /* v3.7 B3：写入前校验语义，堵住非法 meta 的源头。
+     * 否则非法 meta 一旦落盘（经 SET_META 或配置），下次启动的
+     * indurtdb_validate_config 会判定失败并 fail-fast，导致既有部署无法启动。 */
+    uint32_t fld = 0;
+    int vrc = indurtdb_validate_point_meta(meta, &fld);
+    if (vrc != INDURTDB_CFG_OK) {
+        char buf[192];
+        snprintf(buf, sizeof(buf), "invalid meta: %s (field=%u)",
+                 indurtdb_cfg_error_reason(vrc), (unsigned)fld);
+        set_error(buf);
+        return INDURTDB_ERR_ARG;
+    }
     int rc = irt_meta_set(&h->shm, id, meta);
     if (rc == INDURTDB_ERR_ARG)       set_error("id out of range");
     else if (rc == INDURTDB_ERR_BUSY) set_error("meta busy, retry");
@@ -580,6 +617,152 @@ uint64_t indurtdb_h_get_scan_skipped(indurtdb_t* h) {
     irt_header_t* hdr = irt_shm_header(&h->shm);
     return hdr ? __atomic_load_n(&hdr->scan_skipped, __ATOMIC_RELAXED) : 0;
 }
+int indurtdb_h_self_check(indurtdb_t* h) {
+    if (!h || !__atomic_load_n(&h->initialized, __ATOMIC_ACQUIRE)) {
+        set_error("self_check: instance not initialized");
+        return INDURTDB_HEALTH_UNHEALTHY;
+    }
+    irt_header_t* hdr = irt_shm_header(&h->shm);
+    if (!hdr) {
+        set_error("self_check: shm header unavailable");
+        return INDURTDB_HEALTH_UNHEALTHY;
+    }
+    /* 纯读校验：magic / version 不匹配一律 UNHEALTHY（绝不按新布局解释旧段）。 */
+    if (__atomic_load_n(&hdr->magic, __ATOMIC_RELAXED) != IRT_MAGIC) {
+        set_error("self_check: bad magic");
+        return INDURTDB_HEALTH_UNHEALTHY;
+    }
+    if (__atomic_load_n(&hdr->version, __ATOMIC_RELAXED) != IRT_SHM_VERSION) {
+        set_error("self_check: shm version mismatch");
+        return INDURTDB_HEALTH_UNHEALTHY;
+    }
+    return INDURTDB_HEALTH_OK;
+}
+int indurtdb_self_check(void) {
+    return indurtdb_h_self_check(g_default);
+}
+
+/* ==== v3.7 主题B B3：配置校验（纯函数 + 遍历，不改写任何状态） ==== */
+
+/* 元数据 flags 已知位掩码（主题A 定义的三个位） */
+#define IRT_META_FLAG_KNOWN                                             \
+    ((uint32_t)(INDURTDB_META_FLAG_EUR | INDURTDB_META_FLAG_DEADBAND | \
+                INDURTDB_META_FLAG_DEADBAND_PCT))
+
+int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field)
+{
+    if (err_field) *err_field = INDURTDB_CFG_FLD_NONE;
+    if (!m) return INDURTDB_CFG_ERR_NULL;
+
+    /* flags 只允许已知位（拼写错误/未来位误用在此拦下） */
+    if (m->flags & ~IRT_META_FLAG_KNOWN) {
+        if (err_field) *err_field = INDURTDB_CFG_FLD_FLAGS;
+        return INDURTDB_CFG_ERR_FLAGS;
+    }
+
+    /* 注：刻意**不**要求「置了百分比死区就必须启用量程」。
+     * 百分比死区只是借用 eur_min/eur_max 作为跨度基准（阈值 = deadband% × span），
+     * 与「是否在 quality 上置量程位」是正交的两件事，二者不应互相强制。
+     * span <= 0 时阈值退化为 0（永不触发），属可观测的静默失效，用
+     * indurtdb_meta_pct_without_range() 给出提示而非致命拒绝。 */
+
+    /* 启用量程时上下限必须有序（NaN 亦非法：NaN 的任何比较都返回 false，会绕过校验） */
+    if (m->flags & INDURTDB_META_FLAG_EUR) {
+        if (!isfinite(m->eur_min) || !isfinite(m->eur_max) || !(m->eur_min < m->eur_max)) {
+            if (err_field) *err_field = (m->eur_min >= m->eur_max)
+                                          ? INDURTDB_CFG_FLD_EUR_MIN
+                                          : INDURTDB_CFG_FLD_EUR_MAX;
+            return INDURTDB_CFG_ERR_EUR_RANGE;
+        }
+    }
+
+    /* 死区阈值非负（用 !(x >= 0) 而非 x < 0，使 NaN 一并被拒） */
+    if (!(m->deadband >= 0.0f)) {
+        if (err_field) *err_field = INDURTDB_CFG_FLD_DEADBAND;
+        return INDURTDB_CFG_ERR_DEADBAND;
+    }
+
+    /* 百分比死区限定 [0,100]（同样用 !(x <= 100) 拒 NaN） */
+    if ((m->flags & INDURTDB_META_FLAG_DEADBAND_PCT) && !(m->deadband <= 100.0f)) {
+        if (err_field) *err_field = INDURTDB_CFG_FLD_DEADBAND;
+        return INDURTDB_CFG_ERR_DEADBAND_PCT;
+    }
+
+    return INDURTDB_CFG_OK;
+}
+
+const char* indurtdb_cfg_error_reason(int err_code)
+{
+    switch (err_code) {
+    case INDURTDB_CFG_OK:               return "ok";
+    case INDURTDB_CFG_ERR_NULL:         return "meta pointer is NULL";
+    case INDURTDB_CFG_ERR_EUR_RANGE:    return "EUR enabled but eur_min >= eur_max";
+    case INDURTDB_CFG_ERR_DEADBAND:     return "deadband is negative";
+    case INDURTDB_CFG_ERR_DEADBAND_PCT: return "percent deadband not in [0,100]";
+    case INDURTDB_CFG_ERR_FLAGS:        return "meta flags contains unknown bits";
+    case INDURTDB_CFG_ERR_TYPE:         return "point type out of range";
+    case INDURTDB_CFG_ERR_NAME:         return "point name is empty";
+    case INDURTDB_CFG_ERR_ACCESS:       return "point access is neither read-only nor read-write";
+    default:                            return "unknown validation error";
+    }
+}
+
+bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m)
+{
+    if (!m) return false;
+    if (!(m->flags & INDURTDB_META_FLAG_DEADBAND_PCT)) return false;
+    /* 跨度来自 eur_min/eur_max，与是否置 EUR 位无关（EUR 位只管 quality 量程位）。
+     * 跨度 <= 0 时百分比阈值退化为 0，死区永不触发 —— 静默失效，值得提示。 */
+    return !(m->eur_max > m->eur_min);
+}
+
+int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
+                             const char** err_reason)
+{
+    if (bad_id)     *bad_id     = 0;
+    if (err_field)  *err_field  = INDURTDB_CFG_FLD_NONE;
+    if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_OK);
+
+    if (!g_default || !__atomic_load_n(&g_default->initialized, __ATOMIC_ACQUIRE)) {
+        if (err_reason) *err_reason = indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_NULL);
+        return INDURTDB_CFG_ERR_NULL;
+    }
+    irt_header_t* hdr = irt_shm_header(&g_default->shm);
+    if (!hdr) {
+        if (err_reason) *err_reason = "shm header unavailable";
+        return INDURTDB_CFG_ERR_NULL;
+    }
+    uint32_t max_points = __atomic_load_n(&hdr->max_points, __ATOMIC_RELAXED);
+
+    for (uint32_t id = 0; id < max_points; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_read_point(id, &pt) != 0) continue;  /* 未注册 */
+        if (pt.name[0] == '\0') continue;                /* 空名视为未注册 */
+
+        int rc = INDURTDB_CFG_OK;
+        if (pt.type > INDURTDB_TYPE_FLOAT) {
+            rc = INDURTDB_CFG_ERR_TYPE;
+            if (err_field) *err_field = INDURTDB_CFG_FLD_TYPE;
+        } else if (pt.access != INDURTDB_ACCESS_READ_ONLY &&
+                   pt.access != INDURTDB_ACCESS_READ_WRITE) {
+            rc = INDURTDB_CFG_ERR_ACCESS;
+            if (err_field) *err_field = INDURTDB_CFG_FLD_ACCESS;
+        } else {
+            indurtdb_meta_t m;
+            memset(&m, 0, sizeof(m));
+            (void)indurtdb_get_meta(id, &m);
+            rc = indurtdb_validate_point_meta(&m, err_field);
+        }
+
+        if (rc != INDURTDB_CFG_OK) {
+            if (bad_id)     *bad_id     = id;
+            if (err_reason) *err_reason = indurtdb_cfg_error_reason(rc);
+            return rc;
+        }
+    }
+    return INDURTDB_CFG_OK;
+}
+
 int indurtdb_h_validate_id(indurtdb_t* h, uint32_t id) {
     if (!h || !__atomic_load_n(&h->initialized, __ATOMIC_ACQUIRE)) return 0;
     return irt_pm_validate_id(&h->pm, id) ? 1 : 0;
@@ -612,6 +795,16 @@ int indurtdb_initialize(const char* instance_id,
 void indurtdb_shutdown(void) {
     if (!g_default) return;
     indurtdb_h_close(g_default);   /* 内部会复位 g_default */
+}
+
+/* v3.7 B3：脱离但**保留共享内存段**（不 shm_unlink）。
+ * 供 rtdbd fail-fast 退出等「放弃接管但保留数据」场景使用：
+ * owner 关闭时默认会 unlink 段（POSIX 语义），若配置校验失败就把段删掉，
+ * 会连带销毁运行时注册的点位与已写入的值——对工业 RTDB 不可接受。 */
+void indurtdb_detach(void) {
+    if (!g_default) return;
+    g_default->shm.os.owner = false;   /* 解除 owner → unmap 时不 unlink */
+    indurtdb_h_close(g_default);
 }
 
 bool indurtdb_is_initialized(void) {

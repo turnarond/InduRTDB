@@ -10,6 +10,8 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
+#include <math.h>
 
 void irt_config_init_defaults(irt_config_t* cfg) {
     if (!cfg) return;
@@ -114,6 +116,35 @@ uint8_t irt_config_parse_type(const char* s) {
     return 0xff;
 }
 
+/* 严格解析 double：拒绝非数字、尾随字符、溢出（inf）与 NaN。
+ * 返回 0 成功；非 0 表示值不可用（配置应判为非法，而非静默取 0）。 */
+static int parse_double(const char* s, double* out)
+{
+    if (!s || !out) return -1;
+    errno = 0;
+    char* end = NULL;
+    double v = strtod(s, &end);
+    if (end == s || !end || *end != '\0') return -1;   /* 非数字 / 尾随垃圾 */
+    if (errno == ERANGE) return -1;                    /* 上溢/下溢 */
+    if (!isfinite(v)) return -1;                       /* inf / NaN */
+    *out = v;
+    return 0;
+}
+
+/* 严格解析 uint32（base=0 支持 0x 前缀）：拒绝非数字、尾随字符、溢出与超上限。 */
+static int parse_u32(const char* s, int base, uint32_t* out)
+{
+    if (!s || !out) return -1;
+    errno = 0;
+    char* end = NULL;
+    unsigned long v = strtoul(s, &end, base);
+    if (end == s || !end || *end != '\0') return -1;
+    if (errno == ERANGE) return -1;
+    if (v > UINT32_MAX) return -1;
+    *out = (uint32_t)v;
+    return 0;
+}
+
 int irt_point_config_parse_yaml(const char* path, irt_point_meta_batch_t* out) {
     if (!path || !out) return -1;
     FILE* f = fopen(path, "r");
@@ -175,6 +206,27 @@ int irt_point_config_parse_yaml(const char* path, irt_point_meta_batch_t* out) {
             cur.unit = (uint16_t)strtoul(val, NULL, 10);
         else if (strcmp(key, "access") == 0)
             cur.access = (uint8_t)strtoul(val, NULL, 10);
+        /* v3.7 B3：可选点位语义。任一出现即 has_meta=1，
+         * 由 indurtdb_load_config 写入元数据区并接受启动校验。
+         * 数值一律严格解析：非数字 / 溢出 / NaN 记为 bad_value，
+         * 由调用方判为配置非法（避免 `deadband: abc` 静默变成 0 而"合法"）。 */
+        else if (strcmp(key, "eur_min") == 0) {
+            cur.has_meta = 1;
+            if (parse_double(val, &cur.eur_min) != 0) cur.bad_value = 1;
+        } else if (strcmp(key, "eur_max") == 0) {
+            cur.has_meta = 1;
+            if (parse_double(val, &cur.eur_max) != 0) cur.bad_value = 1;
+        } else if (strcmp(key, "deadband") == 0) {
+            double d = 0.0;
+            cur.has_meta = 1;
+            if (parse_double(val, &d) != 0) cur.bad_value = 1;
+            cur.deadband = (float)d;
+        } else if (strcmp(key, "flags") == 0) {
+            uint32_t f = 0;
+            cur.has_meta = 1;
+            if (parse_u32(val, 0, &f) != 0) cur.bad_value = 1;
+            cur.flags = f;
+        }
     }
 
     /* 保存最后一个条目 */

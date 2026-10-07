@@ -165,6 +165,21 @@ void indurtdb_shutdown(void);
 
 释放资源。Owner 进程同时删除共享内存段 (`shm_unlink`)。
 
+### indurtdb_detach（v3.7 主题B B3）
+
+```c
+void indurtdb_detach(void);
+```
+
+释放资源但**保留共享内存段**（不 `shm_unlink`）。
+
+与 `indurtdb_shutdown()` 的区别**仅在是否删除段**：两者都会 unmap 并复位句柄。
+
+**何时用**："放弃接管但必须保留数据"的场景——典型是 `rtdbd` 的 fail-fast 退出。若此处用
+`indurtdb_shutdown()`，owner 语义会删除整段，把「配置写错」升级为「运行时注册的点位与已
+写入的值一并销毁」。改用 `indurtdb_detach()` 后，下一次启动仍可 attach 原段，由运维修正
+问题即可恢复。
+
 ### indurtdb_is_initialized
 
 ```c
@@ -485,6 +500,120 @@ int indurtdb_h_write_quality_ts(indurtdb_t* h, uint32_t id, uint8_t type, const 
 
 - 仅开启 `INDURTDB_META_FLAG_EUR`（无死区）时同样适用：推送**仅在跨量程边界时触发**，区间内变化不推送。这是「按订阅者 Reporting-By-Exception」的预期行为，非缺陷。
 - 默认 `flags=0`：每次写都通知（零行为变更）。
+
+---
+
+## v3.7 主题B：运维硬化（健康 / 配置校验 / 脱离保留段）
+
+> v3.7 新增（主题B：运维硬化）。库侧为**纯函数或薄封装**；rtdbd 侧的背压/健康/退出码见文末。
+
+### indurtdb_self_check / indurtdb_h_self_check（B1）
+
+```c
+/* 健康状态枚举 */
+#define INDURTDB_HEALTH_OK        0
+#define INDURTDB_HEALTH_DEGRADED  1
+#define INDURTDB_HEALTH_UNHEALTHY 2
+
+int indurtdb_h_self_check(indurtdb_t* h);
+int indurtdb_self_check(void);   /* v1 薄封装（默认句柄） */
+```
+
+**纯读**校验共享内存段头：`magic == IRT_MAGIC`、`version == IRT_SHM_VERSION`，以及段存在且
+已初始化。不改写任何状态，可在 poll 循环 / 信号 dump 路径安全调用。
+
+- 返回 `INDURTDB_HEALTH_OK` 或 `INDURTDB_HEALTH_UNHEALTHY`。
+- **`DEGRADED` 由调用方分层判定**，核心不自行发出：例如 `rtdbd` 依据错误计数降级。
+- 失败详情见 `indurtdb_get_last_error()`。
+
+### indurtdb_validate_point_meta（B3，纯函数）
+
+```c
+int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field);
+```
+
+校验单点元数据语义（**不触共享内存**，可单测）。合法返回 `INDURTDB_CFG_OK`；
+否则返回错误码并把字段标识写入 `*err_field`（可为 `NULL`）。
+
+| 错误码 | 含义 |
+|---|---|
+| `INDURTDB_CFG_OK` | 合法 |
+| `INDURTDB_CFG_ERR_NULL` | meta 指针为空 |
+| `INDURTDB_CFG_ERR_EUR_RANGE` | 启用量程但 `eur_min >= eur_max` |
+| `INDURTDB_CFG_ERR_DEADBAND` | `deadband` 为负 |
+| `INDURTDB_CFG_ERR_DEADBAND_PCT` | 百分比死区不在 `[0,100]` |
+| `INDURTDB_CFG_ERR_FLAGS` | `flags` 含未知位 |
+| `INDURTDB_CFG_ERR_TYPE` | 点位 type 越界 |
+| `INDURTDB_CFG_ERR_NAME` | 点位名为空 |
+| `INDURTDB_CFG_ERR_ACCESS` | access 既非只读也非读写 |
+
+**刻意不强制**：百分比死区与 `INDURTDB_META_FLAG_EUR` **正交**——百分比死区只是**借用**
+`eur_min`/`eur_max` 作跨度基准，与"是否在 quality 上置量程位"无关，故不要求二者同时启用。
+
+**写入侧同样校验**：`indurtdb_h_set_meta()` 在落盘前调用本函数，非法 meta 一律拒写
+（返回 `INDURTDB_ERR_ARG`），从源头杜绝"非法 meta 落盘 → 下次启动 fail-fast"。
+
+### indurtdb_meta_pct_without_range（B3，便捷谓词）
+
+```c
+bool indurtdb_meta_pct_without_range(const indurtdb_meta_t* m);
+```
+
+置了百分比死区但量程跨度无效（`eur_max <= eur_min`）。此时阈值为 0，**死区永不触发**——
+属可观测的静默失效，**非致命配置错误**。`rtdbd` 启动时对此打 WARN 而非拒绝。
+
+### indurtdb_validate_config（B3）
+
+```c
+int indurtdb_validate_config(uint32_t* bad_id, uint32_t* err_field,
+                             const char** err_reason);
+```
+
+遍历默认实例已注册点位，逐点校验（`type`/`access` 合法 + 元数据语义）。
+
+- 返回 `INDURTDB_CFG_OK` 表示全部合法；否则返回错误码，并把首个非法点 id 写入 `*bad_id`。
+- 三个输出参数均可为 `NULL`。
+- **契约为何用返回值区分而非用点 id**：点 id 0 是合法点位，若以返回值 `0` 表示"全部合法"，
+  则 id 为 0 的非法点会被误判为配置合法、绕过 fail-fast。
+
+### indurtdb_cfg_error_reason
+
+```c
+const char* indurtdb_cfg_error_reason(int err_code);
+```
+
+错误码 → 人类可读原因文本（静态字符串，零分配）。
+
+### rtdbd 运维语义（主题B）
+
+**背压（B2）**：每连接定长 64 槽出站环形队列（零堆）。写成功只入队，队列满则**丢最旧（保序）**
+并计 `notify_drop`；主循环仅在有待发时监听 `POLLOUT`。**慢消费者不再拖垮服务端**（消除
+head-of-line 阻塞）。`outq_flush` 用 `MSG_DONTWAIT` + 发送进度做**部分发送**——`POLLOUT` 就绪
+只保证缓冲有*部分*空间，阻塞 `send_all` 会在嵌入式小缓冲下卡死整个单线程服务端。
+
+**通知为异步投递**：写响应后通知在下一轮 `POLLOUT` 送达（缓冲有空间时亚毫秒级），
+不再与写响应同轮同步送达。
+
+**健康（B1）**：`RTDBD_OP_HEALTH`（opcode 16）**只读、免鉴权**（负载仅计数与连接数，
+不含点位值）；**协议主版本仍为 2**。SIGUSR1 触发 `--stats-file` dump
+（信号处理器只置标志，dump 在主循环）。`DEGRADED` 按 **60s 滑动窗口**判定，可自愈。
+
+**退出码（B2/B3）**
+
+| 码 | 含义 | 场景 |
+|---|---|---|
+| 0 | 正常退出 | — |
+| 1 | 通用 / 启动错误 | 参数解析、policy 加载失败等 |
+| 2 | 配置校验失败 | `load_config` 失败、点位语义非法 |
+| 3 | 共享内存损坏 / 初始化失败 | `indurtdb_initialize` 失败 |
+| 4 | 启动自检失败 | 段头 `magic` / `version` 不通过 |
+
+supervisor 对**致命码 2 / 4 停止 respawn** 并透传退出码，避免坏配置陷入重启风暴。
+systemd 部署需配套 `RestartPreventExitStatus=2 4`（否则重启风暴只是转移到 systemd 层面）。
+
+**fail-fast 保留数据**：配置或自检失败退出时用 `indurtdb_detach()` **保留共享内存段**，
+不因配置写错销毁已有点位与值。未给 `--config` 时段内残留的非法 meta **只告警不致命**
+（避免 v3.6 时代部署被砖化）。
 
 ---
 

@@ -9,6 +9,7 @@ add_executable(rtdbd
     src/audit.c
     src/logbuf.c
     src/rbe.c
+    src/stats.c
 )
 
 target_include_directories(rtdbd PRIVATE
