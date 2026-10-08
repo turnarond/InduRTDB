@@ -112,6 +112,8 @@ systemd 部署需配套 `RestartPreventExitStatus=2 4`。
 **v3.7.0** — 核心语义深化 + 运维硬化：
 - **主题A**：死区/RBE 过滤 + EURange→量程位生效（语义纯函数公共 API、质量感知写入口、rtdbd 按订阅者 RBE 通知门控）。
 - **主题B**：运维硬化（健康/错误计数 + `RTDBD_OP_HEALTH` + SIGUSR1 dump、每连接有界出站队列背压 + 优雅退出、配置校验 fail-fast + 语义退出码、`indurtdb_detach()` 保留段）。
+- **主题B 延展 B4**：运行时配置持久化（delta 日志，定长 80B 追加写 + `fsync`，`rtdbd --delta-file` 默认关闭，base 配置不可变、零 ABI 变更，运行时 CRUD 跨重启存活）。
+- **主题B 延展 B5**：v1 单例 API 退役（新增 `INDURTDB_DEPRECATED` 宏标注 51 个 v1 函数，`examples`/`demo` 已迁 v2，测试保留 v1 并关弃用告警；未删除）。
 
 **v3.3.0** — 读写分离与双通道：新增 `rtdbd` 写权威守护进程（UDS 串行写 + 本机 UID 鉴权 + 审计）与 `indurtdb-client`（写队列，fail-operational），支持跨进程变更通知；点位新增 `source_timestamp_ns`（采集时刻）与 `COMM_FAILURE` 质量码。**共享内存布局与 v2.x 仍逐字节兼容，ABI 保持 v1。**
 
