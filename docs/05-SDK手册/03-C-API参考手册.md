@@ -598,8 +598,15 @@ int indurtdb_delta_replay(const char* path);
 - `enable_delta`：打开 `path` 用于追加写；此后三个 CRUD 成功后各追加一条定长记录。
   **不调用则不启用**，行为与现状完全一致。
 - `delta_replay`：回放历史记录，返回已应用条数（0 = 无历史）。
-- 启动顺序应为 `load_config(base)` → `delta_replay` → 校验 → 服务。
+- **调用顺序约束（必须遵守）**：
+  1. `load_config(base)` **先执行** —— `load_config` 会无条件覆盖槽位；若先回放再
+     load_config，base 会把运行时 DELETE 掉的点"复活"、把 RENAME 覆盖回原名。
+  2. 再 `delta_replay`。
+  3. **建议在 `enable_delta` 之前调用 `delta_replay`**：回放内部已抑制自身追加，
+     故顺序颠倒也不会出错，但先回放更直观（回放期间的变更本就不应写入）。
 - **base 配置不可变**：只追加 delta，不回写 YAML。
+- 追加失败（磁盘满 / fsync 失败）会记录到 `indurtdb_get_last_error()`，
+  调用方应观测；CRUD 本身仍返回成功（变更已生效，只是未持久化）。
 - 崩溃安全：记录定长 80B；末尾残片丢弃，坏 `magic`/`version`/`op` 停止回放（已应用部分保留）。
 - rtdbd 侧：`--delta-file <path>`（默认关闭）。
 
@@ -610,11 +617,15 @@ v3.7 起，51 个 v1 单例封装函数（`indurtdb_write_*` / `indurtdb_read_*`
 
 - **v4.0 之前仍然受支持且行为不变**，仅产生编译期告警；真正删除在 v4.0。
 - 新代码请用 v2 句柄 API：`indurtdb_h_open()` 取句柄 + `indurtdb_h_*`。
-- **纯函数不弃用**（无实例语义、无 v2 对应者）：
-  `indurtdb_value_to_double` / `indurtdb_eurange_limit` / `indurtdb_deadband_exceeded` /
-  `indurtdb_validate_point_meta` / `indurtdb_meta_pct_without_range` /
-  `indurtdb_validate_config` / `indurtdb_cfg_error_reason` /
-  `indurtdb_quality_to_status_code` / `indurtdb_get_last_error`。
+- **未标注弃用的 v1 全局函数**（无 v2 对应者，故不弃用）：
+  - 纯函数（无实例语义）：`indurtdb_value_to_double` / `indurtdb_eurange_limit` /
+    `indurtdb_deadband_exceeded` / `indurtdb_validate_point_meta` /
+    `indurtdb_meta_pct_without_range` / `indurtdb_cfg_error_reason` /
+    `indurtdb_quality_to_status_code` / `indurtdb_status_code_to_quality` /
+    `indurtdb_quality_is_usable` / `indurtdb_get_last_error`。
+  - `indurtdb_validate_config`：**依赖默认实例**（内部遍历 `g_default` 的点表），
+    但当前**没有** `indurtdb_h_validate_config` 对应版本，故暂不弃用；
+    待 v4.0 前补上句柄版本后一并标注。
 - 确需继续使用 v1 且不想看到告警：定义 `INDURTDB_NO_DEPRECATE_WARN`。
 
 ### rtdbd 运维语义（主题B）

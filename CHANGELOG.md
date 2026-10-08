@@ -114,10 +114,37 @@ v1 到 v4.0 前都是受支持公共 API，测试正是它的回归网，整体�
 消除告警用一行宏即可达成，成本收益不对称。
 
 #### 延展项测试
-- `tests/unit/test_c_delta.cpp`（8）：布局、空/缺失文件、顺序回放、残片丢弃、
-  坏 magic/version/op 停止、append-replay 往返。
-- `tests/integration/test_rtdbd_delta.cpp`（4）：CREATE 跨重启存活、DELETE/RENAME 持久化、
+- `tests/unit/test_c_delta.cpp`（9）：布局、空/缺失文件、顺序回放、残片丢弃、
+  坏 magic/version/op 停止、append-replay 往返、**delta 已启用时 replay 不回写**。
+- `tests/integration/test_rtdbd_delta.cpp`（6）：CREATE 跨重启存活、DELETE/RENAME 持久化、
+  **base 配置点的 DELETE/RENAME 跨重启存活**、回放幂等不增长、
   未启用 delta 时行为不变、残片可容忍。
+
+#### 评审修复（B4/B5 评审，2026-10-08）
+- **C1（Critical）`delta_fd` 未初始化为 -1**：`memset` 使其为 0，而 0 是合法 fd（stdin）→
+  "未启用 delta"的守卫 `delta_fd < 0` 永不成立，每次 CRUD 向 stdin 写 80B 记录，
+  且 `inst_shutdown` 会 `close(stdin)`，之后任意 `open()` 复用 fd 0 会被误关（实测可段错误）。
+  修复：`inst_alloc` 与 `inst_init` 双重显式置 -1（结构性保证，不再依赖 memset 语义）。
+- **C2（Critical）rtdbd 的 delta 回放位于 `load_config` 之前**：与代码注释、plan、
+  CHANGELOG、SDK 手册四处自述相反；`load_config` 无条件覆盖槽位，导致运行时
+  DELETE 的 base 配置点被"复活"、RENAME 被覆盖回原名 —— B4 的核心承诺对 base
+  点（最常见操作对象）完全失效。修复：把 delta 块移到 `load_config` 之后。
+- **C3（Critical）`delta_replay` 在 delta 已启用时会把记录写回同一文件**：
+  `delta_apply` 走真实 CRUD 后照常追加，回放随即读到自己刚写的记录 →
+  无限循环 + 持续 fsync 打满磁盘（实测 10s 写出 4.7MB 后挂死）。rtdbd 因顺序正确
+  不受影响，但这是新公开 API。修复：回放期间摘下 `delta_fd` 并置 -1，结束再恢复。
+- **I1** `delta_log` 曾丢弃 `irt_delta_append` 返回值 → 磁盘满时 CRUD 仍返回 OK 而变更永久丢失，
+  且一次短写留下的残片会静默截断整个 delta 日志。改为记录到 `last_error`。
+- **I2** `irt_delta_replay` 契约与实现不符（声称负值表示错误但从不返回负值，
+  连带 rtdbd 的 `applied < 0` 分支成死代码）→ 读错误改为返回 -1。
+- **I3** 补测试盲区（正是它掩盖了 C2）：base 点变更跨重启、回放幂等、replay 不回写。
+- **Minor**：SDK 手册修正 `indurtdb_validate_config` 归类（它依赖默认实例、非纯函数）；
+  plan 措辞对齐实现（`INDURTDB_NO_DEPRECATE_WARN` 而非 `-Wno-deprecated-declarations`）；
+  修 examples 既有缺陷（点位 id 1001/2001/3001/4001 越界于 `max_points=100`，
+  四个写全部失败、`write_count` 恒为 0）。
+
+**护栏有效性已回退验证**：C2 与 C3 的新增用例在回退对应修复后分别表现为 FAIL 与挂死，
+确为有效护栏（非"回退后仍通过"的假护栏）。
 
 ### 主题 B 测试
 - `tests/unit/test_c_config.cpp`：新增 14 个 `ConfigValidate.*` 用例（并入原 3 个 `CConfig.*`，共 17）。

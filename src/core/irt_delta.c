@@ -6,6 +6,7 @@
 
 #include <internal/irt_types.h>   /* IRT_STATIC_ASSERT */
 
+#include <errno.h>
 #include <fcntl.h>
 #include <string.h>
 #include <unistd.h>
@@ -40,16 +41,23 @@ int irt_delta_replay(const char* path, irt_delta_apply_fn apply, void* ctx)
     if (fd < 0) return 0;   /* 无历史文件：视为空 delta */
 
     int applied = 0;
+    int io_err = 0;      /* 读错误标记：用于与"干净结束"区分（契约要求返回 -1） */
     for (;;) {
         irt_delta_rec_t rec;
         ssize_t got = 0;
         /* 读满一条（可能分多次：普通文件一般一次即可） */
         while (got < (ssize_t)sizeof(rec)) {
             ssize_t k = read(fd, ((char*)&rec) + got, (size_t)(sizeof(rec) - got));
-            if (k < 0) { close(fd); return applied; }   /* 读错：停止，保留已应用部分 */
+            if (k < 0) {
+                /* 读错误：与"文件不存在/无历史"必须区分开，故标记为错误 */
+                if (errno == EINTR) continue;
+                io_err = 1;
+                break;
+            }
             if (k == 0) break;                          /* EOF */
             got += k;
         }
+        if (io_err) { close(fd); return -1; }
         if (got == 0) break;                            /* 干净结束 */
 
         if (got != (ssize_t)sizeof(rec)) {

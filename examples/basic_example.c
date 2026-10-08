@@ -27,21 +27,22 @@ int main(void) {
     printf("   OK\n");
 
     printf("2. 写入数据...\n");
-    indurtdb_h_write_double(db, 1001, 23.5);
-    indurtdb_h_write_bool(db, 2001, true);
-    indurtdb_h_write_int32(db, 3001, -7);
-    indurtdb_h_write_string(db, 4001, "HVAC-01");
+    /* 点位 id 必须 < max_points(100)，否则写入会因越界失败 */
+    indurtdb_h_write_double(db, 1, 23.5);
+    indurtdb_h_write_bool(db, 2, true);
+    indurtdb_h_write_int32(db, 3, -7);
+    indurtdb_h_write_string(db, 4, "HVAC-01");
     printf("   OK, write_count=%llu\n",
            (unsigned long long)indurtdb_h_get_write_count(db));
 
     printf("3. 读取数据...\n");
     indurtdb_point_t p;
-    if (indurtdb_h_read_point(db, 1001, &p) == 0) {
+    if (indurtdb_h_read_point(db, 1, &p) == 0) {
         printf("   温度: %.2f, quality=%d\n", p.value.d, (int)p.quality);
     }
 
     printf("4. peek (seqlock 保护, 线程本地缓冲)...\n");
-    const indurtdb_point_t* pk = indurtdb_h_peek(db, 1001);
+    const indurtdb_point_t* pk = indurtdb_h_peek(db, 1);
     if (pk) printf("   温度 (peek): %.2f\n", pk->value.d);
 
     printf("5. 关闭...\n");

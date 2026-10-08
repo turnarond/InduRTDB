@@ -17,6 +17,9 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <indurtdb/indurtdb.h>
 #include <unistd.h>
 
 extern "C" {
@@ -230,6 +233,48 @@ TEST(Delta, AppendThenReplayRoundTrip)
     EXPECT_EQ(g_applied[0].name, "RT42");
 
     unlink(p.c_str());
+}
+
+/* 9. API 层：delta 已启用时调用 replay 不得把记录写回同一文件（否则无限循环）。
+ *    护栏意义：delta_apply 走真实 CRUD，成功后照常 delta_log()；若回放期间不抑制
+ *    追加，就会把记录追加进"正在被读取的同一个文件"，回放随即读到自己刚写的
+ *    记录 —— 无限循环并持续 fsync 打满磁盘（实测 10s 写出 4.7MB 后挂死）。
+ *    注意：rtdbd 因"先 replay 后 enable"不受影响，故必须在 **API 层**覆盖。 */
+TEST(Delta, ReplayWhileEnabledDoesNotReAppend)
+{
+    const char* inst = "irt_delta_api_inst";
+    const char* path = "/tmp/irt_delta_api.bin";
+
+    char seg[128];
+    snprintf(seg, sizeof(seg), "/indurtdb_%s", inst);
+    shm_unlink(seg);
+    unlink(path);
+
+    ASSERT_EQ(indurtdb_initialize(inst, 64, 4), 0);
+    /* 先启用（与 rtdbd 相反的顺序）—— 正是触发缺陷的用法 */
+    ASSERT_EQ(indurtdb_enable_delta(path), INDURTDB_OK);
+    ASSERT_EQ(indurtdb_create_point(50, "API50", INDURTDB_TYPE_INT32,
+                                    INDURTDB_ACCESS_READ_WRITE), INDURTDB_OK);
+    /* 必须再删掉：回放时 CREATE 才会真正成功（点不存在）并触发 delta_log。
+     * 若点仍存在，回放的 CREATE 返回 FULL 而不记日志，缺陷不会显现。 */
+    ASSERT_EQ(indurtdb_delete_point(50), INDURTDB_OK);
+
+    struct stat st1;
+    ASSERT_EQ(stat(path, &st1), 0);
+    ASSERT_GT(st1.st_size, 0);
+
+    /* 回放同一文件：必须终止，且不得使文件增长 */
+    int n = indurtdb_delta_replay(path);
+    EXPECT_GE(n, 0) << "replay must terminate (no infinite loop)";
+
+    struct stat st2;
+    ASSERT_EQ(stat(path, &st2), 0);
+    EXPECT_EQ(st2.st_size, st1.st_size)
+        << "replay must not re-append records into the file being read";
+
+    indurtdb_shutdown();
+    shm_unlink(seg);
+    unlink(path);
 }
 
 int main(int argc, char** argv)

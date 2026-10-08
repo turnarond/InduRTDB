@@ -1143,9 +1143,26 @@ int main(int argc, char** argv)
         return RTDBD_EXIT_SHM;
     }
 
+    /* ---- B3 fail-fast 阶段 2/3：点位配置校验 ----
+     * load_config 失败 → exit 2。
+     * 校验严格性分档（向后兼容关键）：
+     *   - 给了 --config：本次启动显式应用的语义必须合法，非法即 exit 2；
+     *   - 未给 --config：段内 meta 来自历史残留（可能是 v3.6 时代经 SET_META
+     *     写入的、当时合法的值），只告警不致命，避免旧部署被"砖化"。 */
+    if (config_path && indurtdb_load_config(config_path) != 0) {
+        fprintf(stderr, "rtdbd: invalid config '%s': %s\n",
+                config_path, indurtdb_get_last_error());
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                        "rtdbd: load config failed: %s", indurtdb_get_last_error());
+        indurtdb_detach();   /* 保留段：不得因配置错误销毁已有点位与值 */
+        return RTDBD_EXIT_CONFIG;
+    }
+
     /* ---- B4：回放 delta（在 base 之上叠加运行时变更），随后启用后续追加 ----
-     * 顺序：load_config(base) → replay(delta) → 校验 → 服务。
-     * base 保持不可变可审计；delta 只追加。 */
+     * 顺序**必须**是 load_config(base) → replay(delta) → 校验 → 服务：
+     * load_config 会无条件覆盖槽位，若先回放再 load_config，base 会把运行时
+     * DELETE 掉的点"复活"、把 RENAME 的结果覆盖回原名 —— B4 的承诺对 base
+     * 配置点（最常见的操作对象）完全失效。 */
     if (delta_path) {
         int applied = indurtdb_delta_replay(delta_path);
         if (applied < 0) {
@@ -1166,21 +1183,6 @@ int main(int argc, char** argv)
         }
         irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
                         "rtdbd: delta '%s' replayed %d record(s)", delta_path, applied);
-    }
-
-    /* ---- B3 fail-fast 阶段 2/3：点位配置校验 ----
-     * load_config 失败 → exit 2。
-     * 校验严格性分档（向后兼容关键）：
-     *   - 给了 --config：本次启动显式应用的语义必须合法，非法即 exit 2；
-     *   - 未给 --config：段内 meta 来自历史残留（可能是 v3.6 时代经 SET_META
-     *     写入的、当时合法的值），只告警不致命，避免旧部署被"砖化"。 */
-    if (config_path && indurtdb_load_config(config_path) != 0) {
-        fprintf(stderr, "rtdbd: invalid config '%s': %s\n",
-                config_path, indurtdb_get_last_error());
-        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
-                        "rtdbd: load config failed: %s", indurtdb_get_last_error());
-        indurtdb_detach();   /* 保留段：不得因配置错误销毁已有点位与值 */
-        return RTDBD_EXIT_CONFIG;
     }
 
     {

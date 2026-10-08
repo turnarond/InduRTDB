@@ -51,6 +51,7 @@ static indurtdb_t* inst_alloc(void) {
             g_used_mask |= (1u << i);
             indurtdb_t* h = &g_registry[i];
             memset(h, 0, sizeof(*h));
+            h->delta_fd = -1;   /* 结构性保证：见下方 inst_init 说明 */
             return h;
         }
     }
@@ -80,6 +81,11 @@ static int inst_init(indurtdb_t* h, const char* instance_id,
         || max_points == 0) { set_error("invalid argument"); return INDURTDB_ERR_ARG; }
 
     memset(h, 0, sizeof(*h));
+    /* delta_fd **必须**显式置 -1：memset 会把它清成 0，而 0 是合法 fd（stdin）。
+     * 若留 0，则"未启用 delta"的守卫 `delta_fd < 0` 永不成立 —— 每次 CRUD 都会
+     * 向 stdin 写 80B 记录，且 inst_shutdown 会 close(stdin)，之后任意 open()
+     * 都可能复用 fd 0 而被误关。故在 inst_alloc 与此处双重置位。 */
+    h->delta_fd = -1;
 
     if (irt_shm_init(&h->shm, instance_id, max_points, max_subscribers) != 0) {
         set_error("shm init failed");
@@ -488,7 +494,14 @@ static void delta_log(indurtdb_t* h, uint16_t op, uint32_t id,
         strncpy(rec.name, name, sizeof(rec.name) - 1);
         rec.name[sizeof(rec.name) - 1] = '\0';
     }
-    (void)irt_delta_append(h->delta_fd, &rec);
+    /* 不得丢弃返回值：磁盘满 / fsync 失败时若静默忽略，CRUD 会返回 OK 而变更
+     * 永久丢失 —— 与 B4「配置持久化」的语义承诺直接冲突。
+     * 更严重的是：一次短写会在文件尾留下残片，此后追加的所有记录在回放时都
+     * 不可达（回放遇残片即停），即一次瞬时错误会静默截断整个 delta 日志。
+     * 故记录到 last_error，供调用方（rtdbd 会写运行日志）观测。 */
+    if (irt_delta_append(h->delta_fd, &rec) != 0) {
+        set_error("delta append failed (persistence lost)");
+    }
 }
 
 /* 在指定槽写入点位静态属性（不触索引）。调用方须持写锁。 */
@@ -669,7 +682,18 @@ int indurtdb_h_delta_replay(indurtdb_t* h, const char* path)
 {
     ENSURE_H(h);
     if (!path) { set_error("null delta path"); return INDURTDB_ERR_ARG; }
+
+    /* 回放期间**必须**抑制记录追加。
+     * delta_apply 走的是真实 CRUD，成功后照常 delta_log()；若此时 delta 已启用，
+     * 就会把记录追加进"正在被读取的同一个文件" —— 回放随即读到自己刚写的记录，
+     * 无限循环并持续 fsync 打满磁盘（实测 10 秒 4.7MB 后挂死）。
+     * 故先把 delta_fd 摘下并置 -1，回放结束再恢复。 */
+    int saved_fd = h->delta_fd;
+    h->delta_fd = -1;
+
     int n = irt_delta_replay(path, delta_apply, h);
+
+    h->delta_fd = saved_fd;
     if (n < 0) { set_error("delta replay failed"); return INDURTDB_ERR_ARG; }
     return n;   /* 已应用记录数 */
 }

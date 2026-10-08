@@ -324,7 +324,81 @@ TEST(RtdbdDelta, WithoutDeltaFilePointsAreLost)
     drop_segment("delta_test_nodelta");
 }
 
-/* 4. delta 末尾残片可容忍：服务仍能启动，且残片前的记录生效 */
+/* 4. base 配置点的 DELETE / RENAME 必须跨重启保留。
+ *    护栏意义：曾因 rtdbd 把 delta 回放放在 load_config **之前**，
+ *    导致 base 无条件覆盖槽位 —— 运行时 DELETE 的点被"复活"、RENAME 被覆盖回原名，
+ *    而 base 点恰恰是最常见的操作对象。本用例钉死正确顺序。 */
+TEST(RtdbdDelta, BasePointMutationsSurviveRestart)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("basemut", policy_allow(), kConfig, "yes"));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+    /* 删除 base 配置的 id=1（Base_Point），并新建+改名一个运行时点 */
+    ASSERT_EQ(delete_point(fd, 1), (int)RTDBD_ST_OK);
+    ASSERT_EQ(create_point(fd, 30, "P30"), (int)RTDBD_ST_OK);
+    ASSERT_EQ(rename_point(fd, 30, "P30_renamed"), (int)RTDBD_ST_OK);
+    close(fd);
+    p.stop();
+
+    RtdbdProc p2;
+    ASSERT_TRUE(p2.start("basemut", policy_allow(), kConfig, "yes"));
+    int fd2 = connect_to(p2.sock);
+    ASSERT_GE(fd2, 0);
+
+    uint32_t id = 0;
+    EXPECT_FALSE(find_by_name(fd2, "Base_Point", &id))
+        << "runtime DELETE of a base-config point must survive restart";
+    EXPECT_TRUE(find_by_name(fd2, "P30_renamed", &id)) << "rename must persist";
+    EXPECT_EQ(id, 30u);
+
+    close(fd2);
+    p2.stop();
+    unlink("/tmp/irt_delta_basemut.bin");
+}
+
+/* 5. 回放幂等：同一 delta 回放两次，不应重复追加记录使文件增长。
+ *    护栏意义：delta_apply 走真实 CRUD，若回放期间不抑制 delta_log，
+ *    会把记录写回"正在读的同一文件" —— 无限循环并打满磁盘。 */
+TEST(RtdbdDelta, ReplayIsIdempotentAndDoesNotGrow)
+{
+    const std::string d = "/tmp/irt_delta_idem.bin";
+    unlink(d.c_str());
+
+    /* 第一次启动：建点产生记录 */
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("idem", policy_allow(), kConfig, "yes"));
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(create_point(fd, 40, "P40"), (int)RTDBD_ST_OK);
+    close(fd);
+    p.stop();
+
+    struct stat st1;
+    ASSERT_EQ(stat(d.c_str(), &st1), 0);
+    const off_t size1 = st1.st_size;
+    ASSERT_GT(size1, 0);
+
+    /* 第二次启动：只回放、不做任何变更 —— 文件大小必须不变 */
+    RtdbdProc p2;
+    ASSERT_TRUE(p2.start("idem", policy_allow(), kConfig, "yes"));
+    int fd2 = connect_to(p2.sock);
+    ASSERT_GE(fd2, 0);
+    uint32_t id = 0;
+    EXPECT_TRUE(find_by_name(fd2, "P40", &id)) << "point still present after 2nd start";
+    close(fd2);
+    p2.stop();
+
+    struct stat st2;
+    ASSERT_EQ(stat(d.c_str(), &st2), 0);
+    EXPECT_EQ(st2.st_size, size1)
+        << "replay must not re-append records (would loop and fill the disk)";
+
+    unlink(d.c_str());
+}
+
+/* 6. delta 末尾残片可容忍：服务仍能启动，且残片前的记录生效 */
 TEST(RtdbdDelta, TrailingFragmentIsTolerated)
 {
     const std::string d = "/tmp/irt_delta_frag.bin";

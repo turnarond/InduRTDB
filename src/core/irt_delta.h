@@ -44,7 +44,8 @@ int irt_delta_open_append(const char* path);
 int irt_delta_append(int fd, const irt_delta_rec_t* rec);
 
 /* 回放 delta 文件：逐条校验并交给 apply。
- * 返回已成功应用的记录数；负值表示出错（文件不存在返回 0，视为无历史）。
+ * 返回已成功应用的记录数（>=0）；**读错误返回 -1**（与"无历史"的 0 明确区分）。
+ * 文件不存在返回 0（视为无历史）。
  * 遇残片（末尾不足一条）或非法 magic/version/op 时停止，已应用的记录保持生效。 */
 int irt_delta_replay(const char* path, irt_delta_apply_fn apply, void* ctx);
 
