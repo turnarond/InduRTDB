@@ -95,6 +95,12 @@ int indurtdb_validate_id(uint32_t id) {
     return indurtdb::InduRTDB::instance().read(id, dummy) ? 0 : -1;
 }
 
+// ---- 数据质量 ----
+
+int indurtdb_mark_timeout(uint32_t id) {
+    return indurtdb::InduRTDB::instance().mark_timeout(id) ? 0 : -1;
+}
+
 // ---- 统计 ----
 
 uint64_t indurtdb_get_write_count() {
@@ -102,7 +108,11 @@ uint64_t indurtdb_get_write_count() {
 }
 
 uint64_t indurtdb_get_timeout_count() {
-    return 0;
+    return indurtdb::InduRTDB::instance().get_timeout_count();
+}
+
+uint64_t indurtdb_get_subscriber_count() {
+    return indurtdb::InduRTDB::instance().get_subscriber_count();
 }
 
 // ---- 错误处理 ----

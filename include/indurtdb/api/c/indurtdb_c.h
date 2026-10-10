@@ -61,9 +61,13 @@ int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
 // 验证函数
 int indurtdb_validate_id(uint32_t id);
 
+// 数据质量：标记点位超时（阈值由调用方判定）
+int indurtdb_mark_timeout(uint32_t id);
+
 // 统计函数
 uint64_t indurtdb_get_write_count();
 uint64_t indurtdb_get_timeout_count();
+uint64_t indurtdb_get_subscriber_count();
 
 // 错误处理
 const char* indurtdb_get_last_error();

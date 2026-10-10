@@ -47,6 +47,14 @@ public:
         if (seq0 & 1ULL) return false;  // 写冲突
 
         PointData* p = &points_[id];
+
+        // 访问控制 (SRS §4.3)：显式标记为只读的点位拒绝写入。
+        // access 为 0 表示该点位未经 load_config 配置，视为可写。
+        if (p->access == Access::READ_ONLY) {
+            seqlock_write_end(&header_->write_seq, seq0);
+            return false;
+        }
+
         if constexpr (std::is_same_v<T, bool>) {
             p->value.b = value; p->type = PointType::BOOL;
         } else if constexpr (std::is_same_v<T, int32_t>) {
@@ -70,6 +78,25 @@ public:
     }
 
     // ---- 读取（带拷贝） ----
+
+    /**
+     * @brief 将点位标记为超时，并累加超时计数
+     * @param id 点位标识符
+     * @return true 成功；false 表示 id 越界或存在并发写入冲突
+     * @note  超时阈值由驱动层掌握，库不做后台巡检，仅被动记录标记动作
+     */
+    bool mark_timeout(PointId id) {
+        if (!validate_id(id)) return false;
+
+        uint64_t seq0 = seqlock_write_begin(&header_->write_seq);
+        if (seq0 & 1ULL) return false;
+
+        points_[id].quality = Quality::TIMEOUT;
+        seqlock_write_end(&header_->write_seq, seq0);
+
+        __atomic_fetch_add(&header_->stats.timeouts, 1ULL, __ATOMIC_RELAXED);
+        return true;
+    }
 
     bool read(PointId id, PointData& out) const {
         if (!validate_id(id)) return false;

@@ -173,6 +173,21 @@ public:
         return pm_ ? pm_->get_write_count() : 0;
     }
 
+    // ---- 超时标记 / 订阅计数 ----
+
+    bool mark_timeout(PointId id) {
+        if (!initialized_) return false;
+        return pm_->mark_timeout(id);
+    }
+
+    uint64_t get_timeout_count() const {
+        return pm_ ? pm_->get_timeout_count() : 0;
+    }
+
+    uint64_t get_subscriber_count() const {
+        return sm_ ? static_cast<uint64_t>(sm_->subscription_count()) : 0;
+    }
+
     void shutdown() {
         if (!initialized_) return;
 
@@ -252,6 +267,15 @@ bool InduRTDB::is_initialized() const
 
 uint64_t InduRTDB::get_write_count() const
     { return impl_->get_write_count(); }
+
+bool InduRTDB::mark_timeout(PointId id)
+    { return impl_->mark_timeout(id); }
+
+uint64_t InduRTDB::get_timeout_count() const
+    { return impl_->get_timeout_count(); }
+
+uint64_t InduRTDB::get_subscriber_count() const
+    { return impl_->get_subscriber_count(); }
 
 void InduRTDB::shutdown()
     { impl_->shutdown(); }
