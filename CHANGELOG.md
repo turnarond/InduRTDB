@@ -4,6 +4,35 @@ All notable changes to InduRTDB.
 
 ---
 
+## [2.2.0] — 2026-05-18
+
+### Added
+- **访问控制**（SRS §4.3）：`PointManager::write()` 拒绝写入 `Access::READ_ONLY` 点位。
+  语义约定：`access == 0`（未经 `load_config` 配置）视为可写，保持向后兼容。
+- **超时标记**（SRS §7.2）：`PointManager::mark_timeout()` / `InduRTDB::mark_timeout()`
+  / `indurtdb_mark_timeout()`，置 `Quality::TIMEOUT` 并累加 `stats.timeouts`。
+  采用被动标记——阈值由驱动层判定，库不做后台巡检。
+- **订阅者计数**：`InduRTDB::get_subscriber_count()` / `indurtdb_get_subscriber_count()`（SRS §7.2）。
+- `InduRTDB::get_timeout_count()` / `PointManager` 超时计数访问路径。
+- 单元测试 14 个（`AccessControlTest` 6 例、`PointManagerTimeoutTest` 8 例），总数 59 → 73。
+- `tests/smoke/smoke_c_api.c` 补齐超时标记与订阅计数的 C ABI 冒烟覆盖。
+- `AGENTS.md` —— 面向 OpenCode/AI 会话的工程事实与陷阱清单。
+
+### Fixed
+- `indurtdb_get_timeout_count()` 原为硬编码 `return 0;` 的空实现，现已接入真实计数。
+- `stats.timeouts` 此前在全项目中**无任何递增点**，监控指标恒为 0。
+- 文档与代码失真：SRS §5.1 的 `loadConfig()`/`updateHeartbeat()` 实为
+  `load_config()`/`update_heartbeat()`；§3.2 的单参 lambda 订阅示例**无法编译**，
+  已更正为 3 参 C 函数指针签名。
+- 版本号三处漂移：`VERSION` / `CMakeLists.txt` 为 2.1.0，`include/indurtdb.hpp` 为 2.0.0，
+  现统一为 2.2.0。
+- README 将「P99 ≤10μs」标注为已实现，但 `tests/performance/` 为空且从未接入构建，
+  已改标为「未实测」并加注警示。
+- C ABI 函数清单：实际 15 个而文档声称 17 个，补齐 `mark_timeout` /
+  `get_subscriber_count` 后达到 17 个，清单与头文件逐一对齐。
+
+---
+
 ## [2.1.0] — 2026-05-11
 
 ### Added

@@ -1,6 +1,6 @@
 # InduRTDB — Industrial Real-Time Database
 
-**版本 2.1.0** | 2026-05-11
+**版本 2.2.0** | 2026-05-18
 
 ## 项目概述
 
@@ -12,16 +12,19 @@ InduRTDB 是面向工业边缘控制场景（BAS、DDC、PLC）的**超低延迟
 
 | 特性 | 状态 | 说明 |
 |------|------|------|
-| **超低延迟** | ✅ 已实现 | P99 ≤10μs (目标), 全局 Seqlock 无锁读 |
+| **超低延迟** | ⏳ 待实测 | 无锁 Seqlock 读已实现；P99 指标尚无实测数据（见「性能指标」） |
 | **工业语义** | ✅ 已实现 | 每个点位携带 quality/unit/access/timestamp |
 | **多进程共享** | ✅ 已实现 | POSIX shm_open + mmap(MAP_SHARED) |
 | **多进程读写** | ✅ 已验证 | 59 单元/集成测试通过, 含 6 个 fork 多进程测试 |
-| **C++ API** | ✅ 已实现 | `write<T>()` / `read()` / `peek()` / `subscribe()` / `loadConfig()` |
+| **C++ API** | ✅ 已实现 | `write<T>()` / `read()` / `peek()` / `subscribe()` / `load_config()` |
 | **C ABI** | ✅ 已实现 | `indurtdb_write_*` / `indurtdb_read_*` 等 17 个函数 |
+| **访问控制** | ✅ 已实现 | 只读点位（`Access::READ_ONLY`）拒绝写入 |
+| **数据质量** | ✅ 已实现 | `mark_timeout()` 主动标记 + 超时累计计数 |
 | **YAML 配置** | ✅ 已实现 | 轻量解析器, 零第三方依赖 |
 | **零 STL / 零异常** | ✅ 严格遵循 | Core 层: 定长数组, 非虚, `-fno-exceptions -fno-rtti` |
-| **SylixOS 支持** | ⚠️ OSAL 就绪 | 接口存在, 待平台验证 |
+| **SylixOS 支持** | ⚠️ OSAL 就绪 | 接口存在, 交叉编译路径尚有阻断问题, 待修复 |
 | **性能验证** | ⏳ 待完成 | ARM Cortex-A53 目标硬件 P99 测量 |
+| **CI/CD** | ⏳ 待完成 | 无 CI, 验证依赖本地 `./verify.sh` |
 
 ## 架构设计
 
@@ -108,17 +111,30 @@ InduRTDB/
 
 ### 构建命令
 
+推荐使用一键验证脚本（环境检查 → 配置 → 编译 → ctest → 冒烟测试）：
+
+```bash
+./verify.sh              # 完整验证
+./verify.sh --clean      # 清理 build/ 后重新验证
+```
+
+手工构建：
+
 ```bash
 mkdir build && cd build
 cmake .. -DBUILD_TESTS=ON
 make -j$(nproc)
 ```
 
+> 注：根 `CMakeLists.txt` 用 `file(GLOB_RECURSE)` 收集源码且未启用
+> `CONFIGURE_DEPENDS`，**新增或重命名 `.cpp` 后必须重新执行 `cmake` 配置**，
+> 否则新文件不会参与编译。
+
 ### 测试结果
 
 ```
-[==========] 59 tests from 8 test suites ran.
-[  PASSED  ] 59 tests.
+[==========] 73 tests from 10 test suites ran.
+[  PASSED  ] 73 tests.
 ```
 
 | 测试套件 | 用例数 | 说明 |
@@ -131,6 +147,8 @@ make -j$(nproc)
 | AlignmentTest | 11 | 内存对齐工具 |
 | ErrorTest | 3 | 错误处理 |
 | LoggingTest | 3 | 日志系统 |
+| AccessControlTest | 6 | 访问控制（只读点位拒写 + seqlock 释放回归） |
+| PointManagerTimeoutTest | 8 | 超时标记与计数 |
 
 ## C++ API 快速开始
 
@@ -177,15 +195,18 @@ int main() {
 }
 ```
 
-## 性能指标 (目标)
+## 性能指标 (目标，尚未实测)
 
-| 指标 | 要求 | 测试条件 |
-|------|------|----------|
-| 写入延迟 (P99) | ≤ 10 μs | ARM Cortex-A53, 10k 点位 |
-| 读取延迟 (P99) | ≤ 5 μs | 同上 |
-| 写入吞吐量 | ≥ 50k 点/秒 | 多线程并发 |
-| 内存占用 | ≤ 80 MB (10k 点位) | 含 Header + Points |
-| 启动时间 | ≤ 100 ms | 冷启动 |
+| 指标 | 要求 | 测试条件 | 状态 |
+|------|------|----------|------|
+| 写入延迟 (P99) | ≤ 10 μs | ARM Cortex-A53, 10k 点位 | ⏳ 未实测 |
+| 读取延迟 (P99) | ≤ 5 μs | 同上 | ⏳ 未实测 |
+| 写入吞吐量 | ≥ 50k 点/秒 | 多线程并发 | ⏳ 未实测 |
+| 内存占用 | ≤ 80 MB (10k 点位) | 含 Header + Points | ⏳ 未实测 |
+| 启动时间 | ≤ 100 ms | 冷启动 | ⏳ 未实测 |
+
+> ⚠️ 上表均为**设计目标**。当前 `tests/performance/` 为空且未接入构建，
+> 尚无任何实测数据支撑，切勿在对外材料中引用为已达成指标。
 
 ## 文档索引
 

@@ -1,7 +1,7 @@
 /**
  * @file indurtdb.hpp
  * @brief InduRTDB 主包含文件
- * @version 2.0.0
+ * @version 2.2.0
  * @date 2026-05-11
  * @copyright MIT License
  */
@@ -10,9 +10,9 @@
 
 // Version information
 #define INDURTDB_VERSION_MAJOR 2
-#define INDURTDB_VERSION_MINOR 0
+#define INDURTDB_VERSION_MINOR 2
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "2.0.0"
+#define INDURTDB_VERSION_STRING "2.2.0"
 
 // Basic types
 #include "indurtdb/types/basic_types.hpp"

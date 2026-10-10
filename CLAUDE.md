@@ -13,9 +13,25 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 仓库卫生（Git 纪律）
 - **不允许直接 commit 和 push**：任何提交/推送前先向用户确认；由用户决定时机与分支。
 - 提交按**逻辑单元**合并，要精简，不要每一个小改动一个 commit（中间态、chore 类改动并入所属功能提交）。
-- **禁止在 git 仓库中出现 AI / 插件相关的中间目录或产物**（如 `.claude/`、`.omc/`、`.cache/`、`docs/superpowers/`、SDD 过程残留等）；运行期本地目录必须加入 `.gitignore`。仓库根目录只保留本 CLAUDE.md 一个 AI 辅助文件。
-- 每次需求开发、功能变更、issue 修复都要**新建分支**（如 `feature/需求简述`、`fix/issue-编号`），不直接在 main 上开发。
-- 版本在**打包节点同步打 tag**（标注版本信息），并同步更新 `VERSION` 与 `CHANGELOG.md`。当前基线：VERSION=2.1.0（已有 tag 2.1.0）。
+- **禁止在 git 仓库中出现 AI / 插件相关的中间目录或产物**（如 `.claude/`、`.omc/`、`.cache/`、`docs/superpowers/`、SDD 过程残留等）；运行期本地目录必须加入 `.gitignore`。仓库根目录只保留 CLAUDE.md 与 AGENTS.md 两个 AI 辅助文件。
+- **不允许直接在 main 上开发**。
+- 版本在**打包节点同步打 tag**（标注版本信息），并同步更新 `VERSION` 与 `CHANGELOG.md`。
+
+### 分支模型（release 分支制）
+
+```
+main                     ── 只接受已发布版本的合并，长期稳定
+  └─ release/<版本号>      ── 版本分支，如 release/2.2.0，本地与远程都长期保留
+       ├─ feature/xxx  ──┐
+       └─ fix/xxx     ──┴── 合入 release 分支后即删除（本地 + 远程）
+                          版本分支开发完成 → 打 tag <版本号>
+```
+
+- **每个版本对应一个版本分支** `release/<版本号>`，从 `main` 切出；版本分支本地与远程**都保留**，作为该版本的永久历史。
+- **所有 feature / fix 分支一律合入所属的版本分支**，不得直接合入 `main`，也不得跨版本分支合入。
+- **保持分支整洁**：feature / fix 分支合入版本分支并验证通过后，**本地与远程分支都要删除**，避免堆积。
+- **版本分支开发完成时打 tag** `<版本号>`（如 `v2.2.0` 或 `2.2.0`，择一后全仓库统一），并同步 `VERSION` + `CHANGELOG.md`。tag 打在版本分支的最新提交上。
+- 版本分支收尾后不再接受新特性，只接受 bugfix 与安全修复；确需追加功能时，另开新版本分支。
 
 ## 文档即接口
 - 文档是产品的**唯一对外接口**：代码与文档必须同步更新，文档不允许滞后或腐败。

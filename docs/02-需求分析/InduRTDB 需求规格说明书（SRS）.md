@@ -3,9 +3,9 @@
 ---
 
 # **InduRTDB 需求规格说明书（SRS）**  
-**版本：2.1.0**  
-**日期：2026年5月16日**  
-**修订说明**：API 签名对齐 v2.1.0 代码实现
+**版本：2.2.0**  
+**日期：2026年5月18日**  
+**修订说明**：API 签名对齐 v2.2.0 代码实现；补齐访问控制语义、超时标记接口与 C ABI 完整清单
 
 ---
 
@@ -100,10 +100,13 @@ struct PointData {
 
 > **示例**：
 > ```cpp
-> rtdb.write(1001, 23.5); // 写入温度
-> rtdb.subscribe(2001, [](const PointData& p) {
+> // 订阅回调是 C 函数指针（非 lambda / 非 std::function），在写者线程内同步触发
+> static void on_pump_cmd(PointId id, const PointData& p, void* user_data) {
 >     if (p.value.b) startCooling();
-> });
+> }
+>
+> rtdb.write(1001, 23.5);                       // 写入温度
+> rtdb.subscribe(2001, on_pump_cmd, nullptr);  // 订阅泵启动指令
 > ```
 
 ---
@@ -142,7 +145,8 @@ points:
 
 ### 4.3 安全性
 - **无指针/虚拟地址存入共享内存**（防跨进程崩溃污染）；
-- **访问控制**：只读点位禁止写入。
+- **访问控制**：只读点位禁止写入（`access == Access::READ_ONLY` 时 `write()` 返回 `false`）。
+  未经过 `load_config` 配置的点位（`access == 0`）视为可写，以保持向后兼容。
 
 ### 4.4 可维护性
 - **MISRA C++ 2008 可选合规**；
@@ -173,13 +177,28 @@ public:
     bool subscribe(PointId id, SubscriptionCallback cb, void* user_data);
     bool unsubscribe(PointId id);
 
-    bool loadConfig(const char* config_path);
+    bool load_config(const char* config_path);
 
-    void updateHeartbeat();
+    void update_heartbeat();
+
+    // 状态与指标
     bool is_initialized() const;
+    uint64_t get_write_count() const;
+    uint64_t get_timeout_count() const;
+    uint64_t get_subscriber_count() const;
+
+    // 数据质量：主动标记点位超时（阈值由驱动层判定，库不做后台巡检）
+    bool mark_timeout(PointId id);
+
     void shutdown();
 };
 ```
+
+> **命名约定**：本项目 API 一律使用 `lower_snake_case`（`load_config` / `update_heartbeat`），
+> v2.2.0 之前文档中出现的 `loadConfig` / `updateHeartbeat` 为笔误，已更正。
+>
+> **访问控制语义**：`access == 0` 表示该点位未经 `load_config` 配置，视为可写；
+> 仅当显式配置为 `Access::READ_ONLY(1)` 时 `write()` 才返回 `false`。
 
 ### 5.2 C ABI（兼容 C/Python/Rust）
 ```c
@@ -188,6 +207,7 @@ typedef struct { /* ... */ } indurtdb_point_t;
 // 17 个 C 函数，桥接到 C++ 单例
 int indurtdb_initialize(const char* instance_id,
                         uint32_t max_points, uint32_t max_subscribers);
+void indurtdb_shutdown();
 int indurtdb_write_bool(uint32_t id, bool value);
 int indurtdb_write_int32(uint32_t id, int32_t value);
 int indurtdb_write_double(uint32_t id, double value);
@@ -197,9 +217,12 @@ int indurtdb_read_int32(uint32_t id, int32_t* value);
 int indurtdb_read_double(uint32_t id, double* value);
 int indurtdb_read_string(uint32_t id, char* buffer, size_t buffer_size);
 int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
+int indurtdb_validate_id(uint32_t id);
+int indurtdb_mark_timeout(uint32_t id);
 uint64_t indurtdb_get_write_count();
 uint64_t indurtdb_get_timeout_count();
-void indurtdb_shutdown();
+uint64_t indurtdb_get_subscriber_count();
+const char* indurtdb_get_last_error();
 ```
 
 > **ABI 承诺**：v1.0 后保持向后兼容。
@@ -261,8 +284,9 @@ Application Layer → InduRTDB Core → OS Abstraction Layer (OSAL)
 | v1.0.0 | 2026-03-27 | 项目脚手架 + 全套文档 + 原型代码 | ✅ 已完成 |
 | v2.0.0 | 2026-05-11 | **架构修正**: 共享内存重写, Seqlock 轻量化, STL 移除 | ✅ 已完成 |
 | v2.1.0 | 2026-05-11 | 多进程集成测试(6), ConfigLoader, C ABI 完整实现, 59 tests | ✅ 已完成 |
-| v2.2 | TBD | SylixOS 交叉编译验证 + ARM Cortex-A53 P99 性能基准 | ⏳ 计划中 |
-| v3.0 | TBD | Unix Domain Socket 跨进程通知 + OPC UA 桥接插件 | 📋 规划中 |
+| v2.2.0 | 2026-05-18 | 补齐 SRS 缺口: 访问控制、超时标记与计数、订阅者计数；文档与代码对齐 | ✅ 已完成 |
+| v2.3 | TBD | CI/CD + Valgrind/覆盖率验证 + 性能基准（P99 实测） | ⏳ 计划中 |
+| v3.0 | TBD | SylixOS 交叉编译验证 + ARM Cortex-A53 P99 性能基准 | 📋 规划中 |
 
 ### 9.2 许可证
 - **MIT License**  
