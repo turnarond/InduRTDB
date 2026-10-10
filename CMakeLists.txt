@@ -98,15 +98,16 @@ if(BUILD_TESTS)
     if(GTest_FOUND)
         message(STATUS "GTest found, building tests")
         
-        # 收集测试源文件
+        # 收集单元/集成测试源文件（排除 smoke 目录，冒烟测试独立构建）
         file(GLOB_RECURSE TEST_SOURCES
-            "tests/*.cpp"
+            "tests/unit/*.cpp"
+            "tests/integration/*.cpp"
         )
-        
+
         if(TEST_SOURCES)
             # 创建测试可执行文件
             add_executable(indurtdb_tests ${TEST_SOURCES})
-            
+
             # 链接库
             target_link_libraries(indurtdb_tests
                 PRIVATE
@@ -114,15 +115,20 @@ if(BUILD_TESTS)
                     GTest::gtest
                     GTest::gtest_main
             )
-            
+
             # 添加测试
             add_test(NAME indurtdb_tests COMMAND indurtdb_tests)
-            message(STATUS "Tests enabled: ${TEST_SOURCES}")
+            message(STATUS "Unit/Integration tests enabled: ${TEST_SOURCES}")
         else()
-            message(STATUS "No test sources found")
+            message(STATUS "No unit/integration test sources found")
         endif()
     else()
-        message(STATUS "GTest not found, skipping tests")
+        message(STATUS "GTest not found, skipping unit/integration tests")
+    endif()
+
+    # 冒烟测试 —— 不依赖 GTest，独立可执行文件，返回码判定
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/smoke")
+        add_subdirectory(tests/smoke)
     endif()
 else()
     message(STATUS "Tests disabled by user")

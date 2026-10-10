@@ -17,7 +17,7 @@ namespace utils {
 
 // 日志级别
 enum class LogLevel {
-    DEBUG,
+    DEBUG_LEVEL,
     INFO,
     WARNING,
     ERROR,
@@ -112,7 +112,7 @@ void log_debug(const char* file, int line, const char* format, ...) {
 #ifndef INDURTDB_DISABLE_LOG
     va_list args;
     va_start(args, format);
-    internal_log(LogLevel::DEBUG, file, line, format, args);
+    internal_log(LogLevel::DEBUG_LEVEL, file, line, format, args);
     va_end(args);
 #endif
 }
