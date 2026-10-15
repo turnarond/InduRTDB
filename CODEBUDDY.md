@@ -8,7 +8,7 @@ InduRTDB 是**纯 C11 实现的工业实时数据库**，定位为边缘控制�
 |---|---|
 | 跨进程共享内存点位存储（低延迟、确定性）、工业语义（quality/timestamp/unit/access）、订阅、崩溃自愈 | 南向设备驱动（Modbus/OPC UA/S7）、北向 SCADA 对接、持久化/历史库、集群同步 |
 
-它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 v3.3.0（README / `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏四处一致）。
+它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 **v3.7.0**（README / `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏四处一致）。
 
 ## 常用命令
 
@@ -22,7 +22,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```bash
 cd build && ctest --output-on-failure -j$(nproc)
 ```
-需先安装 GTest（`find_package(GTest REQUIRED)`）。15 个单元测试 + 1 个多进程集成测试（共 16 个 ctest 用例，每个 `test_c_*.cpp` 一个可执行文件）；gtest 层面共 26 套件 / 126 用例。引用测试数量时须说明是哪一层。
+需先安装 GTest（`find_package(GTest REQUIRED)`）。**37 个 ctest 用例**（25 单元 + 12 集成），gtest 层面共 **266 个用例**。引用测试数量时须说明是哪一层——这两个数字不是同一口径，别混用。
 
 **运行单个测试**
 ```bash
@@ -75,28 +75,40 @@ cd demo && make INDU_PREFIX=<prefix> && make run            # 经 pkg-config 消
 单向依赖，**不允许反向引用**：
 
 ```
-include/indurtdb/indurtdb.h   唯一公共头文件（26 个函数，单例风格）
+include/indurtdb/indurtdb.h   唯一公共头文件
+                              v1 单例 API 62 个（已标 INDURTDB_DEPRECATED，B5）
+                              v2 句柄 API 50 个（indurtdb_h_*，v3.4 T4 去单例化）
         ↓
-src/api/indurtdb.c            外观层：全局单例 g_rtdb，串联各模块、错误码、fork 检测
+src/api/indurtdb.c            v1 外观层：全局单例 g_rtdb，串联各模块、错误码、fork 检测
+rtdbd/                        v3.3 写权威服务进程：UDS 串行写 + UID 鉴权 + 审计 + 背压 + RBE 通知门控
+client/                       客户端库：RPC 读写订阅，服务不可用时本地排队重放
         ↓
 src/core/                     irt_shm / irt_point_manager / irt_subscription / irt_config
+                              irt_semantics（死区/EURange 纯函数） irt_index（name→id） irt_delta（运行时注册表持久化）
         ↓
 src/internal/                 irt_types.h（共享内存布局） irt_seqlock.h（无锁原语）
 src/osal/                     irt_osal.h + posix/ + sylixos/（构建期选择实现，无虚表）
 ```
 
+> v1 单例 API 已进入退役轨道（v3.7 B5 标记 deprecated，**删除推迟到 v4.0**）。新代码一律用 `indurtdb_h_*` 句柄 API；改动 v1 时只做必要的兼容修复，不要新增功能。
+
 `g_rtdb` 是一个文件域静态结构体，持有 `irt_shm_t / irt_pm_t / irt_sub_t / initialized / owner_pid`。核心层**无堆分配**（规范禁止 malloc/free），全部为定长数组与栈缓冲，因此 7x24 运行无内存碎片。错误信息用 `_Thread_local char g_last_error[256]`，无需锁。
 
 ### 共享内存布局 —— ABI 硬约束
 
-实例段名 `/indurtdb_<instance_id>`，一段连续内存：
+实例段名 `/indurtdb_<instance_id>`，一段连续内存。**v3.4 起为「布局 v2」**——不再是「Header + 点位 + 心跳」的线性排列，而是四个区段，偏移写进 Header 的 `off_*` 字段，访问点一律读 `off_*` 而非按 `sizeof(header)` 硬算：
 
 ```
-irt_header_t (64B, aligned 64) + max_points * indurtdb_point_t (128B, aligned 128)
-                               + max_subscribers * irt_subscriber_entry_t (16B)
+irt_header_t (128B, aligned 128)
+  ├─ 点位区   indurtdb_point_t × max_points (128B)
+  ├─ 索引区   name→id 开放寻址索引   (off_index)
+  ├─ 元数据区 每点 32B 冷数据（EURange/deadband/flags）(off_meta)
+  └─ 订阅区   irt_subscriber_entry_t × max_subscribers (16B) (off_subs)
 ```
 
-`irt_header_t` 含 `magic(0x1DBA1DBA)`、`version`、`max_points`、`max_subscribers`、`write_seq`（全局 Seqlock 序列号）、`owner_pid`（v3.1 复用填充区新增，64B 不变）、`stats{writes,timeouts}`。点位为 POD，**禁止含指针**。三处 `IRT_STATIC_ASSERT`（64/128/16）在编译期锁死布局，与 v2.x C++ 版**逐字节兼容**——这是跨版本/跨语言互操作的前提，任何结构体字段增删改都必须先评估 ABI 影响。
+`irt_header_t` 含 `magic(0x1DBA1DBA)`、`version`、`max_points`、`max_subscribers`、`write_seq`（全局 Seqlock 序列号）、`owner_pid`、`stats{writes,timeouts}`，以及布局 v2 新增的 `crc32`（Header 完整性校验）、`flags`、`off_points/off_index/off_meta/off_subs` 四个区段偏移、`index_count`、`scan_skipped`。点位为 POD，**禁止含指针**。多组 `IRT_STATIC_ASSERT` 在编译期锁死各字段偏移与结构体大小。
+
+> ⚠️ **Header 从 64B 扩到 128B 属于 ABI 变更**，段版本从 1 升到 2，**v1 段拒绝挂载**。这意味着 v3.4+ 无法直接复用 v3.3 及更早创建的段——升级需停机，配套 `irt_migrate` 工具。任何改动 `irt_types.h` / `indurtdb.h` 结构体的操作都必须先评估 ABI 影响。
 
 ### 并发模型
 
@@ -117,7 +129,12 @@ irt_header_t (64B, aligned 64) + max_points * indurtdb_point_t (128B, aligned 12
 
 ### 订阅与配置
 
-订阅是**进程私有**的：`irt_sub_t` 持 256 个定长槽位（`IRT_SUB_MAX_CALLBACKS`），回调指针不进共享内存；共享内存只存心跳表（pid + `last_heartbeat_ns`），`irt_sub_cleanup_zombies()` 清理超时条目。因此**回调不跨进程**，跨进程通知只能靠轮询/共享内存数据本身。
+订阅分两层，取决于走哪条路径：
+
+- **v1 进程内回调**：`irt_sub_t` 持 256 个定长槽位（`IRT_SUB_MAX_CALLBACKS`），回调指针不进共享内存；共享内存只存心跳表（pid + `last_heartbeat_ns`），`irt_sub_cleanup_zombies()` 清理超时条目。**此路径回调不跨进程。**
+- **v3.3 起跨进程通知**（推荐路径）：写操作收敛到 `rtdbd` 进程，由它经 UDS 向订阅客户端推送 `NOTIFY`。v3.7 主题 A 进一步加了 **按订阅者的 RBE 门控**——仅在死区越过或 EURange 边界跨越时推送，首值必发。
+
+**绕过 `rtdbd` 直写共享内存的点位不会产生跨进程通知**，这是架构上的既定取舍（多写者会破坏写权威与通知一致性）。
 
 配置：`irt_config.c` 自带轻量 key=value 解析与 YAML 点位元数据解析，不引入第三方库。注意 `.gitignore` 忽略 `*.yaml/*.yml`，新增配置样例需 `-f` 强制入库或改用 `.txt` 后缀。
 
@@ -128,24 +145,32 @@ irt_header_t (64B, aligned 64) + max_points * indurtdb_point_t (128B, aligned 12
 ### 测试体系
 
 - `tests/unit/`：C++17 + GTest 包装纯 C API（库本体零 C++），每个 `test_c_*.cpp` 一个 ctest 用例。
-- `tests/integration/`：`test_c_multi_process.cpp`，fork 多进程读写 + **原始字节布局回归**，是 ABI 防线的关键。
+- `tests/integration/`：12 个用例——`test_c_multi_process.cpp`（fork 多进程 + **原始字节布局回归**，ABI 防线关键）、`test_e2e_mixed.cpp`，以及 `test_rtdbd_*` 系列（core / proto_v2 / notify / health / config / backpressure / recovery / delta）与 `test_irtcli_queue.cpp`。
 - `tests/soak/`、`tests/bench/`：纯 C，不经 ctest，由 `scripts/` 下脚本编译运行。
-- `test_c_version` 校验版本宏与 `VERSION` 一致；`test_c_layout_seqlock` 校验布局与并发语义。
+- `test_c_version` 校验版本宏与 `VERSION` 一致；`test_c_layout_seqlock` 校验布局与并发语义；`test_c_layout_v2` 校验布局 v2 的区段偏移与 CRC。
 
 ## 关键不变式（改代码前必读）
 
 1. **零动态内存分配**：库代码禁止 malloc/free；缓冲区编译期定长。
 2. **零 C++ 依赖**：库本体不含 STL/异常/RTTI/虚表；C++ 仅出现在测试。
 3. **只用 `__atomic_*` builtins**，禁用 `stdatomic.h`（SylixOS 支持不完整）。
-4. **布局字节兼容**：改 `irt_types.h` / `indurtdb.h` 结构体前，先确认 v2.x 兼容与静态断言。
+4. **布局字节兼容**：改 `irt_types.h` / `indurtdb.h` 结构体前，先确认与 v3.4 布局 v2 的兼容性与静态断言；改 Header 大小即段版本变更，旧段拒绝挂载。
 5. **版本号四处同步**：`VERSION`、CMake `project(VERSION)`、`indurtdb.h` 宏、`README`/`CHANGELOG`。
 6. **读路径无锁**：不要在读路径引入锁或系统调用。
-7. **文档即对外接口**：改 API/架构/行为必须同步 `docs/` 对应文档，防止文档腐败。
+7. **热路径零 meta 读**：默认 `indurtdb_write_*` 强制 `quality = GOOD` 且不读点位元数据。语义字段（EURange/死区）只允许经 rtdbd 的质量感知写入口进入，违反会让 P99 回归。
+8. **RBE 状态不进共享内存**：按订阅者的上报状态存在 rtdbd 进程内存，避免 ABI 变更。
+9. **写权威唯一**：跨进程通知依赖写收敛到 `rtdbd`。直写共享内存的点位不产生 `NOTIFY`，这是设计取舍不是缺陷。
+10. **文档即对外接口**：改 API/架构/行为必须同步 `docs/` 对应文档，防止文档腐败。
 
 ## 仓库与协作约定
 
 - **禁止直接 commit / push**：提交需用户确认；commit 要精简聚合，避免每个小改动一个提交。
-- **分支**：需求开发、变更、修 issue 一律新建分支。版本打包节点打 tag 并标注版本信息。
+- **分支模型（release 分支制）**：`main` ← `release/<版本号>` ← `feature/xxx` / `fix/xxx`。
+  - 每个版本对应一个版本分支 `release/<版本号>`，本地与远程**都长期保留**。
+  - 所有 `feature/` / `fix/` 分支**一律合入所属版本分支**；不得直接合入 `main`，也不得跨版本分支合入。
+  - **保持分支整洁**：合入并验证通过后，`feature/` / `fix/` 分支**本地与远程都要删除**。
+  - 版本分支开发完成时打 tag，并同步 `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / README·CHANGELOG。
+  - 版本分支收尾后不再接受新特性，只接受 bugfix；确需追加功能则另开新版本分支。
 - **保持仓库干净**：不得把 `.superpower`、`.claude`、`.omc`、`.codegraph` 等 AI/插件中间目录，以及 `build/`、`build-*/` 构建产物提交入库。
 - **中文优先**：沟通与文档一律中文（专有名词除外）。
 - **文档规范**：`docs/` 按 `01-白皮书`、`02-需求文档`、`03-设计文档`、`04-技术文档`、`05-SDK手册`、`06-开发规划` 数字前缀排序，文件与目录名用中文；文档是唯一对外接口，须始终最新。
