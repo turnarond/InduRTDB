@@ -4,6 +4,44 @@ All notable changes to InduRTDB.
 
 ---
 
+## [Unreleased] — v3.8 进行中
+
+### Added
+- **配置解析器支持 int64 / uint32**（D6）：`irt_config_parse_type()` 补两个分支，
+  `indurtdb_h_load_config` 的类型过滤上限由 `INDURTDB_TYPE_STRING` 改为 `INDURTDB_TYPE_FLOAT`。
+  此前 YAML 中写 `type: int64` / `uint32` 会被解析为 `0xff` 并**静默丢弃**，
+  而 rtdbd 仍以退出码 0 正常启动。
+- **`INDURTDB_ERR_READ_ONLY(-6)`**：只读点位拒写的专用错误码（纯追加，向后兼容）。
+- 官方配置样例 `config/rtdbd/`（policy.conf / points.yaml / README），
+  11 个点位经「rtdbd 启动 → 写段 → 逐点回读」实测验证。
+- 部署运维文档 `docs/07-部署运维/`（5 篇：安装配置 / 启动守护 / 监控诊断 / 故障排查升级）。
+
+### Fixed
+- **写路径错误码与文档契约不符**：`h_write_and_notify` 原样透传 pm 层内部负值，
+  而两套编码不一致——内部 -2（写冲突）恰好等于 `ERR_NOT_FOUND`、-3（只读拒写）恰好等于
+  `ERR_FULL`。结果 `indurtdb_h_write_*` **从不返回头文件承诺的 `INDURTDB_ERR_BUSY`**，
+  且只读拒写被误报为「索引已满」。已新增 `h_translate_write_rc()` 统一对齐。
+- **并发写丢写**：`pm_write_impl_q` 遇 seqlock 冲突直接返回、不重试。
+  2 线程 × 500 次写同一点位实测丢写率 **~50%**。已加入库内有限重试
+  （复用 `IRT_SEQLOCK_MAX_RETRY=3` + `sched_yield`，与 CRUD 路径同一模式），
+  丢写率降至 **<2%**；配截止时间重试（4 线程 1000 次写）可达 **零丢失**。
+- 配置解析器类型过滤上限用 `INDURTDB_TYPE_STRING`(3) 而非类型集合上限，
+  导致 int64(4)/uint32(5)/float(6) 一律被丢弃。
+
+### Changed
+- `tests/unit/test_c_concurrency.cpp` 的 `ConcurrentWriteSamePoint` 断言由 `> 250`
+  （1000 次写只要求过半成功）收紧为 `>= 980` —— 原断言等于固化「冲突即丢写」的缺陷行为。
+- 新增 `ConcurrentWriteHighContentionNoDroppedWrites`，固化**截止时间重试**范式
+  （固定次数重试在无界竞争下必有残余尾部；本项目以确定性执行时间为原则，不无限自旋）。
+
+### Notes
+- `type: float` 仍映射到 `double`（单精度丢失）。`INDURTDB_TYPE_FLOAT(6)` 虽在类型集合内
+  但解析器不产出该值，改动会使既有配置的点位静默降为单精度，故维持原状。
+- 性能：改动前后同机 `run_bench.sh --quick` 对比，P50 基本不变
+  （write_int32 0.305→0.310 μs，write_double 0.162→0.163 μs），全部指标远优于 P99 ≤ 10 μs。
+
+---
+
 ## [3.7.0] — 2026-10-06 / 10-07「核心语义深化 + 运维硬化」
 
 本版本含两个主题：

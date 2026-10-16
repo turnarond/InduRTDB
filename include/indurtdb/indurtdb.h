@@ -162,6 +162,7 @@ bool    indurtdb_deadband_exceeded(bool abs_mode, double deadband,
 #define INDURTDB_ERR_FULL    (-3)   /* 索引/表已满，无法注册 */
 #define INDURTDB_ERR_NOT_INIT (-4)  /* 未初始化 */
 #define INDURTDB_ERR_BUSY    (-5)   /* 并发写冲突，重试耗尽 */
+#define INDURTDB_ERR_READ_ONLY (-6) /* SRS §4.3：只读点位禁止写入 */
 
 /* ==== 订阅回调 ==== */
 typedef void (*indurtdb_callback_t)(uint32_t id,
