@@ -1,0 +1,99 @@
+# InduRTDB 点位配置样例
+#
+# ⚠️ 解析器只读 `points:` 之后的内容。写在它前面的任何键
+#    （含 instance_id / max_points / max_subscribers）会被【静默忽略】。
+#    这三项只能通过命令行设置：
+#       --instance / --max-points / --max-subs
+#
+# 解析规则：
+#   注释        # 起始到行尾
+#   新点位      必须以 "- "（减号+空格）开头
+#   空行/怪行   静默跳过，不报错
+#   id 非数字   该点位整项被丢弃
+#   id: 0       必须同时写 name，否则解析器的 "cur.id != 0" 判定会吞掉该点位
+#
+# 字段取值：
+#   access  1=READ_ONLY（write() 被拒）  3=READ_WRITE
+#   unit    0=无 1=°C 2=Pa 3=% 等
+#   flags   特性位，仅允许已知位；未知位导致启动校验失败（退出码 2）
+#
+# ⚠️ type 的可用取值仅 4 种（见 src/core/irt_config.c: irt_config_parse_type）：
+#     bool
+#     int32   （别名 int）
+#     double  （别名 float —— 注意会被当成 double，不保留单精度）
+#     string  （别名 str）
+#
+# ⚠️ 尽管 API 层支持 INDURTDB_TYPE_INT64(4) / INDURTDB_TYPE_UINT32(5)，
+#    配置解析器【不识别】"int64" 与 "uint32"，它们会被解析为 0xff，
+#    随后在 src/api/indurtdb.c 的类型过滤处
+#        if (pm->type > INDURTDB_TYPE_STRING) continue;
+#    被【静默丢弃】——rtdbd 仍以退出码 0 正常启动，该点位不会出现。
+#    如需这两类点位，只能初始化后经 SET_META / 运行时 API 设定。
+#    （此为已知缺口，见 docs/06-开发规划/13-Linux产品化完善计划.md）
+
+points:
+  # ---- 采集点：温度 ----
+  - id: 1001
+    name: "AHU_01.Supply_Temp"
+    type: double
+    unit: 1
+    access: 3
+    eur_min: -50.0
+    eur_max: 150.0
+    flags: 1
+
+  # ---- 采集点：带绝对死区的湿度 ----
+  - id: 1002
+    name: "AHU_01.Supply_Temp_Humidity"
+    type: double
+    unit: 3
+    access: 3
+    deadband: 0.5
+
+  # ---- 采集点：带百分比死区的压力 ----
+  - id: 1003
+    name: "AHU_01.Supply_Pressure"
+    type: double
+    unit: 2
+    access: 3
+    eur_min: 0.0
+    eur_max: 5000.0
+    deadband: 1.0
+
+  # ---- 采集点：整型累计量（int32）----
+  - id: 1004
+    name: "AHU_01.Energy_Total"
+    type: int32
+    access: 3
+
+  # ---- 控制点：布尔量 ----
+  - id: 2001
+    name: "Pump_01.Start_CMD"
+    type: bool
+    access: 3
+
+  # ---- 控制点：整型设定值 ----
+  - id: 2002
+    name: "Fan_01.Speed_Setpoint"
+    type: int32
+    access: 3
+
+  # ---- 只读点：设备状态由驱动上报，运行期只读 ----
+  - id: 3001
+    name: "Pump_01.Running_Status"
+    type: bool
+    access: 1
+
+  # ---- 状态文本（string 最长 31 字符 + 终止符）----
+  - id: 3002
+    name: "AHU_01.Mode_Text"
+    type: string
+    access: 1
+
+  # ---- 模拟量 ----
+  - id: 1005
+    name: "AHU_01.Coil_Valve_Position"
+    type: double
+    unit: 3
+    access: 3
+

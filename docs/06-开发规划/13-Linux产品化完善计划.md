@@ -37,10 +37,11 @@
 |---|---|---|
 | **无 systemd unit 文件** | 全仓库 `find *.service` 为空 | rtdbd 有 `--supervise` / `--pidfile` 自监管，但交付方拿到手需自行编写 service |
 | **无 supervisor 配置** | CHANGELOG 明写「supervisor 对致命码（2/4）停止 respawn」，仓库内无对应 conf | 上述机制实际由交付方配置，行为不可控 |
-| **无部署运维文档** | `docs/` 有 01–06，**无部署/运维目录** | 对接方无部署指引，只能读源码 |
-| **无配置样例** | rtdbd `--config` 走 `policy.c` 手写 key=value 解析，**仓库内零样例** | 对接方无从得知配置格式 |
-| **`.gitignore` 屏蔽配置后缀** | 第 60–62 行忽略 `*.yaml` / `*.yml` / `*.json` | 想入库配置样例必须 `git add -f`，极易遗漏 |
+| **部署运维文档** | ✅ **已补 `docs/07-部署运维/`（D2）** | — |
+| **配置样例** | ✅ **已补 `config/rtdbd/`（D3）**，9 点位实测通过 | — |
+| **`.gitignore` 屏蔽配置后缀** | 第 60–62 行忽略 `*.yaml`/`*.yml`/`*.json`；已加 `!config/rtdbd/*.yaml` 放行 | 自建样例仍需 `git add -f` |
 | **无打包目标** | 有 install 规则（TARGETS / EXPORT / pkg-config），**无 CPack** | 交付需手工打包，版本易错配 |
+| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` **只安装库本体** | 交付需从构建目录手动拷贝 |
 
 ### 2.2 功能线 —— 已相当完整，剩硬骨头
 
@@ -73,10 +74,11 @@
 | # | 任务 | 产出 | 验收 |
 |---|---|---|---|
 | D1 | systemd unit + supervisor 配置 | `deploy/` 目录 | `systemd-analyze verify` 通过；supervisor conf 可加载 |
-| D2 | 部署运维文档 | 新建 `docs/07-部署运维/` | 覆盖：安装、配置、启动、监控、故障排查、升级 |
-| D3 | 配置样例 | `rtdbd --config` 样例 + 点位 YAML 样例 | 样例可被 rtdbd 直接加载；**注意 `.gitignore` 需 `-f` 入库** |
-| D4 | CPack 打包 | `tar.gz` + 可选 deb | 打包物含库、头文件、pkg-config、rtdbd、配置样例 |
+| D2 | 部署运维文档 | ✅ `docs/07-部署运维/` 5 篇 | 已交付 |
+| D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，9 点位实测通过 |
+| D4 | CPack 打包 + **为 `rtdbd`/`client`/`irt_diag` 补 install 规则** | `tar.gz` + 可选 deb | 打包物含库、头文件、pkg-config、rtdbd、工具、配置样例 |
 | D5 | v3.5.0 / v3.6.0 补 tag | 历史 tag | 与 CHANGELOG 条目对齐（决策见 08 §11 第 2 项） |
+| **D6** | **配置解析器支持 int64 / uint32** | `irt_config_parse_type()` 补两个分支 | **D3 实测发现的缺口**：配置里写 `type: int64` 会被静默丢弃（rtdbd 退出码仍为 0），与 G12「类型扩展已交付」的宣称不符 —— API 层支持但配置层不支持 |
 
 ### 第 2 档 ——「好用」（预计 1 周）
 
