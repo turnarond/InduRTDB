@@ -34,7 +34,7 @@ grep -vE '^\s*(#|$)' /etc/rtdbd/policy.conf | wc -l   # 必须等于预期规则
 
 ## 本样例的验证状态
 
-`points.yaml` 的 9 个点位已实测通过「rtdbd 启动 → 写段 → 逐点回读」验证，
+`points.yaml` 的 11 个点位已实测通过「rtdbd 启动 → 写段 → 逐点回读」验证，
 类型 / unit / access 三字段逐项核对正确。
 
 | id | name | type | unit | access |
@@ -44,44 +44,31 @@ grep -vE '^\s*(#|$)' /etc/rtdbd/policy.conf | wc -l   # 必须等于预期规则
 | 1003 | AHU_01.Supply_Pressure | double(2) | 2 Pa | 3 RW |
 | 1004 | AHU_01.Energy_Total | int32(1) | 0 | 3 RW |
 | 1005 | AHU_01.Coil_Valve_Position | double(2) | 3 % | 3 RW |
+| 1006 | AHU_01.Energy_Total_Wh | **int64(4)** | 0 | 3 RW |
+| 1007 | AHU_01.Run_Count | **uint32(5)** | 0 | 3 RW |
 | 2001 | Pump_01.Start_CMD | bool(0) | 0 | 3 RW |
 | 2002 | Fan_01.Speed_Setpoint | int32(1) | 0 | 3 RW |
 | 3001 | Pump_01.Running_Status | bool(0) | 0 | **1 RO** |
 | 3002 | AHU_01.Mode_Text | string(3) | 0 | **1 RO** |
 
-## 已知限制：配置解析器不支持 int64 / uint32
+## 类型名解析
 
-`irt_config_parse_type()`（`src/core/irt_config.c:107`）只识别 **4 种**类型名：
+`irt_config_parse_type()`（`src/core/irt_config.c`）识别：
 
 ```
 bool
 int32   （别名 int）
+int64
+uint32
 double  （别名 float —— 会被当成 double，不保留单精度）
 string  （别名 str）
 ```
 
-尽管 API 层定义了 `INDURTDB_TYPE_INT64(4)` 与 `INDURTDB_TYPE_UINT32(5)`，
-配置里写 `type: int64` / `type: uint32` 会被解析为 `0xff`，
-随后在 `src/api/indurtdb.c:367` 的类型过滤处被**静默丢弃**：
+无法识别的名字返回 `0xff`，该点位会被**静默丢弃**。
 
-```c
-if (pm->type > INDURTDB_TYPE_STRING) continue;
-```
+`float` 映射到 `double` 是历史行为：`INDURTDB_TYPE_FLOAT(6)` 虽是类型集合的上限，
+但解析器不产出该值——改动会让既有配置的点位静默降为单精度，故维持原状。
 
-**rtdbd 仍以退出码 0 正常启动，该点位不会出现，`find_by_name` 报 NOT_FOUND。**
-需要这两类点位只能在初始化后经 `SET_META` / 运行时 API 设定。
-
-此为已知缺口，已登记在
-[`06-开发规划/13-Linux产品化完善计划.md`](../../docs/06-开发规划/13-Linux产品化完善计划.md)。
-
-## 验证命令
-
-```bash
-# 段巡检（version / 点数 / CRC / owner pid / index_count）
-cd tools/irt_diag && python3 -m irt_diag.cli inspect --id <instance_id>
-
-# index_count 应等于配置中实际生效的点位数
-```
-
-若 `index_count` 小于配置文件的条目数，说明有条目被静默丢弃——
-最常见原因就是上面的 `type: int64` / `type: uint32`。
+> **v3.8 修复**：此前解析器只认 4 种类型，`int64` / `uint32` 会被解析成 `0xff`，
+> 再在 `src/api/indurtdb.c` 的 `if (pm->type > INDURTDB_TYPE_FLOAT) continue;` 处被丢弃，
+> 而 **rtdbd 仍以退出码 0 正常启动**。已修复并加回归测试。

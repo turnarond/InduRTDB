@@ -364,7 +364,9 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
     for (int i = 0; i < n; ++i) {
         const irt_point_meta_t* pm = &batch.points[i];
         if (pm->id >= maxp) continue;
-        if (pm->type > INDURTDB_TYPE_STRING) continue;
+        /* 上限须取类型集合的最大值，而非 STRING（3）——后者会把
+         * int64(4) / uint32(5) / float(6) 全部静默丢弃。 */
+        if (pm->type > INDURTDB_TYPE_FLOAT) continue;
 
         /* v3.7 B3：某字段值无法解析（非数字 / 溢出 / NaN）→ 判为配置非法。
          * 否则 `deadband: abc` 会被当 0 而"看起来合法"，与 fail-fast 目标冲突。 */

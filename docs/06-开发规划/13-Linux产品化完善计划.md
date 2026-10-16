@@ -78,7 +78,7 @@
 | D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，9 点位实测通过 |
 | D4 | CPack 打包 + **为 `rtdbd`/`client`/`irt_diag` 补 install 规则** | `tar.gz` + 可选 deb | 打包物含库、头文件、pkg-config、rtdbd、工具、配置样例 |
 | D5 | v3.5.0 / v3.6.0 补 tag | 历史 tag | 与 CHANGELOG 条目对齐（决策见 08 §11 第 2 项） |
-| **D6** | **配置解析器支持 int64 / uint32** | `irt_config_parse_type()` 补两个分支 | **D3 实测发现的缺口**：配置里写 `type: int64` 会被静默丢弃（rtdbd 退出码仍为 0），与 G12「类型扩展已交付」的宣称不符 —— API 层支持但配置层不支持 |
+| **D6** | ~~配置解析器支持 int64 / uint32~~ | ✅ **已修复**：`irt_config_parse_type()` 补两分支 + `indurtdb.c` 类型过滤上限由 `STRING` 改为 `FLOAT` + 5 个回归测试 | D3 实测发现：`type: int64` 曾被静默丢弃而 rtdbd 退出码仍为 0。已实测：11 个点位全部生效，int64/uint32 正确落段 |
 
 ### 第 2 档 ——「好用」（预计 1 周）
 
