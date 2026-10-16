@@ -17,19 +17,18 @@
 #   unit    0=无 1=°C 2=Pa 3=% 等
 #   flags   特性位，仅允许已知位；未知位导致启动校验失败（退出码 2）
 #
-# ⚠️ type 的可用取值仅 4 种（见 src/core/irt_config.c: irt_config_parse_type）：
-#     bool
-#     int32   （别名 int）
-#     double  （别名 float —— 注意会被当成 double，不保留单精度）
-#     string  （别名 str）
+# ⚠️ type 的可用取值见 src/core/irt_config.c: irt_config_parse_type
 #
-# ⚠️ 尽管 API 层支持 INDURTDB_TYPE_INT64(4) / INDURTDB_TYPE_UINT32(5)，
-#    配置解析器【不识别】"int64" 与 "uint32"，它们会被解析为 0xff，
-#    随后在 src/api/indurtdb.c 的类型过滤处
-#        if (pm->type > INDURTDB_TYPE_STRING) continue;
-#    被【静默丢弃】——rtdbd 仍以退出码 0 正常启动，该点位不会出现。
-#    如需这两类点位，只能初始化后经 SET_META / 运行时 API 设定。
-#    （此为已知缺口，见 docs/06-开发规划/13-Linux产品化完善计划.md）
+#   bool
+#   int32   （别名 int）
+#   double  （别名 float —— 注意会被当成 double，不保留单精度）
+#   string  （别名 str）
+#   int64        （v3.8 D6 起支持）
+#   uint32       （v3.8 D6 起支持）
+#
+#     INDURTDB_TYPE_FLOAT(6) 是类型集合上限，但解析器不产出该值：
+#     "float" 这个词历史上就映射到 double，改动会使既有配置的点位
+#     静默降为单精度，故维持原状。
 
 points:
   # ---- 采集点：温度 ----
@@ -95,5 +94,16 @@ points:
     name: "AHU_01.Coil_Valve_Position"
     type: double
     unit: 3
+    access: 3
+
+  # ---- 64 位累计量 / 无符号整型 ----
+  - id: 1006
+    name: "AHU_01.Energy_Total_Wh"
+    type: int64
+    access: 3
+
+  - id: 1007
+    name: "AHU_01.Run_Count"
+    type: uint32
     access: 3
 

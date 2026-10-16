@@ -109,6 +109,13 @@ uint8_t irt_config_parse_type(const char* s) {
     if (strcmp(s, "bool") == 0)   return INDURTDB_TYPE_BOOL;
     if (strcmp(s, "int") == 0 || strcmp(s, "int32") == 0)
         return INDURTDB_TYPE_INT32;
+    /* v3.4 T6 扩展了 API 层的类型集合，配置解析器此前未跟上：
+     * int64 / uint32 会落到 0xff，再被 indurtdb_h_load_config 的
+     * `pm->type > 上限则丢弃` 过滤静默吞掉（rtdbd 仍退出 0）。 */
+    if (strcmp(s, "int64") == 0)  return INDURTDB_TYPE_INT64;
+    if (strcmp(s, "uint32") == 0) return INDURTDB_TYPE_UINT32;
+    /* "float" 沿用历史行为映射到 DOUBLE（INDURTDB_TYPE_FLOAT 未被解析器
+     * 产出）。改为 FLOAT 会使既有配置的点位静默降为单精度，故维持原状。 */
     if (strcmp(s, "double") == 0 || strcmp(s, "float") == 0)
         return INDURTDB_TYPE_DOUBLE;
     if (strcmp(s, "str") == 0 || strcmp(s, "string") == 0)

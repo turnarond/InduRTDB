@@ -234,3 +234,79 @@ TEST(ConfigValidate, ErrorReasonsAreDistinct)
                  indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_FLAGS));
     EXPECT_STRNE(indurtdb_cfg_error_reason(INDURTDB_CFG_ERR_TYPE), "");
 }
+
+/* ============================================================
+ * 类型名解析 (D6)
+ *
+ * API 层定义了 7 种点位类型，但 irt_config_parse_type() 曾只识别 4 种，
+ * 导致 YAML 里写 int64 / uint32 被解析为 0xff，随后在
+ * indurtdb_h_load_config 的类型过滤处被静默丢弃 —— rtdbd 退出码仍为 0。
+ * ============================================================ */
+
+TEST(ConfigParseType, Int64AndUint32AreRecognised)
+{
+    EXPECT_EQ(irt_config_parse_type("int64"),  INDURTDB_TYPE_INT64);
+    EXPECT_EQ(irt_config_parse_type("uint32"), INDURTDB_TYPE_UINT32);
+}
+
+TEST(ConfigParseType, ExistingNamesUnchanged)
+{
+    EXPECT_EQ(irt_config_parse_type("bool"),   INDURTDB_TYPE_BOOL);
+    EXPECT_EQ(irt_config_parse_type("int"),    INDURTDB_TYPE_INT32);
+    EXPECT_EQ(irt_config_parse_type("int32"),  INDURTDB_TYPE_INT32);
+    EXPECT_EQ(irt_config_parse_type("double"), INDURTDB_TYPE_DOUBLE);
+    EXPECT_EQ(irt_config_parse_type("str"),    INDURTDB_TYPE_STRING);
+    EXPECT_EQ(irt_config_parse_type("string"), INDURTDB_TYPE_STRING);
+}
+
+TEST(ConfigParseType, InvalidReturnsFF)
+{
+    EXPECT_EQ(irt_config_parse_type("int128"),     0xff);
+    EXPECT_EQ(irt_config_parse_type("notatype"),    0xff);
+    EXPECT_EQ(irt_config_parse_type(""),            0xff);
+    EXPECT_EQ(irt_config_parse_type(nullptr),       0xff);
+}
+
+TEST(ConfigParseType, EveryTypeNameStaysWithinLoadFilterBound)
+{
+    /* load_config 的过滤条件是 pm->type > 上限则丢弃。
+     * 任何能被解析器接受的类型名都必须落在该上限之内。 */
+    const char* names[] = {"bool", "int", "int32", "double",
+                           "str", "string", "int64", "uint32"};
+    for (const char* n : names) {
+        EXPECT_LE(irt_config_parse_type(n), INDURTDB_TYPE_FLOAT)
+            << "type name '" << n << "' would be silently dropped by load_config";
+    }
+}
+
+/* 端到端：int64 / uint32 点位必须真正进入 batch，而非被静默丢弃 */
+TEST(ConfigYamlInt64, ParsedPointsSurvive)
+{
+    const char* path = "/tmp/indurtdb_test_cfg_int64.yaml";
+    FILE* f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fputs("points:\n"
+          "  - id: 10\n"
+          "    name: \"S\"\n"
+          "    type: string\n"
+          "  - id: 11\n"
+          "    name: \"L\"\n"
+          "    type: int64\n"
+          "  - id: 12\n"
+          "    name: \"U\"\n"
+          "    type: uint32\n", f);
+    fclose(f);
+
+    irt_point_meta_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    int n = irt_point_config_parse_yaml(path, &batch);
+    remove(path);
+
+    ASSERT_EQ(n, 3);
+    ASSERT_EQ(batch.count, 3u);
+    EXPECT_EQ(batch.points[0].type, INDURTDB_TYPE_STRING);
+    EXPECT_EQ(batch.points[1].type, INDURTDB_TYPE_INT64);
+    EXPECT_EQ(batch.points[2].type, INDURTDB_TYPE_UINT32);
+
+    irt_point_config_free(&batch);
+}
