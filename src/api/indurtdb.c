@@ -106,6 +106,23 @@ static void inst_shutdown(indurtdb_t* h) {
     memset(h, 0, sizeof(*h));
 }
 
+/* 把 pm 层的内部负值翻译成对外的语义化错误码。
+ *
+ * 此前本层原样透传 pm 的返回值，而两套编码并不一致：
+ *   内部 -2 = 写冲突      → 对外恰好是 NOT_FOUND 的值（语义错位）
+ *   内部 -3 = 只读拒写    → 对外恰好是 ERR_FULL 的值（语义错位）
+ * 结果是 indurtdb_h_write_* 从不返回头文件承诺的 INDURTDB_ERR_BUSY，
+ * 调用方无法按文档区分「忙」「只读」「越界」。此处统一对齐。 */
+static int h_translate_write_rc(int rc) {
+    switch (rc) {
+    case 0:  return INDURTDB_OK;
+    case -1: return INDURTDB_ERR_ARG;        /* id 越界 / 参数非法 */
+    case -2: return INDURTDB_ERR_BUSY;       /* seqlock 冲突，重试耗尽 */
+    case -3: return INDURTDB_ERR_READ_ONLY;  /* SRS §4.3 只读点位拒写 */
+    default: return rc;                      /* 其余原样透传 */
+    }
+}
+
 /* 写入成功后通知订阅者 (用栈变量读, 避免 _Thread_local 缓冲被回调重入覆盖) */
 static int h_write_and_notify(indurtdb_t* h, int rc, uint32_t id) {
     if (rc == 0) {
@@ -113,7 +130,7 @@ static int h_write_and_notify(indurtdb_t* h, int rc, uint32_t id) {
         if (irt_pm_read(&h->pm, id, &pt) == 0)
             irt_sub_notify(&h->sub, id, &pt);
     }
-    return rc;
+    return h_translate_write_rc(rc);
 }
 
 #define ENSURE_H(h) do { \

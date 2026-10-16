@@ -33,9 +33,17 @@ static int pm_write_impl_q(irt_pm_t* pm, uint32_t id,
     indurtdb_point_t*  pts = irt_shm_points(pm->shm);
     if (!hdr || !pts) return -1;
 
-    /* seqlock write begin */
-    uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
-    if (seq0 & 1ULL) return -2;  /* 写冲突 */
+    /* 写冲突有限重试。冲突窗口只有一次 seqlock 写入的时长（数纳秒），
+     * 与 CRUD 路径 (h_point_register / load_config) 共用同一套
+     * IRT_SEQLOCK_MAX_RETRY + sched_yield 模式。修复前本处直接 return -2，
+     * 使并发写的丢写率与竞争强度成正比。 */
+    uint64_t seq0 = 0;
+    for (int attempt = 0; attempt < IRT_SEQLOCK_MAX_RETRY; ++attempt) {
+        seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+        if (!(seq0 & 1ULL)) break;   /* 取到写锁 */
+        sched_yield();
+    }
+    if (seq0 & 1ULL) return -2;      /* 重试耗尽仍冲突 */
 
     indurtdb_point_t* p = &pts[id];
     /* SRS §4.3: 只读点位禁止写入 */

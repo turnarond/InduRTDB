@@ -35,13 +35,13 @@
 
 | 缺什么 | 实测证据 | 影响 |
 |---|---|---|
-| **无 systemd unit 文件** | 全仓库 `find *.service` 为空 | rtdbd 有 `--supervise` / `--pidfile` 自监管，但交付方拿到手需自行编写 service |
-| **无 supervisor 配置** | CHANGELOG 明写「supervisor 对致命码（2/4）停止 respawn」，仓库内无对应 conf | 上述机制实际由交付方配置，行为不可控 |
+| **无 systemd unit 文件** | 全仓库 `find *.service` 为空 | rtdbd 有 `--supervise` / `--pidfile` 自监管。**已评估：不做**，见下方 §3.1 |
+| **无 supervisor 配置** | CHANGELOG 明写「supervisor 对致命码（2/4）停止 respawn」，仓库内无对应 conf | 同上，不做 |
 | **部署运维文档** | ✅ **已补 `docs/07-部署运维/`（D2）** | — |
-| **配置样例** | ✅ **已补 `config/rtdbd/`（D3）**，9 点位实测通过 | — |
+| **配置样例** | ✅ **已补 `config/rtdbd/`（D3）**，11 点位实测通过 | — |
 | **`.gitignore` 屏蔽配置后缀** | 第 60–62 行忽略 `*.yaml`/`*.yml`/`*.json`；已加 `!config/rtdbd/*.yaml` 放行 | 自建样例仍需 `git add -f` |
-| **无打包目标** | 有 install 规则（TARGETS / EXPORT / pkg-config），**无 CPack** | 交付需手工打包，版本易错配 |
-| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` **只安装库本体** | 交付需从构建目录手动拷贝 |
+| **无打包目标** | 有 install 规则，无 CPack | **已评估：不做**，见下方 §3.1 |
+| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` 只安装库本体 | 待做（见 U3） |
 
 ### 2.2 功能线 —— 已相当完整，剩硬骨头
 
@@ -73,12 +73,35 @@
 
 | # | 任务 | 产出 | 验收 |
 |---|---|---|---|
-| D1 | systemd unit + supervisor 配置 | `deploy/` 目录 | `systemd-analyze verify` 通过；supervisor conf 可加载 |
+| ~~D1~~ | ~~systemd unit + supervisor 配置~~ | ❌ **已评估，不做**，见 §3.1 | 仓库自身不用 systemd；C 生态库不附带 unit 是常态；unit 骨架已在 07-部署运维/02 |
 | D2 | 部署运维文档 | ✅ `docs/07-部署运维/` 5 篇 | 已交付 |
-| D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，9 点位实测通过 |
-| D4 | CPack 打包 + **为 `rtdbd`/`client`/`irt_diag` 补 install 规则** | `tar.gz` + 可选 deb | 打包物含库、头文件、pkg-config、rtdbd、工具、配置样例 |
+| D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，11 点位实测通过 |
+| ~~D4~~ | ~~CPack 打包~~ | ❌ **已评估，不做**，见 §3.1 | 打包是发行版职责；三条集成路径已覆盖 |
+| D4' | 为 `rtdbd`/`client`/`irt_diag` 补 install 规则 | 3 行 CMake | 保留 —— `cmake --install` 装不全属缺陷，非打包取舍 |
 | D5 | v3.5.0 / v3.6.0 补 tag | 历史 tag | 与 CHANGELOG 条目对齐（决策见 08 §11 第 2 项） |
-| **D6** | ~~配置解析器支持 int64 / uint32~~ | ✅ **已修复**：`irt_config_parse_type()` 补两分支 + `indurtdb.c` 类型过滤上限由 `STRING` 改为 `FLOAT` + 5 个回归测试 | D3 实测发现：`type: int64` 曾被静默丢弃而 rtdbd 退出码仍为 0。已实测：11 个点位全部生效，int64/uint32 正确落段 |
+| D6 | ~~配置解析器支持 int64 / uint32~~ | ✅ **已修复** + 5 个回归测试 | D3 实测发现。实测 11 点位全部生效 |
+| **U1** | ~~写冲突重试范式~~ | ✅ **已完成**：库内重试 + 错误码契约修正 + 截止时间重试范式 | 2 线程丢写率 ~50% → <2%；配截止时间重试后零丢写 |
+
+### 3.1 已评估但决定不做
+
+**D1（systemd unit + supervisor conf）—— 不做**
+
+1. **仓库自身就不用 systemd**：`scripts/run_e2e.sh`、`run_monitor_smoke.sh` 均直接拉起二进制；全仓库无 Dockerfile / compose / `.service`
+2. rtdbd 内建 `--supervise` 已覆盖进程级自恢复
+3. **C 生态里库不附带 systemd unit 是常态**（glibc / openssl / libpq 均不发）
+4. unit 骨架与两个必须配置的参数已写入 `docs/07-部署运维/02-启动与守护.md`
+
+**代价（明确承担）**：用户一定会自己写 unit，且大概率漏掉 `RestartPreventExitStatus=2 4`，
+配置错误时会陷入重启风暴、真实原因被掩盖，目前仅靠文档挡着。
+若日后出现「现场 rtdbd 起不来」类反馈，第一件要怀疑的就是这条。
+
+**D4（CPack 打包）—— 不做**
+
+1. 集成路径已有 find_package / pkg-config / FetchContent 三条，`verify_consume.sh` 做回归
+2. **打包是发行版的职责**；库主动出 tarball/deb 反而要背版本回补与 ABI 兼容的锅
+3. 开源 C 库的常规交付方式就是 `cmake --install`
+
+但其中「`rtdbd`/`client`/`irt_diag` 不被安装」与打包无关，保留为 **D4'**。
 
 ### 第 2 档 ——「好用」（预计 1 周）
 
@@ -86,10 +109,54 @@
 
 | # | 任务 | 产出 |
 |---|---|---|
-| U1 | 写冲突正确范式 | API v2 提供可选重试封装；或文档给出经过验证的重试循环范式 + 测试 |
-| U2 | `peek()` 语义纠正 | SDK 手册显著标注单拷贝语义与失效条件；`examples/` 增加正确用法示范 |
+| ~~U1~~ | ~~写冲突正确范式~~ | ✅ **已完成**。方案与实测结论见 §3.2 |
+| U2 | `peek()` 语义纠正 | SDK 手册显著标注单拷贝语义与失效条件；`examples/` 增加正确用法示范（D2 已在部署文档标注，SDK 手册与 examples 待补） |
 | U3 | 快速上手自检脚本 | 一条命令验证部署是否正常（段可建可挂、rtdbd 可连、健康检查通过） |
 | U4 | 监控告警基线 | 基于 `RTDBD_OP_HEALTH` 的告警规则样例（60s 滑动窗口 DEGRADED 判定已就绪） |
+| U5 | v1 API 迁移指引 | v1 的 62 个函数已全量标 deprecated；`ERR_BUSY` 语义修正后 v1 与 v2 返回值行为需向集成方说明 |
+
+### 3.2 U1 写冲突：方案与实测结论
+
+**初版方案（已否决）**：为 21 个写函数各加一个 `_retry` 变体。否决理由 —— API 面积直接翻倍，
+且与 `IRT_SEQLOCK_MAX_RETRY` 已有的重试机制重复。
+
+**实际方案（三部分）**：
+
+1. **库内重试**：`pm_write_impl_q` 对 seqlock 冲突做有限重试（复用 `IRT_SEQLOCK_MAX_RETRY=3`
+   + `sched_yield`，与 CRUD 路径同一模式）
+2. **错误码契约修正**（实测发现，见下）
+3. **截止时间重试范式**：文档 + `tests/unit/test_c_concurrency.cpp` 中经实测验证的循环
+
+**实测发现的 API 缺陷**：`h_write_and_notify` 原样透传 pm 层的内部负值，而两套编码不一致：
+
+| 内部 | 含义 | 修复前实际返回 | 调用方按头文件读成 |
+|---|---|---|---|
+| -1 | id 越界 | -1 | ARG ✓ |
+| **-2** | **写冲突** | **-2** | **NOT_FOUND** ✗ |
+| **-3** | **只读拒写** | **-3** | **FULL** ✗ |
+
+即：**写路径从不返回头文件承诺的 `INDURTDB_ERR_BUSY`**，调用方无法按文档区分
+「忙」「只读」「越界」；且只读拒写被误报为「索引已满」。已新增 `h_translate_write_rc()`
+统一对齐，并新增 `INDURTDB_ERR_READ_ONLY(-6)`（纯追加，向后兼容）。
+
+**实测数据**（2 线程 × 500 次写同一点位）：
+
+| | 成功数 | 丢写率 |
+|---|---|---|
+| 修复前 | ~500 / 1000 | **~50%** |
+| 库内重试后 | ≥980 / 1000 | **<2%** |
+| + 截止时间重试（4 线程） | 1000 / 1000 | **0** |
+
+**关键取舍**：全局单 seqlock 意味着无界竞争下**有界重试必有残余尾部**
+（实测固定 4 次重试在 4 线程下仍漏 1/1000）。本项目以「确定性执行时间 / 零阻塞」
+为设计原则，**不为消灭该尾部而无限自旋** —— 因此正确范式是**按截止时间重试**而非固定次数，
+且只对 `INDURTDB_ERR_BUSY` 重试（`ERR_ARG` 等是真实错误，重试无意义）。
+
+真实部署中写经 rtdbd 串行化，不会出现测试里这种同点争抢，故残余尾部影响极小。
+
+**性能**：改动前后同机对比 `run_bench.sh --quick`，P50 基本不变
+（write_int32 0.305→0.310 μs，write_double 0.162→0.163 μs），
+P99 差异（0.467→0.500）落在机器抖动范围内（复测一次得 0.816）。全部指标远优于 P99 ≤ 10 μs。
 
 ### 第 3 档 ——「扩展」（需独立方案评审）
 
