@@ -156,3 +156,7 @@ __pycache__/
 *.pyo
 .mypy_cache/
 .pytest_cache/
+
+# 部署配置样例 —— 上方全局忽略了 *.yaml，此处放行。
+# 样例必须入库：部署方需要一份可复制的起点，见 config/rtdbd/README.md。
+!config/rtdbd/*.yaml
