@@ -145,7 +145,17 @@ if(INDURTDB_IS_TOP_LEVEL)
     install(TARGETS indurtdb EXPORT InduRTDBTargets
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
         LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    # v3.8 D4'：irtcli 纳入同一 export set，使 find_package(InduRTDB) 的
+    # 消费方能直接用 InduRTDB::irtcli。缺此步时库虽被拷走，CMake 侧却拿不到。
+    if(TARGET irtcli)
+        install(TARGETS irtcli EXPORT InduRTDBTargets
+            ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+            LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    endif()
     install(DIRECTORY include/indurtdb DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    if(TARGET irtcli)
+        install(DIRECTORY client/include/irtcli DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif()
 
     install(EXPORT InduRTDBTargets
         FILE InduRTDBTargets.cmake
