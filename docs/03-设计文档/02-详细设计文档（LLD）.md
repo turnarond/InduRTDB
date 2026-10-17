@@ -136,7 +136,7 @@ uint64_t irt_pm_get_timeout_count(const irt_pm_t* pm);
 - **显式类型函数**：C 无模板，用 4 个类型化函数替代 `write<T>()`
 - **Seqlock 写入流程**：`irt_seqlock_write_begin()` → 写数据 → `irt_seqlock_write_end()`，冲突返回 `IRT_ERR_BUSY`
 - **`peek()` 在 Seqlock 重试循环内拷贝到 `_Thread_local` 缓冲**：**单拷贝，并非零拷贝**；同线程下一次 `peek()` 即覆盖该缓冲，需长期持有请用 `irt_pm_read()`
-- **写冲突不重试**：`irt_seqlock_write_begin()` 遇写中状态直接返回 `IRT_ERR_BUSY`，不阻塞、不自旋重试（v3.3 将确定化该语义）
+- **写冲突库内有限重试**（v3.8）：`irt_seqlock_write_begin()` 内部本就有 CAS 循环 + 指数退避 + `sched_yield`（`IRT_SEQLOCK_MAX_RETRY=3`）；v3.8 起 `pm_write_impl_q()` 在其外再包一层同参数的有限重试，把 2 线程并发写的丢写率由 ~50% 降至 <2%。耗尽仍返回冲突，由 API 层翻译为 `INDURTDB_ERR_BUSY(-5)`。**不做无限自旋**——全局单 seqlock 下无界竞争必有残余尾部，本项目以确定性执行时间为原则
 
 ### 2.2 Seqlock (`irt_seqlock.h`, inline 实现)
 
