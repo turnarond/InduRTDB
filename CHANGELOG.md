@@ -7,6 +7,11 @@ All notable changes to InduRTDB.
 ## [Unreleased] — v3.8 进行中
 
 ### Added
+- **`docs/05-SDK手册/05-v1到v2迁移指引.md`**（U5）：面向存量 v1 用户的迁移指引。
+  明确「v1 零改动可继续跑」，并讲清 v3.8 唯一需要改代码的地方——错误码语义变化
+  （`ERR_BUSY(-5)` / `ERR_READ_ONLY(-6)`）。含两个此前未记录的缺口：
+  `detach` 无 v2 对应物；`get_last_error` 是线程局部**全局**而非 per-handle，
+  多句柄并发下可能读到别的句柄的错误。
 - **`scripts/check_rtdbd_health.py`**（U4）：rtdbd 健康检查与告警基线。消费 UDS 协议
   `RTDBD_OP_HEALTH`（rtdbd 只监听 AF_UNIX，无 HTTP/metrics 端点，故非 Prometheus 抓取），
   输出人可读表格与 node_exporter textfile 格式；`--state` 支持按两次快照求速率，
@@ -33,6 +38,10 @@ All notable changes to InduRTDB.
 - 部署运维文档 `docs/07-部署运维/`（5 篇：安装配置 / 启动守护 / 监控诊断 / 故障排查升级）。
 
 ### Fixed
+- **CI 从 v3.7 主题A 起全程为红**：API 计数门禁（流水线第一步）期望 47+43=90，
+  而 v3.7 主题A/B 新增 API 后实际为 62+50=112，每次 push 都在 10 秒内失败。
+  `v3.7.0` 的 tag 正是在 CI 为红的状态下打的。已修正门禁基准与 SDK 手册首段计数，
+  并在脚本注释中写明「改动 API 时须同步三处」。
 - **写冲突语义文档失真**：U1 的代码改动使 7 处文档（SDK 手册 ×2、产品白皮书、
   用户体验白皮书、LLD、发布检查清单、交付说明）描述过时。已同步当前有效文档；
   属历史快照的 v3.2/v3.3 任务表与 v3.7.0 交付说明保留原样并加版本提示——

@@ -22,10 +22,13 @@ import re
 import sys
 from pathlib import Path
 
-# 期望值：与 docs/05-SDK手册/03-C-API参考手册.md 首段一致（v3.4.0）。
-EXPECTED_V1 = 47   # v1 全局函数
-EXPECTED_V2 = 43   # v2 句柄函数（indurtdb_h_*）
-EXPECTED_TOTAL = EXPECTED_V1 + EXPECTED_V2  # 90
+# 期望值：与 docs/05-SDK手册/03-C-API参考手册.md 首段一致。
+# v3.4 记为 47/43，v3.7 主题A/B 新增 API 后未同步 —— 该门禁是 CI 的第一步，
+# 失配会让整条流水线在 10 秒内直接失败，v3.7 开发期因此全程为红。改动 API 时务必同步此三处：
+#   本脚本 EXPECTED_* · SDK 手册首段计数 · 本注释的版本标注
+EXPECTED_V1 = 62   # v1 全局函数（v3.7 主题A/B 新增后为 62，此前漏更新致 CI 长期为红）
+EXPECTED_V2 = 50   # v2 句柄函数（indurtdb_h_*）
+EXPECTED_TOTAL = EXPECTED_V1 + EXPECTED_V2  # 112
 
 # 函数名允许含数字（如 indurtdb_h_write_int32 / indurtdb_read_uint32）。
 HEADER_RE = re.compile(r"\bindurtdb_[A-Za-z0-9_]+\s*\(")
