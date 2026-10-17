@@ -1,17 +1,19 @@
 # InduRTDB CI 流水线
-# 触发: push 到 main/feature 分支, PR 到 main
+# 触发: push 到 main/release/feature/fix 分支, PR 到 main/release
+# 注意：分支模型为 main <- release/<版本> <- feature|fix，
+# 触发范围必须覆盖 release/** 与 fix/**，否则合并前的提交不会被验证。
 # 矩阵: Debug + Release 双配置
 # 阶段: 构建 → ctest → verify_consume → soak(短) + bench(快)
 name: InduRTDB CI
 
 on:
   push:
-    branches: [main, "feature/**"]
+    branches: [main, "release/**", "feature/**", "fix/**"]
     paths-ignore:
       - "docs/**"
       - "**.md"
   pull_request:
-    branches: [main]
+    branches: [main, "release/**"]
   workflow_dispatch: # 手动触发
 
 concurrency:
