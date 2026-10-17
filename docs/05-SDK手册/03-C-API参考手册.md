@@ -307,9 +307,17 @@ int indurtdb_read_point(uint32_t id, indurtdb_point_t* point_data);
 const indurtdb_point_t* indurtdb_peek(uint32_t id);
 ```
 
-通过 Seqlock 协议将点位数据**单拷贝**到线程本地缓冲后返回其指针，同线程下次 `peek` 覆盖。ID 无效时返回 NULL。
+通过 Seqlock 协议将点位数据**单拷贝**到线程本地缓冲后返回其指针，**同线程下次 `peek` 覆盖**。ID 无效时返回 NULL。
 
-**约束**: 调用方不应长期持有此指针。跨写入边界时数据可能变化。适合高频读取和批量遍历场景。
+**约束（务必读）**：
+
+- **不是零拷贝**，也不指向共享内存——同线程连续两次 `peek` 返回的指针**相等**
+- 下一次 `peek()` 会**确定性地覆盖**上一次的内容（不是「可能变化」）
+- 因此**不可同时持有多个 peek 指针**；需长期持有请用 `indurtdb_h_read_point()`
+
+**可运行的复现**：[`examples/peek_lifetime_example.c`](../../../examples/peek_lifetime_example.c)
+
+适合高频读取和批量遍历场景（每次 peek 后立即消费）。
 
 ---
 

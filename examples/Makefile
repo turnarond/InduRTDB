@@ -7,13 +7,16 @@ INCDIR   = -I../include
 LIBDIR   = -L../build
 LDLIBS   = -lindurtdb -lrt -lpthread
 
-all: basic_example
+all: basic_example peek_lifetime_example
 
 basic_example: basic_example.c
 	$(CC) $(CFLAGS) $(INCDIR) -o $@ $< $(LIBDIR) $(LDLIBS)
 
+peek_lifetime_example: peek_lifetime_example.c
+	$(CC) $(CFLAGS) $(INCDIR) -o $@ $< $(LIBDIR) $(LDLIBS)
+
 clean:
-	rm -f basic_example
+	rm -f basic_example peek_lifetime_example
 
 run: all
 	./basic_example
