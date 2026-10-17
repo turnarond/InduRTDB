@@ -41,9 +41,9 @@ extern "C" {
 
 /* ==== 版本 (须与 VERSION 文件、CMake project(VERSION) 一致) ==== */
 #define INDURTDB_VERSION_MAJOR 3
-#define INDURTDB_VERSION_MINOR 7
+#define INDURTDB_VERSION_MINOR 8
 #define INDURTDB_VERSION_PATCH 0
-#define INDURTDB_VERSION_STRING "3.7.0"
+#define INDURTDB_VERSION_STRING "3.8.0"
 
 /* ==== 点位类型/质量/权限常量 (与 v2.x 枚举值一致) ==== */
 #define INDURTDB_TYPE_BOOL     0

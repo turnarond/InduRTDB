@@ -4,7 +4,7 @@ All notable changes to InduRTDB.
 
 ---
 
-## [Unreleased] — v3.8 进行中
+## [3.8.0] — 2026-10-08「部署能力补齐 + 文档治理 + 三处缺陷修复」
 
 ### Added
 - **`examples/peek_lifetime_example.c`**（U2）：可运行的 `peek()` 单拷贝陷阱复现。

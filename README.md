@@ -15,7 +15,7 @@
 
 **与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。
 
-### x86 实测性能 (v3.7.0, Release -O2)
+### x86 实测性能 (v3.7.0 基线, Release -O2；v3.8 未改热路径，未复测)
 
 | 操作 | P50 | P99 | 吞吐 |
 |------|-----|-----|------|
@@ -109,11 +109,23 @@ systemd 部署需配套 `RestartPreventExitStatus=2 4`。
 
 ## 版本
 
+**v3.8.0** — 部署能力补齐 + 文档治理 + 三处缺陷修复：
+
+- **修复 · CI 门禁恢复**：API 计数门禁（流水线第一步）期望 47+43 而实际 62+50，自 v3.7 主题A 起每次 push 均在 10 秒内失败，`v3.7.0` 的 tag 是在 CI 为红的状态下打的。已修正门禁基准与 SDK 手册首段计数。
+- **修复 · 写路径错误码契约不符**：`h_write_and_notify` 原样透传 pm 层负值，内部 `-2`（写冲突）恰好等于对外 `ERR_NOT_FOUND`、`-3`（只读拒写）恰好等于 `ERR_FULL`。写路径**从不返回**头文件承诺的 `INDURTDB_ERR_BUSY(-5)`，只读拒写被误报为「索引已满」。已统一对齐并新增 `INDURTDB_ERR_READ_ONLY(-6)`。
+- **修复 · 并发写丢写率 ~50%**：写路径遇 Seqlock 冲突直接返回、不重试。已加库内有限重试（2 线程丢写率降至 <2%，配截止时间重试后零丢失）。
+- **修复 · 配置解析器不支持 int64/uint32**：YAML 中写 `type: int64` 被静默丢弃而 rtdbd 退出码仍为 0。
+- **新增 · 部署能力**：`scripts/verify_deploy.sh`（18 项部署自检）、`scripts/check_rtdbd_health.py`（UDS 健康检查与告警基线）、`docs/07-部署运维/`（5 篇）、`config/rtdbd/`（官方配置样例，11 点位实测）。
+- **新增 · 安装补齐**：`cmake --install` 现安装 `rtdbd` / `irtcli` / `irt_diag_harness` 及其头文件，`InduRTDB::irtcli` 可被 `find_package` 取用。
+- **新增 · 文档**：`docs/05-SDK手册/05-v1到v2迁移指引.md`、`examples/peek_lifetime_example.c`（可运行的单拷贝陷阱复现）。
+- **协作约定**：确立 release 分支制（`main` ← `release/<版本>` ← `feature`/`fix`，合入后删 feature/fix，版本分支长期保留，收尾打 tag）。
+
 **v3.7.0** — 核心语义深化 + 运维硬化：
+
 - **主题A**：死区/RBE 过滤 + EURange→量程位生效（语义纯函数公共 API、质量感知写入口、rtdbd 按订阅者 RBE 通知门控）。
 - **主题B**：运维硬化（健康/错误计数 + `RTDBD_OP_HEALTH` + SIGUSR1 dump、每连接有界出站队列背压 + 优雅退出、配置校验 fail-fast + 语义退出码、`indurtdb_detach()` 保留段）。
-- **主题B 延展 B4**：运行时配置持久化（delta 日志，定长 80B 追加写 + `fsync`，`rtdbd --delta-file` 默认关闭，base 配置不可变、零 ABI 变更，运行时 CRUD 跨重启存活）。
-- **主题B 延展 B5**：v1 单例 API 退役（新增 `INDURTDB_DEPRECATED` 宏标注 51 个 v1 函数，`examples`/`demo` 已迁 v2，测试保留 v1 并关弃用告警；未删除）。
+- **主题B 延展 B4**：运行时配置持久化（delta 日志，`rtdbd --delta-file` 默认关闭，零 ABI 变更）。
+- **主题B 延展 B5**：v1 单例 API 标注 `INDURTDB_DEPRECATED`（未删除，v4.0 移除）。
 
 **v3.3.0** — 读写分离与双通道：新增 `rtdbd` 写权威守护进程（UDS 串行写 + 本机 UID 鉴权 + 审计）与 `indurtdb-client`（写队列，fail-operational），支持跨进程变更通知；点位新增 `source_timestamp_ns`（采集时刻）与 `COMM_FAILURE` 质量码。**共享内存布局与 v2.x 仍逐字节兼容，ABI 保持 v1。**
 
