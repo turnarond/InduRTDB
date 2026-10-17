@@ -41,7 +41,7 @@
 | **配置样例** | ✅ **已补 `config/rtdbd/`（D3）**，11 点位实测通过 | — |
 | **`.gitignore` 屏蔽配置后缀** | 第 60–62 行忽略 `*.yaml`/`*.yml`/`*.json`；已加 `!config/rtdbd/*.yaml` 放行 | 自建样例仍需 `git add -f` |
 | **无打包目标** | 有 install 规则，无 CPack | **已评估：不做**，见下方 §3.1 |
-| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` 只安装库本体 | 待做（见 U3） |
+| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` 只安装库本体 | 待做（D4-prime，3 行 CMake） |
 
 ### 2.2 功能线 —— 已相当完整，剩硬骨头
 
@@ -111,7 +111,7 @@
 |---|---|---|
 | ~~U1~~ | ~~写冲突正确范式~~ | ✅ **已完成**。方案与实测结论见 §3.2 |
 | U2 | `peek()` 语义纠正 | SDK 手册显著标注单拷贝语义与失效条件；`examples/` 增加正确用法示范（D2 已在部署文档标注，SDK 手册与 examples 待补） |
-| U3 | 快速上手自检脚本 | 一条命令验证部署是否正常（段可建可挂、rtdbd 可连、健康检查通过） |
+| ~~U3~~ | ~~快速上手自检脚本~~ | ✅ **已完成**：`scripts/verify_deploy.sh`，18 项检查，实跑 rtdbd + 段巡检 | 与其他脚本区别：那些验「构建树/代码没问题」，它验「已安装的部署没问题」 |
 | U4 | 监控告警基线 | 基于 `RTDBD_OP_HEALTH` 的告警规则样例（60s 滑动窗口 DEGRADED 判定已就绪） |
 | U5 | v1 API 迁移指引 | v1 的 62 个函数已全量标 deprecated；`ERR_BUSY` 语义修正后 v1 与 v2 返回值行为需向集成方说明 |
 
