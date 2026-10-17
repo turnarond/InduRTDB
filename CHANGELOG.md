@@ -7,6 +7,11 @@ All notable changes to InduRTDB.
 ## [Unreleased] — v3.8 进行中
 
 ### Added
+- **`scripts/check_rtdbd_health.py`**（U4）：rtdbd 健康检查与告警基线。消费 UDS 协议
+  `RTDBD_OP_HEALTH`（rtdbd 只监听 AF_UNIX，无 HTTP/metrics 端点，故非 Prometheus 抓取），
+  输出人可读表格与 node_exporter textfile 格式；`--state` 支持按两次快照求速率，
+  这是「notify_drop 持续增长」这类告警唯一可靠的判据。退出码 0 健康 / 1 告警 / 2 无法判定
+  ——**2 不等于健康**，监控侧须一并当故障处理。
 - **`scripts/verify_deploy.sh`**（U3）：一条命令验证**已安装的部署**。
   18 项检查覆盖平台、库产物、版本一致性、三条消费路径、rtdbd 与诊断工具、
   配置样例，最后实跑 rtdbd 并巡检共享内存段。可检出 `.pc` 的 prefix 与实际
