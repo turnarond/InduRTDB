@@ -78,7 +78,7 @@
 | D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，11 点位实测通过 |
 | ~~D4~~ | ~~CPack 打包~~ | ❌ **已评估，不做**，见 §3.1 | 打包是发行版职责；三条集成路径已覆盖 |
 | ~~D4'~~ | ~~为 `rtdbd`/`client`/`irt_diag` 补 install 规则~~ | ✅ **已完成**：rtdbd/irtcli/irt_diag_harness 均已安装，`irtcli` 纳入 CMake export set | 实测安装树含 `bin/rtdbd`、`bin/irt_diag_harness`、`lib/libirtcli.a`、`include/irtcli/client.h`；`InduRTDB::irtcli` 可被 find_package 取用 |
-| D5 | v3.5.0 / v3.6.0 补 tag | 历史 tag | 与 CHANGELOG 条目对齐（决策见 08 §11 第 2 项） |
+| ~~D5~~ | ~~v3.5.0 / v3.6.0 补 tag~~ | ✅ **已决：暂不补打**（2026-10-08） | `v3.7.0` 已存在且正确（annotated → `1247758` = `origin/main`）；历史 tag 序列不连续（缺 v3.1.0/v3.5.0/v3.6.0）是有意接受的代价 |
 | D6 | ~~配置解析器支持 int64 / uint32~~ | ✅ **已修复** + 5 个回归测试 | D3 实测发现。实测 11 点位全部生效 |
 | **U1** | ~~写冲突重试范式~~ | ✅ **已完成**：库内重试 + 错误码契约修正 + 截止时间重试范式 | 2 线程丢写率 ~50% → <2%；配截止时间重试后零丢写 |
 
