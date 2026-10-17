@@ -41,7 +41,7 @@
 | **配置样例** | ✅ **已补 `config/rtdbd/`（D3）**，11 点位实测通过 | — |
 | **`.gitignore` 屏蔽配置后缀** | 第 60–62 行忽略 `*.yaml`/`*.yml`/`*.json`；已加 `!config/rtdbd/*.yaml` 放行 | 自建样例仍需 `git add -f` |
 | **无打包目标** | 有 install 规则，无 CPack | **已评估：不做**，见下方 §3.1 |
-| **`rtdbd`/`client`/`irt_diag` 无 install 规则** | `cmake --install` 只安装库本体 | 待做（D4-prime，3 行 CMake） |
+| ~~**`rtdbd`/`client`/`irt_diag` 无 install 规则**~~ | ✅ v3.8 已补（D4-prime） | `cmake --install` 现安装全部产物 |
 
 ### 2.2 功能线 —— 已相当完整，剩硬骨头
 
@@ -77,7 +77,7 @@
 | D2 | 部署运维文档 | ✅ `docs/07-部署运维/` 5 篇 | 已交付 |
 | D3 | 配置样例 | ✅ `config/rtdbd/{policy.conf,points.yaml}` | 已交付，11 点位实测通过 |
 | ~~D4~~ | ~~CPack 打包~~ | ❌ **已评估，不做**，见 §3.1 | 打包是发行版职责；三条集成路径已覆盖 |
-| D4' | 为 `rtdbd`/`client`/`irt_diag` 补 install 规则 | 3 行 CMake | 保留 —— `cmake --install` 装不全属缺陷，非打包取舍 |
+| ~~D4'~~ | ~~为 `rtdbd`/`client`/`irt_diag` 补 install 规则~~ | ✅ **已完成**：rtdbd/irtcli/irt_diag_harness 均已安装，`irtcli` 纳入 CMake export set | 实测安装树含 `bin/rtdbd`、`bin/irt_diag_harness`、`lib/libirtcli.a`、`include/irtcli/client.h`；`InduRTDB::irtcli` 可被 find_package 取用 |
 | D5 | v3.5.0 / v3.6.0 补 tag | 历史 tag | 与 CHANGELOG 条目对齐（决策见 08 §11 第 2 项） |
 | D6 | ~~配置解析器支持 int64 / uint32~~ | ✅ **已修复** + 5 个回归测试 | D3 实测发现。实测 11 点位全部生效 |
 | **U1** | ~~写冲突重试范式~~ | ✅ **已完成**：库内重试 + 错误码契约修正 + 截止时间重试范式 | 2 线程丢写率 ~50% → <2%；配截止时间重试后零丢写 |

@@ -19,7 +19,7 @@
 |---|---|---|
 | **无 systemd unit** | 仓库不提供 `.service` 文件 | 自行编写，见 [`02-启动与守护.md` §4](./02-启动与守护.md) |
 | **无 supervisor 配置** | `rtdbd` 有自监管 `--supervise`，但不提供 supervisor conf | 用 systemd 或 `--supervise` |
-| **`rtdbd` / `client` / `irt_diag` 无 install 规则** | `cmake --install` **只安装库本体** | 从构建目录手动拷贝，见 [`01-安装与配置.md` §3](./01-安装与配置.md) |
+| ~~**`rtdbd` / `client` / `irt_diag` 无 install 规则**~~ | ✅ v3.8 已补 —— `cmake --install` 现在安装 `rtdbd`、`irtcli`、`irt_diag_harness` 及其头文件 | 仅 `irt_diag` 的 Python 包需 `pip install` |
 | **无打包产物** | 无 CPack，不产出 tar.gz / deb | 自行打包 |
 | **不提供配置样例** | 本目录给出格式与示例，但仓库无样例文件 | 参照下述格式自建 |
 

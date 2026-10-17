@@ -8,3 +8,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_target_properties(irt_diag_harness PROPERTIES
         C_STANDARD 11 C_STANDARD_REQUIRED ON)
 endif()
+
+# v3.8 D4'：补齐诊断 harness 的安装。
+# 注：irt_diag 的 Python 包不经 CMake 安装（它是 pyproject.toml 管理的
+# 纯标准库包），从源码树 `pip install tools/irt_diag` 即可。
+if(INDURTDB_IS_TOP_LEVEL AND TARGET irt_diag_harness)
+    install(TARGETS irt_diag_harness RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+    install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/README.md
+            DESTINATION ${CMAKE_INSTALL_DOCDIR})
+endif()

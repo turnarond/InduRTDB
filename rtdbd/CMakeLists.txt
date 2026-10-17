@@ -36,3 +36,10 @@ set_target_properties(rtdbd PROPERTIES
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(rtdbd PRIVATE -Wall -Wextra -Werror)
 endif()
+
+# v3.8 D4'：此前 cmake --install 只安装库本体，rtdbd 留在构建目录里，
+# 部署方须手动拷贝。补上安装规则。
+# 仅顶层项目安装；作为子项目时不污染消费方的安装树。
+if(INDURTDB_IS_TOP_LEVEL)
+    install(TARGETS rtdbd RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()

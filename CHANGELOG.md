@@ -7,6 +7,17 @@ All notable changes to InduRTDB.
 ## [Unreleased] — v3.8 进行中
 
 ### Added
+- **`scripts/verify_deploy.sh`**（U3）：一条命令验证**已安装的部署**。
+  18 项检查覆盖平台、库产物、版本一致性、三条消费路径、rtdbd 与诊断工具、
+  配置样例，最后实跑 rtdbd 并巡检共享内存段。可检出 `.pc` 的 prefix 与实际
+  安装路径不一致、配置点位被静默丢弃、`policy.conf` 有效规则数为 0 等问题。
+  与既有脚本分工：那些针对构建树验「代码没问题」，本脚本针对安装树验
+  「这台机器的安装没问题」。
+- **安装规则补齐**（D4-prime）：`cmake --install` 现安装 `rtdbd`、
+  `irtcli`、`irt_diag_harness` 及其头文件；`irtcli` 纳入 CMake export set，
+  消费方 `find_package(InduRTDB)` 可直接用 `InduRTDB::irtcli`。
+  修复 `irtcli` 的 `INTERFACE_INCLUDE_DIRECTORIES` 含源码树绝对路径导致
+  CMake 拒绝导出的问题（改用 `$<BUILD_INTERFACE:>` / `$<INSTALL_INTERFACE:>`）。
 - **配置解析器支持 int64 / uint32**（D6）：`irt_config_parse_type()` 补两个分支，
   `indurtdb_h_load_config` 的类型过滤上限由 `INDURTDB_TYPE_STRING` 改为 `INDURTDB_TYPE_FLOAT`。
   此前 YAML 中写 `type: int64` / `uint32` 会被解析为 `0xff` 并**静默丢弃**，
@@ -17,6 +28,10 @@ All notable changes to InduRTDB.
 - 部署运维文档 `docs/07-部署运维/`（5 篇：安装配置 / 启动守护 / 监控诊断 / 故障排查升级）。
 
 ### Fixed
+- **写冲突语义文档失真**：U1 的代码改动使 7 处文档（SDK 手册 ×2、产品白皮书、
+  用户体验白皮书、LLD、发布检查清单、交付说明）描述过时。已同步当前有效文档；
+  属历史快照的 v3.2/v3.3 任务表与 v3.7.0 交付说明保留原样并加版本提示——
+  改写它们会伪造历史。
 - **写路径错误码与文档契约不符**：`h_write_and_notify` 原样透传 pm 层内部负值，
   而两套编码不一致——内部 -2（写冲突）恰好等于 `ERR_NOT_FOUND`、-3（只读拒写）恰好等于
   `ERR_FULL`。结果 `indurtdb_h_write_*` **从不返回头文件承诺的 `INDURTDB_ERR_BUSY`**，
