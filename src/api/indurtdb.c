@@ -29,6 +29,7 @@ struct indurtdb {
     bool      initialized;
     int32_t   owner_pid;   /* fork 检测: 非零时 compare getpid() */
     int       delta_fd;    /* v3.7 B4: 运行时变更 delta 日志（追加写）；-1 = 未启用 */
+    uint32_t  default_partition;  /* v3.9: 名称域调用的默认分区（初值 0） */
 };
 
 /* 定长实例表, 零堆分配 (满足"核心层无堆"不变式) */
@@ -42,6 +43,13 @@ static _Thread_local char g_last_error[256];
 
 static void set_error(const char* msg) {
     snprintf(g_last_error, sizeof(g_last_error), "%s", msg);
+}
+
+/* v3.9：句柄默认分区（**单处读取点**）。名称域函数未显式传入分区时取此值。
+ * 初值 0（v3.8 语义等价）；由 indurtdb_h_set_partition 修改。
+ * NULL 句柄回退 0 —— 随后的 ENSURE_H 仍会以 NOT_INIT 拒绝，不在此处报错。 */
+static uint32_t h_default_partition(const indurtdb_t* h) {
+    return h ? h->default_partition : 0u;
 }
 
 /* ---- 实例槽位管理 ---- */
@@ -86,6 +94,10 @@ static int inst_init(indurtdb_t* h, const char* instance_id,
      * 向 stdin 写 80B 记录，且 inst_shutdown 会 close(stdin)，之后任意 open()
      * 都可能复用 fd 0 而被误关。故在 inst_alloc 与此处双重置位。 */
     h->delta_fd = -1;
+
+    /* v3.9：句柄默认分区显式置 0（memset 已清零；此处保证语义锚点不依赖 memset）。
+     * inst_shutdown 的 memset 会在关闭时一并复位。 */
+    h->default_partition = 0u;
 
     if (irt_shm_init(&h->shm, instance_id, max_points, max_subscribers) != 0) {
         set_error("shm init failed");
@@ -407,6 +419,7 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
             p->type   = pm->type;
             p->unit   = pm->unit;
             p->access = pm->access;
+            p->partition = 0u;   /* v3.9: base 配置固定落分区 0（配置无分区字段，不随句柄默认） */
             strncpy(p->name, pm->name, sizeof(p->name) - 1);
             p->name[sizeof(p->name) - 1] = '\0';
 
@@ -414,7 +427,7 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
 
             /* 注册进本实例的 name→id 索引 (写锁释放后单独取锁, 避免嵌套自锁)。
-             * 配置加载的点位无分区概念 → 默认分区 0（T4 起句柄可指定默认分区）。 */
+             * 配置加载的点位固定落分区 0（base 配置无分区概念，不受句柄默认分区影响）。 */
             int irc = irt_index_insert(&h->shm, 0u, p->name, pm->id);
             if (irc == INDURTDB_ERR_FULL) {
                 irt_point_config_free(&batch);
@@ -452,18 +465,22 @@ void indurtdb_h_update_heartbeat(indurtdb_t* h) {
 }
 
 /* ---- 索引 / 元数据 ---- */
-int indurtdb_h_find_by_name(indurtdb_t* h, const char* name, uint32_t* out_id) {
+int indurtdb_h_find_by_name_in(indurtdb_t* h, uint32_t partition,
+                               const char* name, uint32_t* out_id) {
     ENSURE_H(h);
     if (!name || name[0] == '\0' || !out_id) {
         set_error("invalid argument"); return INDURTDB_ERR_ARG;
     }
-    /* T2: 索引已是 (partition, name) 复合键。公开 API 的分区形参在 T4 引入，
-     * 此前一律查默认分区 0 —— 与 v3.8 语义等价（全部点位都在分区 0）。 */
-    int rc = irt_index_lookup(&h->shm, 0u, name, out_id);
+    /* T2 起索引已是 (partition, name) 复合键；v3.9 由本函数显式传入分区。 */
+    int rc = irt_index_lookup(&h->shm, partition, name, out_id);
     if (rc == INDURTDB_ERR_NOT_FOUND) set_error("point name not found");
     else if (rc == INDURTDB_ERR_BUSY) set_error("index busy, retry");
     else if (rc != INDURTDB_OK)       set_error("index lookup failed");
     return rc;
+}
+/* v3.8 兼容薄封装：按句柄默认分区（初值 0）查找，行为与 v3.8 逐位等价。 */
+int indurtdb_h_find_by_name(indurtdb_t* h, const char* name, uint32_t* out_id) {
+    return indurtdb_h_find_by_name_in(h, h_default_partition(h), name, out_id);
 }
 int indurtdb_h_get_meta(indurtdb_t* h, uint32_t id, indurtdb_meta_t* meta) {
     ENSURE_H(h);
@@ -526,13 +543,17 @@ static void delta_log(indurtdb_t* h, uint16_t op, uint32_t id,
     }
 }
 
-/* 在指定槽写入点位静态属性（不触索引）。调用方须持写锁。 */
-static int h_point_register(irt_shm_t* shm, uint32_t id, const char* name, int type, int access)
+/* 在指定槽写入点位静态属性（不触索引）。调用方须持写锁。
+ * v3.9: 必须一并写入 p->partition —— 否则复用的空槽会继承前一个占用者的分区，
+ * 使 (partition, name) 索引键与点位属性不一致（见 T4 实施记录）。 */
+static int h_point_register(irt_shm_t* shm, uint32_t partition, uint32_t id,
+                           const char* name, int type, int access)
 {
     indurtdb_point_t* p = &irt_shm_points(shm)[id];
     p->type   = (uint8_t)type;
     p->access = (uint8_t)access;
     p->unit   = 0;
+    p->partition = partition;             /* v3.9: 分区创建时固定 */
     p->quality = INDURTDB_QUALITY_GOOD;   /* 0: 新点初始 Good */
     memset(&p->value, 0, sizeof(p->value));
     strncpy(p->name, name, sizeof(p->name) - 1);
@@ -540,7 +561,16 @@ static int h_point_register(irt_shm_t* shm, uint32_t id, const char* name, int t
     return 0;
 }
 
-int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int type, int access)
+/* v3.9: 设置本句柄默认分区（名称域非显式调用的落点）。任意 uint32 值合法（Q8 无分区表）。 */
+int indurtdb_h_set_partition(indurtdb_t* h, uint32_t partition)
+{
+    ENSURE_H(h);
+    h->default_partition = partition;
+    return INDURTDB_OK;
+}
+
+int indurtdb_h_create_point_in(indurtdb_t* h, uint32_t partition, uint32_t id,
+                               const char* name, int type, int access)
 {
     ENSURE_H(h);
     if (!name || name[0] == '\0') { set_error("empty name"); return INDURTDB_ERR_ARG; }
@@ -549,9 +579,10 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
         { set_error("bad access (1=read-only,3=read-write)"); return INDURTDB_ERR_ARG; }
     if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
 
-    /* 同名已注册到其他 id → 拒绝（管理面低并发，锁外探测可接受） */
+    /* 同名已注册到本分区内的其他 id → 拒绝（重名域限于 (partition, name)；
+     * 同一名字可同时存在于不同分区）。管理面低并发，锁外探测可接受。 */
     uint32_t exist = 0;
-    if (irt_index_lookup(&h->shm, 0u, name, &exist) == 0 && exist != id) {
+    if (irt_index_lookup(&h->shm, partition, name, &exist) == 0 && exist != id) {
         set_error("name already exists"); return INDURTDB_ERR_ARG;
     }
 
@@ -566,7 +597,7 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             set_error("point id already registered"); return INDURTDB_ERR_FULL;
         }
-        h_point_register(&h->shm, id, name, type, access);
+        h_point_register(&h->shm, partition, id, name, type, access);
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
 
@@ -574,7 +605,7 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
          * 注：调用方须为低并发/单线程（rtdbd 串行 poll 循环）；此间存在短暂窗口——
          * 点已 name 注册（LIST/GET 可见）但尚在索引中（FIND_BY_NAME 暂不可见），
          * 单线程下无并发可观察到该中间态，故无害。 */
-        int irc = irt_index_insert(&h->shm, 0u, name, id);
+        int irc = irt_index_insert(&h->shm, partition, name, id);
         if (irc == 0) {
             delta_log(h, IRT_DELTA_OP_CREATE, id, (uint8_t)type, (uint8_t)access, name);
         } else {                               /* 索引插入失败：回滚注册，避免孤儿点 */
@@ -592,6 +623,10 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
 }
+/* v3.8 兼容薄封装：按句柄默认分区（初值 0）注册。 */
+int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int type, int access) {
+    return indurtdb_h_create_point_in(h, h_default_partition(h), id, name, type, access);
+}
 
 /* v3.7 B4：启用 delta 日志（追加写）。path 为 NULL / 打开失败 → 保持未启用。
  * 默认不启用：既有部署的重启语义完全不变（运行时点位仍"重启即丢"）。 */
@@ -606,7 +641,7 @@ int indurtdb_h_enable_delta(indurtdb_t* h, const char* path)
     return INDURTDB_OK;
 }
 
-int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
+int indurtdb_h_delete_point_in(indurtdb_t* h, uint32_t partition, uint32_t id)
 {
     ENSURE_H(h);
     if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
@@ -620,6 +655,11 @@ int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
         if (p->name[0] == '\0') {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             set_error("point not found"); return INDURTDB_ERR_NOT_FOUND;
+        }
+        /* 分区创建后固定：形参分区与点位分区不符 → 视作未找到，且不改动任何状态。 */
+        if (p->partition != partition) {
+            irt_seqlock_write_end(&hdr->write_seq, seq0);
+            set_error("point not found in partition"); return INDURTDB_ERR_NOT_FOUND;
         }
         char old[64];
         memcpy(old, p->name, sizeof(old));
@@ -636,15 +676,20 @@ int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
 }
+/* v3.8 兼容薄封装：按句柄默认分区（初值 0）删除。 */
+int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id) {
+    return indurtdb_h_delete_point_in(h, h_default_partition(h), id);
+}
 
-int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
+int indurtdb_h_rename_point_in(indurtdb_t* h, uint32_t partition, uint32_t id, const char* name)
 {
     ENSURE_H(h);
     if (!name || name[0] == '\0') { set_error("empty name"); return INDURTDB_ERR_ARG; }
     if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
 
+    /* 重名检查限于本分区：同名可存在于其他分区。 */
     uint32_t exist = 0;
-    if (irt_index_lookup(&h->shm, 0u, name, &exist) == 0 && exist != id) {
+    if (irt_index_lookup(&h->shm, partition, name, &exist) == 0 && exist != id) {
         set_error("name already exists"); return INDURTDB_ERR_ARG;
     }
 
@@ -655,7 +700,8 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
         uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
         if (seq0 & 1ULL) { sched_yield(); continue; }
         indurtdb_point_t* p = &irt_shm_points(&h->shm)[id];
-        if (p->name[0] == '\0') {
+        /* 点位不存在，或其分区与形参不符（分区不可移动）→ NOT_FOUND */
+        if (p->name[0] == '\0' || p->partition != partition) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             set_error("point not found"); return INDURTDB_ERR_NOT_FOUND;
         }
@@ -664,13 +710,13 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
             return INDURTDB_OK;
         }
         /* 先更新索引（新名插入、旧名删除），再改点位名，全程持锁 → 原子。
-         * 分区取点位自身的值（T2 起分区固定、改名不换分区）。 */
-        int irc = irt_index_insert_locked(&h->shm, p->partition, name, id);
+         * 分区取形参（已与 p->partition 相等）：改名不换分区。 */
+        int irc = irt_index_insert_locked(&h->shm, partition, name, id);
         if (irc != 0) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             set_error("index full"); return INDURTDB_ERR_FULL;
         }
-        irt_index_remove_locked(&h->shm, p->partition, p->name);
+        irt_index_remove_locked(&h->shm, partition, p->name);
         strncpy(p->name, name, sizeof(p->name) - 1);
         p->name[sizeof(p->name) - 1] = '\0';
         irt_seqlock_write_end(&hdr->write_seq, seq0);
@@ -678,6 +724,10 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
         return INDURTDB_OK;
     }
     set_error("busy, retry"); return INDURTDB_ERR_BUSY;
+}
+/* v3.8 兼容薄封装：按句柄默认分区（初值 0）改名。 */
+int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name) {
+    return indurtdb_h_rename_point_in(h, h_default_partition(h), id, name);
 }
 
 /* v3.7 B4：delta 回放 —— 把历史运行时变更重新施加到点位表。
@@ -690,16 +740,17 @@ static int delta_apply(const irt_delta_rec_t* rec, void* ctx)
 
     switch (rec->op) {
     case IRT_DELTA_OP_CREATE:
-        /* 已存在同名或同 id → 视为幂等成功（重复回放同一序列结果一致） */
-        if (indurtdb_h_create_point(h, rec->point_id, rec->name,
-                                    rec->type, rec->access) == INDURTDB_ERR_FULL)
+        /* delta 记录无 partition 字段（不属 T4 范围），回放固定落分区 0，
+         * 与写入端默认分区一致；用显式 _in(0) 以免受句柄默认分区影响。 */
+        if (indurtdb_h_create_point_in(h, 0u, rec->point_id, rec->name,
+                                       rec->type, rec->access) == INDURTDB_ERR_FULL)
             return 0;
         return 0;
     case IRT_DELTA_OP_DELETE:
-        (void)indurtdb_h_delete_point(h, rec->point_id);   /* 不存在则忽略 */
+        (void)indurtdb_h_delete_point_in(h, 0u, rec->point_id);   /* 不存在则忽略 */
         return 0;
     case IRT_DELTA_OP_RENAME:
-        (void)indurtdb_h_rename_point(h, rec->point_id, rec->name);
+        (void)indurtdb_h_rename_point_in(h, 0u, rec->point_id, rec->name);
         return 0;
     default:
         return -1;

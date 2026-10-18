@@ -54,3 +54,21 @@ if(TARGET test_c_diag)
             INDURTDB_DIAG_HARNESS="$<TARGET_FILE:irt_diag_harness>")
     endif()
 endif()
+
+# ============================================================================
+# v3.9 T4：API 计数门禁（CI 首步同款检查，纳入 ctest）。
+# 头文件公开 API 计数与 docs/05-SDK手册/03-C-API参考手册.md 首段及
+# scripts/check_api_count.py 的 EXPECTED_* 必须一致；改 API 时三处同 commit 更新。
+# 未找到 Python 解释器时不注册为失败用例（禁用而非误报红），避免无 Python 环境
+# 下 ctest 整体变红。
+# ============================================================================
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+    add_test(NAME Gate.ApiCountMatches
+             COMMAND ${Python3_EXECUTABLE}
+                     ${PROJECT_SOURCE_DIR}/scripts/check_api_count.py)
+else()
+    add_test(NAME Gate.ApiCountMatches
+             COMMAND ${CMAKE_COMMAND} -E echo "Python3 not found: Gate.ApiCountMatches skipped")
+    set_tests_properties(Gate.ApiCountMatches PROPERTIES DISABLED TRUE)
+endif()

@@ -27,8 +27,8 @@ from pathlib import Path
 # 失配会让整条流水线在 10 秒内直接失败，v3.7 开发期因此全程为红。改动 API 时务必同步此三处：
 #   本脚本 EXPECTED_* · SDK 手册首段计数 · 本注释的版本标注
 EXPECTED_V1 = 62   # v1 全局函数（v3.7 主题A/B 新增后为 62，此前漏更新致 CI 长期为红）
-EXPECTED_V2 = 50   # v2 句柄函数（indurtdb_h_*）
-EXPECTED_TOTAL = EXPECTED_V1 + EXPECTED_V2  # 112
+EXPECTED_V2 = 55   # v2 句柄函数（v3.9 T4 名称域 _in×4 + set_partition 后为 55；此前 50）
+EXPECTED_TOTAL = EXPECTED_V1 + EXPECTED_V2  # 117
 
 # 函数名允许含数字（如 indurtdb_h_write_int32 / indurtdb_read_uint32）。
 HEADER_RE = re.compile(r"\bindurtdb_[A-Za-z0-9_]+\s*\(")

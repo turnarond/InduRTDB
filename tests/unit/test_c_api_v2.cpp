@@ -17,6 +17,11 @@
  *   ApiV2.SingletonRegression            旧 v1 indurtdb_initialize 仍可用
  *   ApiV2.DeleteReleasesIndexSlot        (T2 回归) 反复 create/delete 不得耗尽索引表
  *   ApiV2.RenameReleasesOldSlot          (T2 回归) 反复 rename 不得耗尽索引表
+ *   ApiV39.DefaultPartitionMatchesLegacy (T4 红) 未 set_partition 时默认分区 0, 与 v3.8 等价
+ *   ApiV39.FindByNameInExplicitPartition (T4 红) 显式分区形参按 (partition, name) 解析
+ *   ApiV39.HandleSetPartitionAffectsDefaults (T4 红) set_partition 改变句柄默认分区
+ *   ApiV39.ExplicitOverridesHandleDefault    (T4 红) 显式形参优先于句柄默认
+ *   ApiV39.CreateRenameDeleteScoped          (T4 红) CRUD 限定分区; 分区创建后固定
  */
 
 #include <gtest/gtest.h>
@@ -237,6 +242,170 @@ TEST_F(ApiV2Test, RenameReleasesOldSlot) {
                                           INDURTDB_ACCESS_READ_WRITE), 0)
             << "泄漏导致索引表无法容纳新点位: pid=" << pid;
     }
+
+    indurtdb_h_close(h);
+}
+
+/* ==================== v3.9 T4: 分区 API ====================
+ * 名称域以 (partition, name) 为唯一键; point_id 仍全局唯一且稠密。
+ * 分区不是安全边界 (Q7)。默认分区为 0, 经 indurtdb_h_set_partition 改变。
+ *
+ * 用例套件名为 `ApiV39`(别名到既有 ApiV2Test fixture): gtest 以 TEST_F 的
+ * fixture 记号作为套件名, 故用 `using ApiV39 = ApiV2Test;` 既复用既有
+ * fixture, 又得到题目要求的精确用例名 ApiV39.<CaseName>。 */
+using ApiV39 = ApiV2Test;
+
+
+/* 8. 未调用 set_partition 时, 名称域调用默认落在分区 0 —— 与 v3.8 等价 */
+TEST_F(ApiV39, DefaultPartitionMatchesLegacy) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64; cfg.max_subscribers = 4;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("defpart").c_str(), &cfg), 0);
+
+    /* 旧签名: 无显式分区, 默认分区 0 */
+    ASSERT_EQ(indurtdb_h_create_point(h, 7, "legacy.temp", INDURTDB_TYPE_INT32,
+                                      INDURTDB_ACCESS_READ_WRITE), 0);
+    uint32_t id = 0;
+    ASSERT_EQ(indurtdb_h_find_by_name(h, "legacy.temp", &id), 0);
+    EXPECT_EQ(id, 7u);
+
+    indurtdb_point_t pt{};
+    ASSERT_EQ(indurtdb_h_read_point(h, 7, &pt), 0);
+    EXPECT_EQ(pt.partition, 0u) << "未 set_partition 时默认分区必须为 0";
+
+    /* 显式分区 0 与默认一致 */
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "legacy.temp", &id), 0);
+    EXPECT_EQ(id, 7u);
+
+    indurtdb_h_close(h);
+}
+
+/* 9. 显式分区形参: (1,"temp") 解析到分区 1, (0,"temp") 找不到 */
+TEST_F(ApiV39, FindByNameInExplicitPartition) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64; cfg.max_subscribers = 4;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("findin").c_str(), &cfg), 0);
+
+    ASSERT_EQ(indurtdb_h_create_point_in(h, 1, 5, "temp", INDURTDB_TYPE_INT32,
+                                         INDURTDB_ACCESS_READ_WRITE), 0);
+    uint32_t id = 0;
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 1, "temp", &id), 0);
+    EXPECT_EQ(id, 5u);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 0, "temp", &id), INDURTDB_ERR_NOT_FOUND)
+        << "分区 0 不应看到分区 1 的名字";
+
+    indurtdb_point_t pt{};
+    ASSERT_EQ(indurtdb_h_read_point(h, 5, &pt), 0);
+    EXPECT_EQ(pt.partition, 1u);
+
+    indurtdb_h_close(h);
+}
+
+/* 10. set_partition 改变句柄默认: 不显式传分区的调用默认落在分区 1 */
+TEST_F(ApiV39, HandleSetPartitionAffectsDefaults) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64; cfg.max_subscribers = 4;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("setpart").c_str(), &cfg), 0);
+
+    ASSERT_EQ(indurtdb_h_create_point_in(h, 1, 9, "temp", INDURTDB_TYPE_INT32,
+                                         INDURTDB_ACCESS_READ_WRITE), 0);
+    ASSERT_EQ(indurtdb_h_set_partition(h, 1), INDURTDB_OK);
+
+    /* 非显式调用 (旧签名) 现在默认落在分区 1 */
+    uint32_t id = 0;
+    ASSERT_EQ(indurtdb_h_find_by_name(h, "temp", &id), 0);
+    EXPECT_EQ(id, 9u);
+
+    /* 新的非显式注册也落在分区 1 */
+    ASSERT_EQ(indurtdb_h_create_point(h, 10, "temp2", INDURTDB_TYPE_INT32,
+                                      INDURTDB_ACCESS_READ_WRITE), 0);
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 1, "temp2", &id), 0);
+    EXPECT_EQ(id, 10u);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 0, "temp2", &id), INDURTDB_ERR_NOT_FOUND);
+
+    /* 复位句柄默认分区后, 默认又回到分区 0 */
+    ASSERT_EQ(indurtdb_h_set_partition(h, 0), INDURTDB_OK);
+    EXPECT_EQ(indurtdb_h_find_by_name(h, "temp", &id), INDURTDB_ERR_NOT_FOUND);
+
+    indurtdb_h_close(h);
+}
+
+/* 11. 显式形参优先于句柄默认 */
+TEST_F(ApiV39, ExplicitOverridesHandleDefault) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64; cfg.max_subscribers = 4;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("override").c_str(), &cfg), 0);
+
+    ASSERT_EQ(indurtdb_h_create_point_in(h, 0, 3, "p0only", INDURTDB_TYPE_INT32,
+                                         INDURTDB_ACCESS_READ_WRITE), 0);
+    ASSERT_EQ(indurtdb_h_set_partition(h, 1), INDURTDB_OK);
+
+    /* 显式 0 仍落在分区 0, 而非句柄默认的 1 */
+    uint32_t id = 0;
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "p0only", &id), 0);
+    EXPECT_EQ(id, 3u);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 1, "p0only", &id), INDURTDB_ERR_NOT_FOUND);
+
+    indurtdb_h_close(h);
+}
+
+/* 12. create/rename/delete 限定分区: 同名可跨分区共存; 错误分区不改动; 分区创建后固定 */
+TEST_F(ApiV39, CreateRenameDeleteScoped) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64; cfg.max_subscribers = 4;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("scoped").c_str(), &cfg), 0);
+
+    /* 同名 "dup" 在分区 0 / 1 各注册到不同 id */
+    ASSERT_EQ(indurtdb_h_create_point_in(h, 0, 1, "dup", INDURTDB_TYPE_INT32,
+                                         INDURTDB_ACCESS_READ_WRITE), 0);
+    ASSERT_EQ(indurtdb_h_create_point_in(h, 1, 2, "dup", INDURTDB_TYPE_INT32,
+                                         INDURTDB_ACCESS_READ_WRITE), 0);
+
+    uint32_t id = 0;
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup", &id), 0);
+    EXPECT_EQ(id, 1u);
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 1, "dup", &id), 0);
+    EXPECT_EQ(id, 2u);
+
+    /* 错误分区 rename 返回 NOT_FOUND 且不改动分区 0 的点 */
+    EXPECT_EQ(indurtdb_h_rename_point_in(h, 1, 1, "dup.x"), INDURTDB_ERR_NOT_FOUND);
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup", &id), 0)
+        << "错误分区 rename 不得改动分区 0";
+    EXPECT_EQ(id, 1u);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup.x", &id), INDURTDB_ERR_NOT_FOUND);
+
+    /* 错误分区 delete 返回 NOT_FOUND 且不改动 */
+    EXPECT_EQ(indurtdb_h_delete_point_in(h, 1, 1), INDURTDB_ERR_NOT_FOUND);
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup", &id), 0)
+        << "错误分区 delete 不得删除分区 0 的点";
+    EXPECT_EQ(id, 1u);
+
+    /* 正确分区 rename 生效, 且分区不变 */
+    ASSERT_EQ(indurtdb_h_rename_point_in(h, 0, 1, "dup.x"), 0);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup", &id), INDURTDB_ERR_NOT_FOUND);
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup.x", &id), 0);
+    EXPECT_EQ(id, 1u);
+    indurtdb_point_t pt{};
+    ASSERT_EQ(indurtdb_h_read_point(h, 1, &pt), 0);
+    EXPECT_EQ(pt.partition, 0u) << "rename 不得改变分区";
+    EXPECT_STREQ(pt.name, "dup.x");
+
+    /* 正确分区 delete 生效 */
+    ASSERT_EQ(indurtdb_h_delete_point_in(h, 0, 1), 0);
+    EXPECT_EQ(indurtdb_h_find_by_name_in(h, 0, "dup.x", &id), INDURTDB_ERR_NOT_FOUND);
+    /* 分区 1 的同名点未受影响 */
+    ASSERT_EQ(indurtdb_h_find_by_name_in(h, 1, "dup", &id), 0);
+    EXPECT_EQ(id, 2u);
 
     indurtdb_h_close(h);
 }
