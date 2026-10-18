@@ -21,13 +21,14 @@ from .layout import (MAGIC, SHM_VERSION_V1, SHM_VERSION_V2, SHM_VERSION_V3,
                      SHM_VERSION_CURRENT, HEADER_V1_SIZE,
                      HEADER_V2_SIZE, POINT_SIZE, SUBS_ENTRY_SIZE,
                      INDEX_SLOT_SIZE, META_SIZE_PER_POINT, NAME_OFFSET,
-                     SOURCE_TS_OFFSET, INDEX_EMPTY, INDEX_TOMBSTONE,
+                     SOURCE_TS_OFFSET, PARTITION_OFFSET, INDEX_EMPTY,
+                     INDEX_TOMBSTONE,
                      shm_path, layout_buckets, layout_index_size,
                      layout_meta_size, off_points_v2, off_index_v2,
                      off_meta_v2, off_subs_v2, total_size_v2,
                      total_size_v1, parse_v1_header, build_v2_header,
-                     read_point_name, name_eq, fnv1a32, build_index,
-                     index_probe)
+                     read_point_name, read_point_partition, name_eq, fnv1a32,
+                     compose_hash, build_index, index_probe)
 
 __all__ = [
     "layout", "migrate", "validate",
@@ -35,9 +36,10 @@ __all__ = [
     "SHM_VERSION_CURRENT",
     "HEADER_V1_SIZE", "HEADER_V2_SIZE", "POINT_SIZE", "SUBS_ENTRY_SIZE",
     "INDEX_SLOT_SIZE", "META_SIZE_PER_POINT", "NAME_OFFSET",
-    "SOURCE_TS_OFFSET", "INDEX_EMPTY", "INDEX_TOMBSTONE",
+    "SOURCE_TS_OFFSET", "PARTITION_OFFSET", "INDEX_EMPTY", "INDEX_TOMBSTONE",
     "shm_path", "layout_buckets", "layout_index_size", "layout_meta_size",
     "off_points_v2", "off_index_v2", "off_meta_v2", "off_subs_v2",
     "total_size_v2", "total_size_v1", "parse_v1_header", "build_v2_header",
-    "read_point_name", "name_eq", "fnv1a32", "build_index", "index_probe",
+    "read_point_name", "read_point_partition", "name_eq", "fnv1a32",
+    "compose_hash", "build_index", "index_probe",
 ]

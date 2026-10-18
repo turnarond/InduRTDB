@@ -413,8 +413,9 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
             __atomic_thread_fence(__ATOMIC_RELEASE);
             irt_seqlock_write_end(&hdr->write_seq, seq0);
 
-            /* 注册进本实例的 name→id 索引 (写锁释放后单独取锁, 避免嵌套自锁) */
-            int irc = irt_index_insert(&h->shm, p->name, pm->id);
+            /* 注册进本实例的 name→id 索引 (写锁释放后单独取锁, 避免嵌套自锁)。
+             * 配置加载的点位无分区概念 → 默认分区 0（T4 起句柄可指定默认分区）。 */
+            int irc = irt_index_insert(&h->shm, 0u, p->name, pm->id);
             if (irc == INDURTDB_ERR_FULL) {
                 irt_point_config_free(&batch);
                 return INDURTDB_ERR_FULL;   /* 索引满，无法继续注册 */
@@ -456,7 +457,9 @@ int indurtdb_h_find_by_name(indurtdb_t* h, const char* name, uint32_t* out_id) {
     if (!name || name[0] == '\0' || !out_id) {
         set_error("invalid argument"); return INDURTDB_ERR_ARG;
     }
-    int rc = irt_index_lookup(&h->shm, name, out_id);
+    /* T2: 索引已是 (partition, name) 复合键。公开 API 的分区形参在 T4 引入，
+     * 此前一律查默认分区 0 —— 与 v3.8 语义等价（全部点位都在分区 0）。 */
+    int rc = irt_index_lookup(&h->shm, 0u, name, out_id);
     if (rc == INDURTDB_ERR_NOT_FOUND) set_error("point name not found");
     else if (rc == INDURTDB_ERR_BUSY) set_error("index busy, retry");
     else if (rc != INDURTDB_OK)       set_error("index lookup failed");
@@ -548,7 +551,7 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
 
     /* 同名已注册到其他 id → 拒绝（管理面低并发，锁外探测可接受） */
     uint32_t exist = 0;
-    if (irt_index_lookup(&h->shm, name, &exist) == 0 && exist != id) {
+    if (irt_index_lookup(&h->shm, 0u, name, &exist) == 0 && exist != id) {
         set_error("name already exists"); return INDURTDB_ERR_ARG;
     }
 
@@ -571,7 +574,7 @@ int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int ty
          * 注：调用方须为低并发/单线程（rtdbd 串行 poll 循环）；此间存在短暂窗口——
          * 点已 name 注册（LIST/GET 可见）但尚在索引中（FIND_BY_NAME 暂不可见），
          * 单线程下无并发可观察到该中间态，故无害。 */
-        int irc = irt_index_insert(&h->shm, name, id);
+        int irc = irt_index_insert(&h->shm, 0u, name, id);
         if (irc == 0) {
             delta_log(h, IRT_DELTA_OP_CREATE, id, (uint8_t)type, (uint8_t)access, name);
         } else {                               /* 索引插入失败：回滚注册，避免孤儿点 */
@@ -620,8 +623,13 @@ int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id)
         }
         char old[64];
         memcpy(old, p->name, sizeof(old));
-        p->name[0] = '\0';                      /* 先标记空闲 */
-        irt_index_remove_locked(&h->shm, old); /* 持锁内用 _locked 变体（原子） */
+        uint32_t ppart = p->partition;
+        /* 顺序要紧: remove_locked 用「槽指向点位的 name」判等，故必须**先**注销
+         * （此时 p->name 仍是旧名）**再**清名。反序会让注销静默失败，留下永不
+         * 释放的索引槽且 index_count 虚高，最终使后续 insert 提前返回 FULL
+         * （回归用例: tests/unit/test_c_api_v2.cpp ApiV2.DeleteReleasesIndexSlot）。 */
+        irt_index_remove_locked(&h->shm, ppart, old);
+        p->name[0] = '\0';                      /* 后标记空闲 */
         irt_seqlock_write_end(&hdr->write_seq, seq0);
         delta_log(h, IRT_DELTA_OP_DELETE, id, 0, 0, NULL);
         return INDURTDB_OK;
@@ -636,7 +644,7 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
     if (id >= h->shm.max_points) { set_error("id out of range"); return INDURTDB_ERR_ARG; }
 
     uint32_t exist = 0;
-    if (irt_index_lookup(&h->shm, name, &exist) == 0 && exist != id) {
+    if (irt_index_lookup(&h->shm, 0u, name, &exist) == 0 && exist != id) {
         set_error("name already exists"); return INDURTDB_ERR_ARG;
     }
 
@@ -655,13 +663,14 @@ int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name)
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             return INDURTDB_OK;
         }
-        /* 先更新索引（新名插入、旧名删除），再改点位名，全程持锁 → 原子 */
-        int irc = irt_index_insert_locked(&h->shm, name, id);
+        /* 先更新索引（新名插入、旧名删除），再改点位名，全程持锁 → 原子。
+         * 分区取点位自身的值（T2 起分区固定、改名不换分区）。 */
+        int irc = irt_index_insert_locked(&h->shm, p->partition, name, id);
         if (irc != 0) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             set_error("index full"); return INDURTDB_ERR_FULL;
         }
-        irt_index_remove_locked(&h->shm, p->name);
+        irt_index_remove_locked(&h->shm, p->partition, p->name);
         strncpy(p->name, name, sizeof(p->name) - 1);
         p->name[sizeof(p->name) - 1] = '\0';
         irt_seqlock_write_end(&hdr->write_seq, seq0);

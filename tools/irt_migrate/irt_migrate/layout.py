@@ -27,6 +27,7 @@ META_SIZE_PER_POINT = 32    # indurtdb_meta_t
 NAME_OFFSET = 45
 NAME_LEN = 64
 SOURCE_TS_OFFSET = 112      # source_timestamp_ns（8B）
+PARTITION_OFFSET = 120      # partition（u32，v3.9 新增；v1/v2 此处为 reserved，恒 0）
 
 # 索引槽特殊值（与 irt_index.h 一致）
 INDEX_EMPTY = 0xFFFFFFFF
@@ -144,11 +145,20 @@ def read_point_name(points: bytes, point_id: int) -> bytes:
     return chunk[:nul]
 
 
-def name_eq(points: bytes, point_id: int, name: bytes) -> bool:
+def read_point_partition(points: bytes, point_id: int) -> int:
+    """读取点位的归属分区（v3 新增；v1/v2 源段此处恒 0 = 默认分区）。"""
+    base = point_id * POINT_SIZE + PARTITION_OFFSET
+    return struct.unpack_from("<I", points, base)[0]
+
+
+def name_eq(points: bytes, point_id: int, name: bytes, partition: int = 0) -> bool:
+    """索引键相等判定：分区与名字须同时匹配（复刻 irt_index_slot_matches）。"""
+    if read_point_partition(points, point_id) != partition:
+        return False
     return read_point_name(points, point_id) == name
 
 
-# ---- FNV-1a 32 哈希（复刻 irt_index.c:irt_hash_fnv1a32）----
+# ---- FNV-1a 32 哈希（复刻 irt_index.c:irt_hash_fnv1a32；分区 0 的单名哈希）----
 def fnv1a32(name: bytes) -> int:
     h = 0x811C9DC5
     for b in name:
@@ -156,6 +166,32 @@ def fnv1a32(name: bytes) -> int:
             break
         h ^= b
         h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+# ---- v3.9 复合键哈希（复刻 irt_index.c:irt_index_compose_hash）----
+def compose_hash(partition: int, name: bytes) -> int:
+    """FNV-1a32(partition_le32 ‖ name) + 2 步尾混。
+
+    尾混不可省：前置 4 个常量零字节在 partition==0 时等价于更换 FNV 的
+    offset basis（h -> h*prime^4），实测使负载 0.5 时平均探测从 0.246
+    劣化为 0.660（最长 7 -> 17）；尾混后回到 0.461/8，与理想随机哈希
+    基线（0.465/9）等效。与 C 实现必须逐字节一致，否则迁移后
+    find_by_name 会整体查不到。
+    """
+    h = 0x811C9DC5
+    for i in range(4):
+        h ^= (partition >> (8 * i)) & 0xFF
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    for b in name:
+        if b == 0:
+            break
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    h ^= h >> 16
+    h = (h * 0x01000193) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0x01000193) & 0xFFFFFFFF
     return h
 
 
@@ -178,7 +214,8 @@ def build_index(points: bytes, max_points: int, capacity: int):
         name = read_point_name(points, pid)
         if not name:
             continue
-        h = fnv1a32(name)
+        part = read_point_partition(points, pid)
+        h = compose_hash(part, name)
         home = h & mask
         tomb = capacity
         placed = False
@@ -195,7 +232,7 @@ def build_index(points: bytes, max_points: int, capacity: int):
                 if tomb == capacity:
                     tomb = i
                 continue
-            if sh == h and name_eq(points, spid, name):
+            if sh == h and name_eq(points, spid, name, part):
                 # 同名重注册：更新 id，不增计数（与 C 一致）
                 struct.pack_into("<II", slots, i * INDEX_SLOT_SIZE, h, pid)
                 updated = True
@@ -211,10 +248,10 @@ def build_index(points: bytes, max_points: int, capacity: int):
 
 # ---- 索引探测（供校验：按名定位 id）----
 def index_probe(slots: bytes, capacity: int, points: bytes,
-                name: bytes):
+                name: bytes, partition: int = 0):
     """复刻 irt_index_probe。命中返回 point_id，否则 None。"""
     mask = capacity - 1
-    h = fnv1a32(name)
+    h = compose_hash(partition, name)
     home = h & mask
     for d in range(capacity):
         i = (home + d) & mask
@@ -223,6 +260,6 @@ def index_probe(slots: bytes, capacity: int, points: bytes,
             return None
         if spid == INDEX_TOMBSTONE:
             continue
-        if sh == h and name_eq(points, spid, name):
+        if sh == h and name_eq(points, spid, name, partition):
             return spid
     return None

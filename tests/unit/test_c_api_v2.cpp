@@ -15,6 +15,8 @@
  *   ApiV2.OpenRejectsBadArgs             空 out / 空名 / max_points=0 -> ERR_ARG
  *   ApiV2.CloseFreesSlot                 关闭后可再次 open (槽位回收)
  *   ApiV2.SingletonRegression            旧 v1 indurtdb_initialize 仍可用
+ *   ApiV2.DeleteReleasesIndexSlot        (T2 回归) 反复 create/delete 不得耗尽索引表
+ *   ApiV2.RenameReleasesOldSlot          (T2 回归) 反复 rename 不得耗尽索引表
  */
 
 #include <gtest/gtest.h>
@@ -148,6 +150,95 @@ TEST_F(ApiV2Test, SingletonRegression) {
     ASSERT_EQ(indurtdb_read_int32(3, &v), 0);
     EXPECT_EQ(v, 42);
     indurtdb_shutdown();
+}
+
+/* 6. (T2 回归) delete 必须释放索引槽 —— 反复注册/注销不得耗尽索引表
+ *
+ * 历史缺陷（T2 实施中发现并修复）: indurtdb_h_delete_point 先清 p->name
+ * 再调 irt_index_remove_locked, 而 remove 用「槽指向点位的 name」判等 →
+ * 注销静默失败, 槽永不置墓碑、index_count 虚高, 最终 insert 提前返回 FULL。
+ * 该缺陷此前无任何用例覆盖（本文件原仅覆盖 open/close/find_by_name）。
+ */
+TEST_F(ApiV2Test, DeleteReleasesIndexSlot) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 8;                 /* 桶数 = roundup_pow2(8*2) = 16 */
+    cfg.max_subscribers = 0;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("del").c_str(), &cfg), 0);
+
+    uint32_t id = 0;
+    /* 每轮换名字(并轮转 id)。**不能**复用同一个 id+名: create 会先在点位区
+     * 回写同名(h_point_register), 使陈旧槽恰好在探测时重新匹配 → 泄漏被掩盖。
+     * 换名后陈旧槽成为纯粹垃圾, 每轮净泄漏 1 槽; 24 轮 > 16 桶 → 必然 FULL。 */
+    for (int i = 0; i < 24; ++i) {
+        const uint32_t pid = (uint32_t)(i % 8);
+        char nm[32];
+        snprintf(nm, sizeof(nm), "cycle.%d", i);
+
+        ASSERT_EQ(indurtdb_h_create_point(h, pid, nm, INDURTDB_TYPE_INT32,
+                                          INDURTDB_ACCESS_READ_WRITE), 0)
+            << "第 " << i << " 轮 create 失败: 索引槽未随 delete 释放";
+        ASSERT_EQ(indurtdb_h_find_by_name(h, nm, &id), 0);
+        EXPECT_EQ(id, pid);
+
+        ASSERT_EQ(indurtdb_h_delete_point(h, pid), 0);
+        EXPECT_EQ(indurtdb_h_find_by_name(h, nm, &id), INDURTDB_ERR_NOT_FOUND)
+            << "注销后不得再按名查到";
+        EXPECT_EQ(indurtdb_h_delete_point(h, pid), INDURTDB_ERR_NOT_FOUND)
+            << "重复注销须报未找到";
+    }
+
+    /* 索引表应基本空: 仍可注册满一圈（负载 8/16 = 0.5），证明无累积泄漏 */
+    for (uint32_t pid = 0; pid < 8; ++pid) {
+        char nm[32];
+        snprintf(nm, sizeof(nm), "fresh.%u", pid);
+        ASSERT_EQ(indurtdb_h_create_point(h, pid, nm, INDURTDB_TYPE_INT32,
+                                          INDURTDB_ACCESS_READ_WRITE), 0)
+            << "泄漏导致索引表无法容纳新点位: pid=" << pid;
+    }
+
+    indurtdb_h_close(h);
+}
+
+/* 7. (T2 回归) rename 必须同时注销旧名索引槽 —— 反复改名不得耗尽索引表 */
+TEST_F(ApiV2Test, RenameReleasesOldSlot) {
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 8;                 /* 桶数 = roundup_pow2(8*2) = 16 */
+    cfg.max_subscribers = 0;
+
+    indurtdb_t* h = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&h, uniq("ren").c_str(), &cfg), 0);
+
+    ASSERT_EQ(indurtdb_h_create_point(h, 2, "name.0", INDURTDB_TYPE_INT32,
+                                      INDURTDB_ACCESS_READ_WRITE), 0);
+
+    uint32_t id = 0;
+    for (int i = 1; i < 24; ++i) {
+        char oldn[32], newn[32];
+        snprintf(oldn, sizeof(oldn), "name.%d", i - 1);
+        snprintf(newn, sizeof(newn), "name.%d", i);
+
+        ASSERT_EQ(indurtdb_h_rename_point(h, 2, newn), 0)
+            << "第 " << i << " 轮 rename 失败: 旧名索引槽未释放";
+        EXPECT_EQ(indurtdb_h_find_by_name(h, oldn, &id), INDURTDB_ERR_NOT_FOUND)
+            << "旧名应已注销: " << oldn;
+        ASSERT_EQ(indurtdb_h_find_by_name(h, newn, &id), 0)
+            << "新名应可查到: " << newn;
+        EXPECT_EQ(id, 2u);
+    }
+
+    /* 再注册 7 个新点位（共 8 个，负载 0.5），证明无累积泄漏 */
+    for (uint32_t pid = 0; pid < 8; ++pid) {
+        if (pid == 2) continue;
+        char nm[32];
+        snprintf(nm, sizeof(nm), "extra.%u", pid);
+        ASSERT_EQ(indurtdb_h_create_point(h, pid, nm, INDURTDB_TYPE_INT32,
+                                          INDURTDB_ACCESS_READ_WRITE), 0)
+            << "泄漏导致索引表无法容纳新点位: pid=" << pid;
+    }
+
+    indurtdb_h_close(h);
 }
 
 }  // namespace

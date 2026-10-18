@@ -97,6 +97,50 @@ def test_index_build_and_probe():
         assert L.index_probe(slots, cap, bytes(points), name) == pid
 
 
+def test_compose_hash_matches_c_golden():
+    """与 tests/unit/test_c_index.cpp:IndexHashGolden.MatchesPythonMirror 同一组黄金值。
+
+    两侧漂移会让迁移后的段里 find_by_name 整体查不到（T2 实施中已实际踩到），
+    故在此钉死；覆盖低位 / 高位分区与空名。
+    """
+    vec = [
+        (0, b"temp", 0x047106E8),
+        (0, b"tag.1.value", 0x39FFD406),
+        (1, b"temp", 0x39DF487E),
+        (255, b"pt.3", 0x437B37DD),
+        (1023, b"x7", 0x865989B0),
+        (0, b"", 0xAE44FAF5),
+        (65535, b"dup", 0x8696BD80),
+        (65536, b"temp", 0xFF29360A),
+        (256, b"dup", 0xA8B6E02D),
+        (16777216, b"dup", 0x9CF9FD66),
+        (4294967295, b"max", 0x733CC768),
+    ]
+    for part, name, expect in vec:
+        got = L.compose_hash(part, name)
+        assert got == expect, (part, name, hex(got), hex(expect))
+
+
+def test_index_partition_scoped():
+    """索引键含 partition：同名跨分区互相隔离，未注册分区不得串名。"""
+    N = 8
+    points = bytearray(N * L.POINT_SIZE)
+
+    def put(pid, name, part):
+        off = pid * L.POINT_SIZE
+        points[off + L.NAME_OFFSET: off + L.NAME_OFFSET + len(name)] = name
+        struct.pack_into("<I", points, off + L.PARTITION_OFFSET, part)
+
+    put(0, b"temp", 0)
+    put(1, b"temp", 1)
+    cap = L.layout_buckets(N)
+    slots, count = L.build_index(bytes(points), N, cap)
+    assert count == 2, f"同名跨分区应是两个独立条目, got {count}"
+    assert L.index_probe(slots, cap, bytes(points), b"temp", 0) == 0
+    assert L.index_probe(slots, cap, bytes(points), b"temp", 1) == 1
+    assert L.index_probe(slots, cap, bytes(points), b"temp", 2) is None
+
+
 def test_migrate_roundtrip():
     sid = "ut_v1_xyz"
     dst = "ut_v2_xyz"
