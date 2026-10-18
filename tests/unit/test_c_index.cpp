@@ -1,23 +1,29 @@
 /**
  * @file test_c_index.cpp
- * @brief v3.4 T2 红阶段用例: 共享内存内 name→id 索引
- * @version 3.4.0
- * @date 2026-10-03
+ * @brief 共享内存内 (partition, name)->id 索引用例
+ * @version 3.9.0
+ * @date 2026-10-18
  * @copyright MIT License
  *
  * 设计依据: docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md §3.2
+ *           docs/03-设计文档/08-v3.9-点位分区与命名空间方案设计.md §3 (T2)
  *   开放寻址(线性探测) + 墓碑; 条目 8B {hash32, point_id};
- *   桶数 B = roundup_pow2(max_points*2) (负载因子 ≤0.5); FNV-1a 32;
- *   冲突比较复用点位区内 name[64] (不重复存字符串).
+ *   桶数 B = roundup_pow2(max_points*2) (负载因子 ≤0.5);
+ *   v3.9 复合键: hash = FNV1a32(partition_le32 || name),
+ *   冲突判定再比 pts[id].partition 与 pts[id].name[64]。
  *
- * 用例 (红阶段应全部失败: irt_index_* 尚未实现):
- *   Index.FindByNameRoundTrip       注册后按名查到正确 id; 未注册 -> NOT_FOUND
- *   Index.HandlesHashCollision      同桶(人为构造)的多个点位名全部可查到
- *   Index.TombstoneAllowsReuse      删除后立即查不到; 槽位可复用
- *   Index.FullLoadNoInfiniteProbe   满负载时查找有限步终止(不死循环)
- *   Index.ZeroHeapAllocation        索引区定长预分配, 位于段内, 8B/槽
- *   Index.ProbeStatsAtHalfLoad      负载 0.5 时实测探测长度(冲突率)
- *   Index.PublicApiFindByName       经 indurtdb_load_config + find_by_name 端到端
+ * 用例:
+ *   Index.FindByNameRoundTrip              注册后按名查到正确 id; 未注册 -> NOT_FOUND
+ *   Index.HandlesHashCollision             同桶(人为构造)的多个点位名全部可查到
+ *   Index.TombstoneAllowsReuse             删除后立即查不到; 槽位可复用
+ *   Index.FullLoadNoInfiniteProbe          满负载时查找有限步终止(不死循环)
+ *   Index.ZeroHeapAllocation               索引区定长预分配, 位于段内, 8B/槽
+ *   Index.ProbeStatsAtHalfLoad             负载 0.5 时实测探测长度(冲突率)
+ *   Index.PublicApiFindByName              经 indurtdb_load_config + find_by_name 端到端
+ *   Index.SameNameDifferentPartition       (T2) 同名跨分区共存, 各得不同 id
+ *   Index.FindScopedToPartition            (T2) 查找限定在分区内, 不跨区串名
+ *   Index.Partition0MatchesV38Semantics    (T2) 分区 0 语义与 v3.8 一致, 注册幂等
+ *   Index.HandlesHashCollisionAcrossPartitions (T2) 跨分区同哈希名全部可查到
  */
 
 #include <gtest/gtest.h>
@@ -25,6 +31,7 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <vector>
 
 extern "C" {
 #include <indurtdb/indurtdb.h>
@@ -78,16 +85,16 @@ TEST_F(IndexTest, FindByNameRoundTrip) {
     init_seg(64);
 
     set_point_name(&shm_, 7, "tank.temperature");
-    ASSERT_EQ(irt_index_insert(&shm_, "tank.temperature", 7), 0);
+    ASSERT_EQ(irt_index_insert(&shm_, 0u, "tank.temperature", 7), 0);
 
     uint32_t id = 0xFFFFFFFFu;
-    EXPECT_EQ(irt_index_lookup(&shm_, "tank.temperature", &id), 0);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "tank.temperature", &id), 0);
     EXPECT_EQ(id, 7u);
 
     /* 空名 / 未注册名 -> 明确错误码, 不是裸 -1 */
-    EXPECT_EQ(irt_index_lookup(&shm_, "no.such.point", &id), INDURTDB_ERR_NOT_FOUND);
-    EXPECT_EQ(irt_index_lookup(&shm_, "", &id), INDURTDB_ERR_ARG);
-    EXPECT_EQ(irt_index_lookup(&shm_, "tank.temperature", nullptr), INDURTDB_ERR_ARG);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "no.such.point", &id), INDURTDB_ERR_NOT_FOUND);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "", &id), INDURTDB_ERR_ARG);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "tank.temperature", nullptr), INDURTDB_ERR_ARG);
 }
 
 /* 2. 人为构造同桶(哈希冲突)的多个点位名, 全部必须可查到 */
@@ -100,26 +107,26 @@ TEST_F(IndexTest, HandlesHashCollision) {
     ASSERT_GT(ix.capacity, 0u);
     const uint32_t mask = ix.capacity - 1u;
 
-    /* 暴力搜出 6 个落在同一桶的名字 */
-    const uint32_t target_bucket = irt_hash_fnv1a32("seed") & mask;
+    /* 暴力搜出 6 个落在同一桶的名字 (分区 0 的复合键) */
+    const uint32_t target_bucket = irt_index_compose_hash(0u, "seed") & mask;
     std::vector<std::string> collide;
     for (int i = 0; i < 200000 && collide.size() < 6; ++i) {
         char nm[64];
         snprintf(nm, sizeof(nm), "p%d", i);
-        if ((irt_hash_fnv1a32(nm) & mask) == target_bucket) collide.emplace_back(nm);
+        if ((irt_index_compose_hash(0u, nm) & mask) == target_bucket) collide.emplace_back(nm);
     }
     ASSERT_EQ(collide.size(), 6u) << "未能构造出足够的同桶名字";
 
     for (size_t i = 0; i < collide.size(); ++i) {
         uint32_t pid = (uint32_t)(i + 1);
         set_point_name(&shm_, pid, collide[i].c_str());
-        ASSERT_EQ(irt_index_insert(&shm_, collide[i].c_str(), pid), 0);
+        ASSERT_EQ(irt_index_insert(&shm_, 0u, collide[i].c_str(), pid), 0);
     }
 
     /* 全部可查到, 且 id 正确 */
     for (size_t i = 0; i < collide.size(); ++i) {
         uint32_t id = 0;
-        EXPECT_EQ(irt_index_lookup(&shm_, collide[i].c_str(), &id), 0)
+        EXPECT_EQ(irt_index_lookup(&shm_, 0u, collide[i].c_str(), &id), 0)
             << "同桶名字丢失: " << collide[i];
         EXPECT_EQ(id, (uint32_t)(i + 1));
     }
@@ -130,23 +137,19 @@ TEST_F(IndexTest, TombstoneAllowsReuse) {
     init_seg(64);
 
     set_point_name(&shm_, 3, "pump.pressure");
-    ASSERT_EQ(irt_index_insert(&shm_, "pump.pressure", 3), 0);
+    ASSERT_EQ(irt_index_insert(&shm_, 0u, "pump.pressure", 3), 0);
 
     uint32_t id = 0;
-    ASSERT_EQ(irt_index_lookup(&shm_, "pump.pressure", &id), 0);
+    ASSERT_EQ(irt_index_lookup(&shm_, 0u, "pump.pressure", &id), 0);
 
-    ASSERT_EQ(irt_index_remove(&shm_, "pump.pressure"), 0);
-    EXPECT_EQ(irt_index_lookup(&shm_, "pump.pressure", &id), INDURTDB_ERR_NOT_FOUND);
+    ASSERT_EQ(irt_index_remove(&shm_, 0u, "pump.pressure"), 0);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "pump.pressure", &id), INDURTDB_ERR_NOT_FOUND);
 
     /* 槽位复用: 同名重新注册到新 id */
     set_point_name(&shm_, 9, "pump.pressure");
-    EXPECT_EQ(irt_index_insert(&shm_, "pump.pressure", 9), 0);
-    ASSERT_EQ(irt_index_lookup(&shm_, "pump.pressure", &id), 0);
+    EXPECT_EQ(irt_index_insert(&shm_, 0u, "pump.pressure", 9), 0);
+    ASSERT_EQ(irt_index_lookup(&shm_, 0u, "pump.pressure", &id), 0);
     EXPECT_EQ(id, 9u);
-
-    /* 墓碑不阻断探测链: 删除中间槽位后, 其后的同桶项仍可查到 */
-    uint32_t idx_seg = 0;
-    (void)idx_seg;
 }
 
 /* 4. 满负载: 查找必须在有限步内终止, 不得死循环 */
@@ -165,16 +168,16 @@ TEST_F(IndexTest, FullLoadNoInfiniteProbe) {
         char nm[64];
         snprintf(nm, sizeof(nm), "f%u", i);
         set_point_name(&shm_, i % kMax, nm);
-        if (irt_index_insert(&shm_, nm, i % kMax) == 0) ++inserted;
+        if (irt_index_insert(&shm_, 0u, nm, i % kMax) == 0) ++inserted;
     }
     EXPECT_EQ(inserted, (int)B);
 
     /* 查一个不存在的名字: 必须返回 NOT_FOUND 而非挂死 */
     uint32_t id = 0;
-    EXPECT_EQ(irt_index_lookup(&shm_, "absent.point", &id), INDURTDB_ERR_NOT_FOUND);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "absent.point", &id), INDURTDB_ERR_NOT_FOUND);
 
     /* 再插入应报 FULL(索引区已满), 而不是越界写坏邻近区段 */
-    EXPECT_EQ(irt_index_insert(&shm_, "one.more", 0u), INDURTDB_ERR_FULL);
+    EXPECT_EQ(irt_index_insert(&shm_, 0u, "one.more", 0u), INDURTDB_ERR_FULL);
 }
 
 /* 5. 零堆分配: 索引区定长预分配, 位于段内, 8B/槽 */
@@ -220,13 +223,13 @@ TEST_F(IndexTest, ProbeStatsAtHalfLoad) {
         snprintf(nm, sizeof(nm), "tag.%u.value", i);
         names.emplace_back(nm);
         set_point_name(&shm_, i, nm);
-        ASSERT_EQ(irt_index_insert(&shm_, nm, i), 0);
+        ASSERT_EQ(irt_index_insert(&shm_, 0u, nm, i), 0);
     }
 
     /* 逐项统计探测距离(从 home 桶到实际落点) */
     uint64_t total = 0, max_probe = 0, collide_cnt = 0;
     for (uint32_t i = 0; i < kMax; ++i) {
-        const uint32_t home = irt_hash_fnv1a32(names[i].c_str()) & mask;
+        const uint32_t home = irt_index_compose_hash(0u, names[i].c_str()) & mask;
         uint32_t dist = 0, found = ix.capacity;   /* found = 实际落点桶 */
         for (uint32_t d = 0; d < ix.capacity; ++d) {
             const irt_index_slot_t* s = &ix.slots[(home + d) & mask];
@@ -245,6 +248,9 @@ TEST_F(IndexTest, ProbeStatsAtHalfLoad) {
     printf("  [索引实测] 桶数=%u 装载=%u 负载=0.50 平均探测=%.3f 最长探测=%llu 冲突率=%.1f%%\n",
            ix.capacity, kMax, avg, (unsigned long long)max_probe, rate * 100.0);
 
+    /* 质量基线: 理想随机哈希在同参数下为 平均 0.465 / 最长 9。
+     * v3.9 给哈希加了 4 字节分区前缀后, 必须靠 compose_hash 末尾的 2 步尾混
+     * 维持该水平 —— 去掉尾混实测会劣化到 平均 0.660 / 最长 17(见 irt_index.c 注释)。 */
     EXPECT_LE(avg, 2.0) << "负载 0.5 时平均探测长度应远小于 2";
     EXPECT_LE(max_probe, 16u) << "最长探测长度超出预期, 需复核哈希/桶数";
 }
@@ -282,4 +288,147 @@ TEST_F(IndexTest, PublicApiFindByName) {
     ::unlink(("/dev/shm/indurtdb_" + inst).c_str());
 }
 
+/* 8. (T2) 同名跨分区共存: (0,"temp") 与 (1,"temp") 各得不同 id, 均可查到 */
+TEST_F(IndexTest, SameNameDifferentPartition) {
+    init_seg(64);
+
+    set_point_name(&shm_, 1, "temp");
+    set_point_name(&shm_, 2, "temp");
+    ASSERT_EQ(irt_index_insert(&shm_, 0u, "temp", 1), 0);
+    ASSERT_EQ(irt_index_insert(&shm_, 1u, "temp", 2), 0);
+
+    uint32_t a = 0, b = 0;
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "temp", &a), 0);
+    EXPECT_EQ(irt_index_lookup(&shm_, 1u, "temp", &b), 0);
+    EXPECT_EQ(a, 1u);
+    EXPECT_EQ(b, 2u);
+    EXPECT_NE(a, b) << "同名跨分区必须是两个独立点位";
+
+    /* insert 是索引键与点位属性的单一权威: 分区已落到点位区 */
+    indurtdb_point_t* pts = irt_shm_points(&shm_);
+    EXPECT_EQ(pts[1].partition, 0u);
+    EXPECT_EQ(pts[2].partition, 1u);
+
+    /* index_count 为 2 (两个独立条目) */
+    EXPECT_EQ(irt_shm_header(&shm_)->index_count, 2u);
+}
+
+/* 9. (T2) 查找限定在分区内: 对未注册分区查同名不得串到别的分区 */
+TEST_F(IndexTest, FindScopedToPartition) {
+    init_seg(64);
+
+    set_point_name(&shm_, 5, "temp");
+    ASSERT_EQ(irt_index_insert(&shm_, 1u, "temp", 5), 0);
+
+    uint32_t id = 0xFFFFFFFFu;
+    EXPECT_EQ(irt_index_lookup(&shm_, 1u, "temp", &id), 0);
+    EXPECT_EQ(id, 5u);
+
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "temp", &id), INDURTDB_ERR_NOT_FOUND)
+        << "分区 0 不得命中分区 1 的同名点";
+    EXPECT_EQ(irt_index_lookup(&shm_, 2u, "temp", &id), INDURTDB_ERR_NOT_FOUND)
+        << "分区 2 不得命中分区 1 的同名点";
+
+    /* 注销也按分区限定: 错分区注销失败, 正确分区成功 */
+    EXPECT_EQ(irt_index_remove(&shm_, 0u, "temp"), INDURTDB_ERR_NOT_FOUND);
+    EXPECT_EQ(irt_index_remove(&shm_, 1u, "temp"), 0);
+    EXPECT_EQ(irt_index_lookup(&shm_, 1u, "temp", &id), INDURTDB_ERR_NOT_FOUND);
+}
+
+/* 10. (T2) 分区 0 的语义与 v3.8 一致: 默认分区不破, 且注册幂等 */
+TEST_F(IndexTest, Partition0MatchesV38Semantics) {
+    init_seg(64);
+
+    set_point_name(&shm_, 3, "boiler.temp");
+    ASSERT_EQ(irt_index_insert(&shm_, 0u, "boiler.temp", 3), 0);
+
+    uint32_t id = 0;
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "boiler.temp", &id), 0);
+    EXPECT_EQ(id, 3u);
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "not.exists", &id), INDURTDB_ERR_NOT_FOUND);
+
+    /* 同键重复注册: 仍指向同 id, 且 index_count 不重复累加(v3.8 幂等语义) */
+    irt_header_t* hdr = irt_shm_header(&shm_);
+    uint32_t cnt0 = hdr->index_count;
+    EXPECT_EQ(irt_index_insert(&shm_, 0u, "boiler.temp", 3), 0);
+    EXPECT_EQ(hdr->index_count, cnt0) << "同键重复注册不得重复计数";
+    EXPECT_EQ(irt_index_lookup(&shm_, 0u, "boiler.temp", &id), 0);
+    EXPECT_EQ(id, 3u);
+}
+
+/* 11. (T2) 跨分区同哈希名: 复合键冲突链必须全部可查到 */
+TEST_F(IndexTest, HandlesHashCollisionAcrossPartitions) {
+    const uint32_t kMax = 128;
+    init_seg(kMax);
+
+    irt_index_t ix{};
+    ASSERT_EQ(irt_index_bind(&ix, &shm_), 0);
+    const uint32_t mask = ix.capacity - 1u;
+
+    const uint32_t target = irt_index_compose_hash(0u, "seed") & mask;
+
+    /* 搜出 5 个不同分区、复合键落在同一桶的键（每分区只取一个） */
+    struct Key { uint32_t part; std::string nm; };
+    std::vector<Key> keys;
+    for (uint32_t part = 0; part < 8 && keys.size() < 5; ++part) {
+        for (int i = 0; i < 400000; ++i) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "x%d", i);
+            if ((irt_index_compose_hash(part, nm) & mask) == target) {
+                keys.push_back(Key{part, nm});
+                break;                      /* 每分区取一个, 保证分区各异 */
+            }
+        }
+    }
+    ASSERT_GE(keys.size(), 2u) << "未能构造出跨分区同桶键";
+    /* 确保分区确实不同(否则用例退化成普通冲突) */
+    bool multi_part = false;
+    for (size_t i = 1; i < keys.size(); ++i)
+        if (keys[i].part != keys[0].part) multi_part = true;
+    ASSERT_TRUE(multi_part) << "未能构造出跨分区冲突";
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        uint32_t pid = (uint32_t)(i + 1);
+        set_point_name(&shm_, pid, keys[i].nm.c_str());
+        ASSERT_EQ(irt_index_insert(&shm_, keys[i].part, keys[i].nm.c_str(), pid), 0)
+            << "跨分区冲突链插入失败 i=" << i;
+    }
+
+    for (size_t i = 0; i < keys.size(); ++i) {
+        uint32_t id = 0;
+        EXPECT_EQ(irt_index_lookup(&shm_, keys[i].part, keys[i].nm.c_str(), &id), 0)
+            << "跨分区同桶项丢失: part=" << keys[i].part << " name=" << keys[i].nm;
+        EXPECT_EQ(id, (uint32_t)(i + 1));
+    }
+}
+
 }  // namespace
+
+/* (T2) 复合键哈希黄金值 —— 与 Python 迁移工具逐字节对齐的契约锚点。
+ *
+ * tools/irt_migrate 用纯 Python 复刻同一哈希给迁移后的段重建索引; 两侧一旦
+ * 漂移, 迁移段内 find_by_name 会整体查不到(T2 实施中已实际踩到:
+ * test_c_migration 的 V1ToV3RoundTrip 因该漂移失败)。故此处钉死黄金值,
+ * Python 侧 tests/test_migrate.py 钉同一组; 任一侧改动哈希都会立即变红。
+ * 取值覆盖低位分区、高位分区(65535/65536/16777216/2^32-1)与空名。 */
+TEST(IndexHashGolden, MatchesPythonMirror) {
+    struct Vec { uint32_t part; const char* name; uint32_t expect; };
+    static const Vec kV[] = {
+        {0u,          "temp",        0x047106E8u},
+        {0u,          "tag.1.value", 0x39FFD406u},
+        {1u,          "temp",        0x39DF487Eu},
+        {255u,        "pt.3",        0x437B37DDu},
+        {1023u,       "x7",          0x865989B0u},
+        {0u,          "",            0xAE44FAF5u},
+        {65535u,      "dup",         0x8696BD80u},
+        {65536u,      "temp",        0xFF29360Au},
+        {256u,        "dup",         0xA8B6E02Du},
+        {16777216u,   "dup",         0x9CF9FD66u},
+        {4294967295u, "max",         0x733CC768u},
+    };
+    for (const Vec& v : kV) {
+        EXPECT_EQ(irt_index_compose_hash(v.part, v.name), v.expect)
+            << "分区 " << v.part << " 名 '" << v.name
+            << "': 哈希漂移会同时破坏 C 库与 Python 迁移工具的一致性";
+    }
+}
