@@ -24,8 +24,8 @@ def read_v2_segment(instance_id: str):
          index_count, scan_skipped) = struct.unpack_from("<IIIIQiQQIIIIIIIII", hdr_raw, 0)
         if magic != L.MAGIC:
             raise ValueError(f"bad magic: {magic:#x}")
-        if version != L.SHM_VERSION_V2:
-            raise ValueError(f"目标段非 v2 (version={version})")
+        if version != L.SHM_VERSION_CURRENT:
+            raise ValueError(f"目标段非当前版 (version={version})")
         total = L.total_size_v2(max_points, max_subscribers)
         data = bytearray(total)
         data[:len(hdr_raw)] = hdr_raw
@@ -70,8 +70,8 @@ def validate(src_id: str, dst_id: str, source_ts_mode: str = "zero",
             f"max_points 不一致: v1={v1['max_points']} v2={v2['max_points']}")
     if v2["max_subscribers"] != v1["max_subscribers"]:
         raise ValueError("max_subscribers 不一致")
-    if v2["version"] != L.SHM_VERSION_V2:
-        raise ValueError("目标段版本非 v2")
+    if v2["version"] != L.SHM_VERSION_CURRENT:
+        raise ValueError("目标段版本非当前版")
 
     # 2) CRC 重算
     with open(L.shm_path(dst_id), "rb") as f:

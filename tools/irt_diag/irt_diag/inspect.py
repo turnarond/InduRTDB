@@ -5,7 +5,7 @@ import json
 import os
 import sys
 
-from ._layout import HEADER_V2_SIZE, SHM_VERSION_V2, parse_v2_header
+from ._layout import HEADER_V2_SIZE, SHM_VERSION_CURRENT, parse_v2_header
 
 SHM_DIR = "/dev/shm"
 
@@ -27,7 +27,7 @@ def inspect_segment(instance_id: str) -> dict:
     hdr["segment_size"] = st.st_size
     hdr["healthy"] = (
         hdr["magic_ok"]
-        and hdr["version"] == SHM_VERSION_V2
+        and hdr["version"] == SHM_VERSION_CURRENT
         and hdr["crc_ok"]
         and hdr["owner_pid"] > 0
     )

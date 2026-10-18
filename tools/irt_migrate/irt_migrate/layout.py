@@ -1,6 +1,6 @@
 """InduRTDB 共享内存段布局常量与底层字节工具。
 
-本模块不依赖 C 库，纯 Python 复刻 v1/v2 共享内存布局，供迁移工具
+本模块不依赖 C 库，纯 Python 复刻 v1/v2/v3 共享内存布局，供迁移工具
 （tools/irt_migrate）离线读写段。布局常量与 src/internal/irt_types.h、
 src/core/irt_shm.h 严格一致 —— 任何改动须同步。
 """
@@ -12,7 +12,9 @@ import zlib
 # ---- 通用常量 ----
 MAGIC = 0x1DBA1DBA
 SHM_VERSION_V1 = 1          # v3.3 及以前
-SHM_VERSION_V2 = 2          # v3.4 布局 v2
+SHM_VERSION_V2 = 2          # v3.4 布局 v2（历史；v3.9 起被 V3 取代）
+SHM_VERSION_V3 = 3          # v3.9 起：点位新增 partition 字段
+SHM_VERSION_CURRENT = SHM_VERSION_V3   # 当前库期望的段版本（迁移输出目标）
 
 HEADER_V1_SIZE = 64         # == v2.x InduRTDBHeader（旧）
 HEADER_V2_SIZE = 128        # 布局 v2
@@ -93,7 +95,7 @@ def parse_v1_header(raw: bytes):
     if version != SHM_VERSION_V1:
         raise ValueError(
             f"source segment is not v1 (version={version}); "
-            f"本工具只迁移 v1 -> v2")
+            f"本工具只迁移 v1 -> v3")
     if max_points == 0:
         raise ValueError("v1 header max_points == 0")
     return version, max_points, max_subscribers
@@ -101,7 +103,10 @@ def parse_v1_header(raw: bytes):
 
 # ---- v2 Header 构造 ----
 def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
-    """构造 128B v2 Header（含 CRC32）。
+    """构造 128B 当前版段 Header（含 CRC32）。
+
+    v3.9 起输出段版本 SHM_VERSION_CURRENT(=3)；布局结构（尺寸 / 偏移 /
+    CRC 区间）与 v3.4 的 v2 逐字节相同，仅 version 字段值不同。
 
     CRC 覆盖 [0:16]（magic/version/max_points/max_subscribers）
     与 [48:72]（flags/保留/off_points/off_index/off_meta/off_subs），
@@ -115,7 +120,7 @@ def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
     om = off_meta_v2(max_points)
     os_ = off_subs_v2(max_points)
     # [0:16] magic/version/max_points/max_subscribers
-    struct.pack_into("<IIII", raw, 0, MAGIC, SHM_VERSION_V2,
+    struct.pack_into("<IIII", raw, 0, MAGIC, SHM_VERSION_CURRENT,
                      max_points, max_subscribers)
     # [48:56] flags=0, 保留(原拟 scan_skipped 位, 因在 CRC 范围[48:72]内改为保留)
     struct.pack_into("<II", raw, 48, 0, 0)

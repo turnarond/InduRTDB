@@ -85,7 +85,8 @@ typedef struct {
     char     name[64];              /* 45–108  */
     uint8_t  padding[3];            /* 109–111: 保持 8B 对齐前导 */
     uint64_t source_timestamp_ns;   /* 112–119: 采集时刻(SourceTimestamp)，0=未提供 */
-    uint8_t  reserved[8];           /* 120–127: 保留（须为 0） */
+    uint32_t partition;             /* 120–123: 分区/命名空间 id（v3.9），0=默认分区 */
+    uint8_t  reserved[4];           /* 124–127: 保留（须为 0） */
 } __attribute__((packed, aligned(128))) indurtdb_point_t;
 
 /* ---- 元数据 (v3.4 新增, 每点 32B, 冷数据, 按 point_id O(1) 索引) ----

@@ -66,8 +66,8 @@ TEST(Tools, InspectReportsHealth) {
     std::string out;
     int rc = sh_capture(cmd, out);
     EXPECT_EQ(rc, 0) << "inspect 应返回 0(健康)\n" << out;
-    EXPECT_NE(out.find("\"version\": 2"), std::string::npos)
-        << "inspect 应输出 version=2\n" << out;
+    EXPECT_NE(out.find("\"version\": 3"), std::string::npos)
+        << "inspect 应输出 version=3\n" << out;
     EXPECT_NE(out.find("\"crc_ok\": true"), std::string::npos)
         << "inspect 应报告 crc_ok=true\n" << out;
     EXPECT_NE(out.find("\"owner_pid\""), std::string::npos)
