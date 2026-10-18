@@ -99,7 +99,7 @@ struct Proc {
 std::string policy_for_self()
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%lu:0:63\n", (unsigned long)getuid());
+    snprintf(buf, sizeof(buf), "%lu:*:0:63\n", (unsigned long)getuid());
     return std::string(buf);
 }
 

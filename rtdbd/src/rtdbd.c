@@ -463,8 +463,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             return 1;
         }
 
-        /* 鉴权：deny by default */
-        if (!irt_policy_allows(policy, uid, w.point_id)) {
+        /* 鉴权：deny by default。分区暂固定为 0，协议带分区见 T5。 */
+        if (!irt_policy_allows(policy, uid, 0u, w.point_id)) {
             g_stats.write_rejected++;
             rtdbd_stats_note_error();
             resp.status      = RTDBD_ST_DENIED;
@@ -601,8 +601,8 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             return 1;
         }
 
-        /* 鉴权：deny by default；元数据写入属管控操作 */
-        if (!irt_policy_allows(policy, uid, s.point_id)) {
+        /* 鉴权：deny by default；元数据写入属管控操作。分区暂固定 0（T5）。 */
+        if (!irt_policy_allows(policy, uid, 0u, s.point_id)) {
             resp.status      = RTDBD_ST_DENIED;
             resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
@@ -645,7 +645,7 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
             (void)send_all(fd, &resp, sizeof(resp)); return 1;
         }
-        if (!irt_policy_allows(policy, uid, c.point_id)) {
+        if (!irt_policy_allows(policy, uid, 0u, c.point_id)) {   /* 分区暂固定 0（T5） */
             resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
         }
@@ -678,7 +678,7 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
             (void)send_all(fd, &resp, sizeof(resp)); return 1;
         }
-        if (!irt_policy_allows(policy, uid, d.point_id)) {
+        if (!irt_policy_allows(policy, uid, 0u, d.point_id)) {   /* 分区暂固定 0（T5） */
             resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
         }
@@ -710,7 +710,7 @@ static int handle_request(int fd, irt_policy_t* policy, irt_audit_t* audit,
             resp.status = RTDBD_ST_INTERNAL; resp.payload_len = 0;
             (void)send_all(fd, &resp, sizeof(resp)); return 1;
         }
-        if (!irt_policy_allows(policy, uid, r.point_id)) {
+        if (!irt_policy_allows(policy, uid, 0u, r.point_id)) {   /* 分区暂固定 0（T5） */
             resp.status = RTDBD_ST_DENIED; resp.payload_len = 0;
             return send_all(fd, &resp, sizeof(resp));
         }
@@ -1128,10 +1128,23 @@ int main(int argc, char** argv)
 
     irt_policy_t policy;
     irt_policy_init(&policy);
-    if (policy_path && irt_policy_load(&policy, policy_path) != 0) {
-        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
-                        "rtdbd: failed to load policy: %s", policy_path);
-        return 1;
+    if (policy_path) {
+        uint32_t pline = 0;
+        int      prc   = irt_policy_load(&policy, policy_path, &pline);
+        if (prc != IRT_POLICY_OK) {
+            if (pline > 0) {
+                irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                                "rtdbd: invalid policy %s: line %u: %s",
+                                policy_path, pline, irt_policy_strerror(prc));
+            } else {
+                irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                                "rtdbd: failed to load policy %s: %s",
+                                policy_path, irt_policy_strerror(prc));
+            }
+            /* 策略属配置：以配置校验退出码终止，supervisor/systemd 才会
+             * 停止 respawn（否则坏策略会触发无限重启循环）。 */
+            return RTDBD_EXIT_CONFIG;
+        }
     }
 
     irt_audit_t audit;

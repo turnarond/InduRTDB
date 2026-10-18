@@ -19,6 +19,15 @@ foreach(src ${UNIT_TEST_SOURCES})
     add_test(NAME ${name} COMMAND ${name})
 endforeach()
 
+# v3.9 T3：策略引擎单测直接编译 rtdbd/src/policy.c（纯叶子模块，仅依赖 libc）。
+# 该模块不在 indurtdb 库内，故单独挂源文件与包含目录。
+if(TARGET test_c_policy)
+    target_sources(test_c_policy PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c)
+    target_include_directories(test_c_policy PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+
 # 版本一致性：期望值由 CMake project(VERSION) 注入，测试端不得硬编码，
 # 否则每次发布都会漂移（v3.3.0 发布时实测踩到）。
 if(TARGET test_c_version)
