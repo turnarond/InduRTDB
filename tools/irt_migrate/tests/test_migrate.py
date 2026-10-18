@@ -69,7 +69,7 @@ def test_v2_header_crc_and_offsets():
     hdr = L.build_v2_header(N, 4)
     magic, version, mp, ms = struct.unpack_from("<IIII", hdr, 0)
     assert magic == L.MAGIC
-    assert version == L.SHM_VERSION_V2
+    assert version == L.SHM_VERSION_CURRENT
     assert mp == N and ms == 4
     op, oi, om, os_ = struct.unpack_from("<IIII", hdr, 56)
     assert op == L.off_points_v2()

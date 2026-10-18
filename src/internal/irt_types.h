@@ -18,9 +18,10 @@
 #endif
 
 #define IRT_MAGIC        0x1DBA1DBAu
-/* v3.3 及以前为 1；v3.4 布局 v2 起为 2。
+/* v3.3 及以前为 1；v3.4 布局 v2 为 2；v3.9 起为 3
+ * （点位 reserved[0:4) 更名 partition、name→id 索引键含分区）。
  * 版本不匹配一律拒绝挂载，绝不按新布局解释旧段。 */
-#define IRT_SHM_VERSION  2u
+#define IRT_SHM_VERSION  3u
 
 /* 共享内存头部 (v3.4 布局 v2: 128 字节)
  *
@@ -94,6 +95,10 @@ IRT_STATIC_ASSERT(sizeof(indurtdb_point_t) == 128,
  * sizeof 与既有字段偏移均不变 —— ABI 仍为 v1。 */
 IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, source_timestamp_ns) == 112,
                   "source_timestamp_ns must be at offset 112");
+/* v3.9: 原 reserved[8] 前 4B 更名 partition（分区/命名空间 id）。
+ * 偏移与 sizeof 均不变，120 处是本版唯一新增语义字段。 */
+IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, partition) == 120,
+                  "partition must be at offset 120 (v3.9)");
 IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, name) == 45,
                   "name offset must not change (ABI v1)");
 IRT_STATIC_ASSERT(offsetof(indurtdb_point_t, quality) == 41,

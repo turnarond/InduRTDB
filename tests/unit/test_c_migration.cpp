@@ -1,14 +1,14 @@
 /**
  * @file test_c_migration.cpp
- * @brief T5: v1 -> v2 段迁移工具集成测试（红→绿）
+ * @brief v1 -> 当前版(v3) 段迁移工具集成测试（红→绿）
  *
  * 测试策略：
  *  1. 进程内用原始字节造一个 v1 段（64B 旧头 + N×128B 点 + M×16B 心跳）；
- *  2. 通过 system() 调用 Python 迁移工具 tools/irt_migrate 执行 v1->v2 迁移；
- *  3. 用**真实的 InduRTDB 库 indurtdb_h_open** 回挂 v2 段，逐项校验
+ *  2. 通过 system() 调用 Python 迁移工具 tools/irt_migrate 执行 v1->v3 迁移；
+ *  3. 用**真实的 InduRTDB 库 indurtdb_h_open** 回挂迁移产物，逐项校验
  *     （点位值/类型/质量/时间戳/名、source_ts 清零、find_by_name 索引）；
- *     库能成功 attach 即证明 v2 Header 版本=2 且 CRC 合法、字节级兼容。
- *  4. 双版本共存：v3.4 库必须拒绝挂载 v1 段（版本协商），证明新旧不混跑。
+ *     库能成功 attach 即证明 Header 版本=IRT_SHM_VERSION 且 CRC 合法、字节级兼容。
+ *  4. 双版本共存：v3.9 库必须拒绝挂载 v1 段（版本协商），证明新旧不混跑。
  */
 #include <indurtdb/indurtdb.h>
 
@@ -94,7 +94,7 @@ static void fill_points(indurtdb_point_t* pts, uint32_t N) {
     }
 }
 
-TEST(Migration, V1ToV2RoundTrip) {
+TEST(Migration, V1ToV3RoundTrip) {
     const uint32_t N = 16, M = 4;
     const std::string src = "mig_src";
     const std::string dst = "mig_dst";
@@ -114,11 +114,11 @@ TEST(Migration, V1ToV2RoundTrip) {
     int rc = ::system(cmd.c_str());
     ASSERT_EQ(WEXITSTATUS(rc), 0) << "迁移工具执行失败: " << cmd;
 
-    /* 用真实库回挂 v2 段 */
+    /* 用真实库回挂迁移后的段（当前版 v3） */
     indurtdb_cfg_t cfg = {N, M};
     indurtdb_t* h = nullptr;
     int open_rc = indurtdb_h_open(&h, dst.c_str(), &cfg);
-    ASSERT_EQ(open_rc, 0) << "v3.4 库无法挂载迁移后的 v2 段"
+    ASSERT_EQ(open_rc, 0) << "v3.9 库无法挂载迁移后的段"
                              "（版本/CRC/布局不兼容）";
 
     /* 逐项校验点位 */
@@ -152,7 +152,7 @@ TEST(Migration, V1ToV2RoundTrip) {
 }
 
 TEST(Migration, V34RejectsV1Segment) {
-    /* 双版本共存：v3.4 库必须拒绝挂载 v1 段（版本协商拒绝） */
+    /* 双版本共存：v3.9 库必须拒绝挂载 v1 段（版本协商拒绝） */
     const uint32_t N = 8, M = 0;
     const std::string id = "mig_v1only";
     remove_segment(id);
