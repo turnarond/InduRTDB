@@ -198,7 +198,8 @@ POINTS="/tmp/verify_deploy_points.yaml"
 
 if [ -f "$POLICY_SRC" ]; then
     cp "$POLICY_SRC" "$POLICY"
-    # 规则数必须 > 0：格式错误的行被静默跳过，全部写错等同「拒绝所有写」
+    # 规则数必须 > 0：0 条规则等同「拒绝所有写」。
+    # 注：策略文件格式非法由 rtdbd 启动时 fail-fast（打印行号并以退出码 2 终止），不再静默跳过。
     RULES="$(grep -vE '^\s*(#|$)' "$POLICY" | wc -l)"
     if [ "$RULES" -gt 0 ]; then
         ok "鉴权策略就绪: $RULES 条规则"
@@ -237,7 +238,7 @@ else
 
     if ! kill -0 "$RTDBD_PID" 2>/dev/null; then
         bad "rtdbd 启动失败（详见 /tmp/verify_deploy_rtdbd.log）"
-        hint "退出码 1=参数/policy 错误  2=配置校验失败  3=段损坏  4=自检失败"
+        hint "退出码 1=参数错误  2=配置校验失败（含 policy 非法）  3=段损坏  4=自检失败"
     elif [ ! -S "$SOCKET" ]; then
         bad "rtdbd 存活但未创建 socket: $SOCKET"
     else
