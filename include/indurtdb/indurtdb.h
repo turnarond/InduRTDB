@@ -343,10 +343,46 @@ int indurtdb_h_set_meta(indurtdb_t* h, uint32_t id, const indurtdb_meta_t* meta)
  *         同 id 已注册返回 ERR_FULL（非幂等更新）。索引插入失败(BUSY/FULL)会回滚注册。
  * delete: 清空 name[0] 并注销 name→id 索引；点位不存在返回 ERR_NOT_FOUND。
  * rename: 改 name 并同步索引（原子）；点位不存在返回 ERR_NOT_FOUND；同名(同 id)为幂等 no-op。
- * 返回 INDURTDB_OK / INDURTDB_ERR_ARG / INDURTDB_ERR_NOT_FOUND / INDURTDB_ERR_FULL / INDURTDB_ERR_BUSY。 */
+ * 返回 INDURTDB_OK / INDURTDB_ERR_ARG / INDURTDB_ERR_NOT_FOUND / INDURTDB_ERR_FULL / INDURTDB_ERR_BUSY。
+ *
+ * v3.9：名称域以 (partition, name) 为唯一键。下面四个旧签名函数**按句柄默认分区**
+ * （初值 0，见 indurtdb_h_set_partition）在对应分区内操作，行为在默认分区 0 下与 v3.8 逐位等价。 */
 int indurtdb_h_create_point(indurtdb_t* h, uint32_t id, const char* name, int type, int access);
 int indurtdb_h_delete_point(indurtdb_t* h, uint32_t id);
 int indurtdb_h_rename_point(indurtdb_t* h, uint32_t id, const char* name);
+
+/* ==== v3.9：分区（partition）重载族 + 句柄默认分区 ====
+ *
+ * 分区语义（方案 §1–§3，裁定 Q1=A / Q4+Q5 / Q7 / Q8 / Q9）：
+ *   - 分区限定的是**名字**：点位名在 (partition, name) 上唯一；同名可跨分区共存。
+ *   - point_id 仍**全局唯一且稠密**：分区不改变 id 空间，不做数据重分区。
+ *   - 默认分区为 0；`indurtdb_h_set_partition` 只改**本句柄**后续非显式调用的默认值
+ *     （显式传入的 partition 形参始终优先）。
+ *   - 分区在创建时固定、**不可移动**：rename/delete 若传入与点位不同的 partition
+ *     返回 INDURTDB_ERR_NOT_FOUND（跨分区迁移只能 delete + create）。
+ *   - **分区不是安全边界**（Q7）：它只解决命名冲突/组织问题；管控写鉴权仍由 rtdbd 的
+ *     UID 策略承担。不要用分区做访问隔离。
+ *
+ * 无分区表（Q8）：任意 uint32 值均合法，不校验存在性。 */
+
+/* 设置本句柄的默认分区（影响上面 4 个旧签名函数的名称域调用；显式形参始终优先）。
+ * 复位为 0 即调用 indurtdb_h_set_partition(h, 0)。成功返回 INDURTDB_OK；
+ * 句柄未初始化/为空返回 INDURTDB_ERR_NOT_INIT。 */
+int indurtdb_h_set_partition(indurtdb_t* h, uint32_t partition);
+
+/* 显式分区版的名称域 CRUD：语义与上方旧签名函数相同，但在给定 partition 内操作。
+ * create_point_in: 校验同 create_point（空名/类型/access/id 越界 → ERR_ARG），
+ *   并以 (partition, name) 做重名检查；点位的 partition 字段被置为 partition。
+ *   槽已占用返回 ERR_FULL；索引插入失败会回滚名字注册。
+ * rename_point_in: 在 partition 内改名；点位不存在，或其 partition != 形参，
+ *   返回 INDURTDB_ERR_NOT_FOUND（分区不可移动）；同名(同 id)为幂等 no-op。
+ * delete_point_in: 仅当点位 partition == 形参时删除，否则 INDURTDB_ERR_NOT_FOUND。
+ * find_by_name_in: 按 (partition, name) 查找；未找到 ERR_NOT_FOUND，参数非法 ERR_ARG，
+ *   并发冲突重试耗尽 ERR_BUSY。 */
+int indurtdb_h_find_by_name_in(indurtdb_t* h, uint32_t partition, const char* name, uint32_t* out_id);
+int indurtdb_h_create_point_in(indurtdb_t* h, uint32_t partition, uint32_t id, const char* name, int type, int access);
+int indurtdb_h_rename_point_in(indurtdb_t* h, uint32_t partition, uint32_t id, const char* name);
+int indurtdb_h_delete_point_in(indurtdb_t* h, uint32_t partition, uint32_t id);
 
 int indurtdb_h_check_timeouts(indurtdb_t* h, uint64_t timeout_ns);
 uint64_t indurtdb_h_get_write_count(indurtdb_t* h);
