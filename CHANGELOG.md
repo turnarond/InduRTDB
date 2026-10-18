@@ -4,7 +4,7 @@ All notable changes to InduRTDB.
 
 ---
 
-## [3.8.0] — 2026-10-08「部署能力补齐 + 文档治理 + 三处缺陷修复」
+## [3.8.0] — 2026-10-08「部署能力补齐 + 文档治理 + 缺陷修复」
 
 ### Added
 - **`examples/peek_lifetime_example.c`**（U2）：可运行的 `peek()` 单拷贝陷阱复现。
@@ -62,6 +62,16 @@ All notable changes to InduRTDB.
   丢写率降至 **<2%**；配截止时间重试（4 线程 1000 次写）可达 **零丢失**。
 - 配置解析器类型过滤上限用 `INDURTDB_TYPE_STRING`(3) 而非类型集合上限，
   导致 int64(4)/uint32(5)/float(6) 一律被丢弃。
+- **`test_c_reliability` 的 `SkippedIsObservable` 断言依赖线程调度概率**：
+  `scan_skipped` 仅在超时扫描的 `irt_seqlock_write_begin()` 返回奇数时 +1，
+  而 `write_seq` 是整段共用的**单锁**；核数少时 8 个自旋写者自身被调度器
+  反复抢占，全局锁空闲比例反而上升、扫描者更易 CAS 成功，计数恒为 0。
+  实测同一 commit 在 112 核 25/25 通过、2 核 6/15 失败、4 核 2/10 失败，
+  GitHub runner(2~4 核) 失败 —— 表现为 `v3.8.0` 在 main 上 CI 红、
+  在 release/3.8 上全绿。已替换为三个**确定性**断言（未初始化安全返回 0 /
+  无争用时恒 0 / 跨扫描单调不减），并移除随 `-Werror` 失效的无关包含。
+  三条补救路径（加大争用 / 每轮重新老化 / 测试侧持锁注入）均实测证伪，
+  根因是读端自旋与写端 CAS 的时序不对称，已连同实测数据记入测试注释。
 
 ### Changed
 - `tests/unit/test_c_concurrency.cpp` 的 `ConcurrentWriteSamePoint` 断言由 `> 250`
