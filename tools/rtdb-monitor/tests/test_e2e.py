@@ -23,15 +23,15 @@ points:
   - name: AHU_01.Supply_Temp
     id: 10
     type: int32
-    access: read_write
+    access: 3
   - name: Pump_Start_CMD
     id: 11
     type: bool
-    access: read_write
+    access: 3
   - name: Line_Status
     id: 12
     type: string
-    access: read_write
+    access: 3
 """
 
 
@@ -54,7 +54,7 @@ def main() -> None:
     with open(cfg, "w") as f:
         f.write(CFG_YAML)
     with open(pol, "w") as f:
-        f.write(f"{os.getuid()}:0:63\n")  # 放行当前 uid（deny by default）
+        f.write(f"{os.getuid()}:*:0:63\n")  # 放行当前 uid + 全部分区（4 段策略格式）
 
     proc = subprocess.Popen(
         [RTDBD, "--instance", "e2e", "--socket", sock,
