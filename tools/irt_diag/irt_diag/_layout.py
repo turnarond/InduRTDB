@@ -11,11 +11,20 @@ import struct
 import zlib
 
 MAGIC = 0x1DBA1DBA
+SHM_VERSION_V1 = 1          # v3.3 及以前（Header 64B，无索引/元数据区）
 SHM_VERSION_V2 = 2
 SHM_VERSION_V3 = 3
 SHM_VERSION_CURRENT = SHM_VERSION_V3   # v3.9 起库期望的段版本
 HEADER_V2_SIZE = 128
 POINT_SIZE = 128
+
+# 点位内字段偏移（复刻 src/internal/irt_types.h 的 indurtdb_point_t）。
+# 诊断侧只读不写，但这些偏移必须与 C 侧一致，否则解析到错误字节。
+NAME_OFFSET = 45            # char name[64]
+NAME_LEN = 64
+SOURCE_TS_OFFSET = 112      # uint64_t source_timestamp_ns
+PARTITION_OFFSET = 120      # uint32_t partition（v3.9）
+RESERVED_OFFSET = 124       # uint8_t reserved[4]
 
 
 def parse_v2_header(raw: bytes) -> dict:
