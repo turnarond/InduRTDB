@@ -96,10 +96,46 @@ def parse_v1_header(raw: bytes):
     if version != SHM_VERSION_V1:
         raise ValueError(
             f"source segment is not v1 (version={version}); "
-            f"本工具只迁移 v1 -> v3")
+            f"本工具只迁移 v1/v2 -> v3")
     if max_points == 0:
         raise ValueError("v1 header max_points == 0")
     return version, max_points, max_subscribers
+
+
+# ---- v2/v3 Header 解析（两种版本逐字节同构，仅 version 值不同）----
+# 与 src/internal/irt_types.h:irt_header_t 严格对应（前 80B；其后 reserved[48]）。
+HEADER_V2_FMT = "<IIIIQiQQIIIIIIIII"
+HEADER_V2_FIELD_NAMES = (
+    "magic", "version", "max_points", "max_subscribers",
+    "write_seq", "owner_pid", "writes", "timeouts",
+    "crc32", "flags", "reserved_scan",
+    "off_points", "off_index", "off_meta", "off_subs",
+    "index_count", "scan_skipped",
+)
+
+
+def parse_v2_header(raw: bytes, expected_version=None) -> dict:
+    """解析 128B 布局 v2/v3 Header，返回字段字典。
+
+    expected_version 非 None 时严格校验版本（v2 源段传 2，v3 目标段传 3）。
+    magic / 容量 / 版本不符一律抛 ValueError。
+    """
+    need = struct.calcsize(HEADER_V2_FMT)
+    if len(raw) < need:
+        raise ValueError(
+            f"v2/v3 header too short: {len(raw)} bytes (need >= {need})")
+    values = struct.unpack_from(HEADER_V2_FMT, raw, 0)
+    hdr = dict(zip(HEADER_V2_FIELD_NAMES, values))
+    if hdr["magic"] != MAGIC:
+        raise ValueError(
+            f"bad magic: {hdr['magic']:#x} (expect {MAGIC:#x})")
+    if expected_version is not None and hdr["version"] != expected_version:
+        raise ValueError(
+            f"segment version={hdr['version']} does not match expected "
+            f"version={expected_version}")
+    if hdr["max_points"] == 0:
+        raise ValueError("v2/v3 header max_points == 0")
+    return hdr
 
 
 # ---- v2 Header 构造 ----
