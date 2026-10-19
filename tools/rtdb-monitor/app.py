@@ -124,10 +124,25 @@ async def _shutdown() -> None:
 
 @app.get("/api/points")
 def api_points(token: str | None = Query(default=None),
-              authorization: str | None = Header(default=None)):
+              authorization: str | None = Header(default=None),
+              partition: int | None = Query(default=None)):
     if not _authed(token, authorization):
         return _deny()
-    return api_client.list_points()
+    # 不传 partition → None → 列出全部（v3.8 行为不变）；传 N → 仅该分区。
+    return api_client.list_points(partition=partition)
+
+
+@app.get("/api/partitions")
+def api_partitions(token: str | None = Query(default=None),
+                   authorization: str | None = Header(default=None)):
+    """已注册点位的分区列表（升序去重），derive 自全量点位。"""
+    if not _authed(token, authorization):
+        return _deny()
+    try:
+        pts = api_client.list_points()
+    except Exception as e:  # noqa: BLE001
+        return {"error": str(e)}, 400
+    return {"partitions": sorted({p.get("partition", 0) for p in pts})}
 
 
 @app.get("/api/points/{point_id}")
