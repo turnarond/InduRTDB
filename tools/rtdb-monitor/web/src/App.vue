@@ -46,6 +46,35 @@
           @rename="onRename"
           @delete="onDelete"
         />
+        <div v-else-if="view === 'partitions'" class="partition-view">
+          <el-form :inline="true" class="filter-bar">
+            <el-form-item label="分区">
+              <el-select
+                v-model="selectedPartition"
+                placeholder="请选择分区"
+                style="width: 160px"
+                @change="loadPartitionPoints"
+              >
+                <el-option v-for="p in partitions" :key="p" :label="`分区 ${p}`" :value="p" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <span class="count">共 {{ partitionPoints.length }} 个点位</span>
+            </el-form-item>
+          </el-form>
+          <PointTable
+            v-if="selectedPartition !== null && selectedPartition !== undefined"
+            :points="partitionPoints"
+            :values="values"
+            @row-click="openPoint"
+            @create="onCreate"
+            @rename="onRename"
+            @delete="onDelete"
+          />
+          <div v-else class="placeholder">
+            <el-result icon="info" title="选择分区" sub-title="请从上方下拉选择一个分区以查看该分区点位。" />
+          </div>
+        </div>
         <TerminalView v-else-if="view === 'terminal'" @changed="refresh" />
         <LogsView v-else-if="view === 'logs'" />
         <div v-else class="placeholder">
@@ -117,14 +146,44 @@ const isDark = ref(false)
 
 let socket = null
 
-const placeholderMap = {
-  partitions: ['点位分区', '类似 Redis db0/db1 的命名空间分区（需后端支持，v3.7 规划）']
-}
+// 其它未实现视图的占位信息（partitions 已于 v3.9 T7 落地为真实视图）。
+const placeholderMap = {}
 const placeholderTitle = computed(() => (placeholderMap[view.value] ? placeholderMap[view.value][0] : ''))
 const placeholderHint = computed(() => (placeholderMap[view.value] ? placeholderMap[view.value][1] : ''))
 
+// ---- v3.9 T7 分区视图 ----
+const partitions = ref([])
+const selectedPartition = ref(null)
+const partitionPoints = ref([])
+
 function onMenu(index) {
   view.value = index
+  if (index === 'partitions') {
+    if (partitions.value.length === 0) loadPartitions()
+    if (selectedPartition.value !== null && selectedPartition.value !== undefined) loadPartitionPoints()
+  }
+}
+
+async function loadPartitions() {
+  try {
+    const d = await api.listPartitions()
+    partitions.value = d.partitions || []
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+async function loadPartitionPoints() {
+  if (selectedPartition.value === null || selectedPartition.value === undefined) {
+    partitionPoints.value = []
+    return
+  }
+  try {
+    partitionPoints.value = await api.listPoints(selectedPartition.value)
+    await loadValues(partitionPoints.value)
+  } catch (e) {
+    /* ignore */
+  }
 }
 
 // ---- v3.6 点位 CRUD ----
@@ -183,16 +242,22 @@ async function onDelete(p) {
 
 async function refresh() {
   try {
-    points.value = await api.listPoints()
-    await loadValues()
+    if (view.value === 'partitions') {
+      await loadPartitions()
+      await loadPartitionPoints()
+    } else {
+      points.value = await api.listPoints()
+      await loadValues()
+    }
   } catch (e) {
     /* ignore */
   }
 }
 
-async function loadValues() {
+async function loadValues(list) {
+  const arr = list || points.value
   await Promise.all(
-    points.value.map(async (p) => {
+    arr.map(async (p) => {
       try {
         const d = await api.getPoint(p.id)
         values[p.id] = { value: d.value, quality: d.quality, ts: d.ts }
@@ -289,5 +354,15 @@ onBeforeUnmount(() => socket && socket.close())
   display: flex;
   align-items: center;
   justify-content: center;
+}
+.partition-view {
+  height: 100%;
+}
+.filter-bar {
+  margin-bottom: 12px;
+}
+.count {
+  color: var(--el-text-color-secondary);
+  font-size: 13px;
 }
 </style>
