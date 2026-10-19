@@ -56,9 +56,9 @@ static int classify(void)
     return RTDBD_HEALTH_DEGRADED;
 }
 
-int rtdbd_self_check_core(void)
+int rtdbd_self_check_core(indurtdb_t* h)
 {
-    int core = indurtdb_self_check();   /* 段头 magic/version，纯读 */
+    int core = indurtdb_h_self_check(h);   /* 段头 magic/version，纯读 */
     if (core == INDURTDB_HEALTH_UNHEALTHY) {
         g_stats.health = RTDBD_HEALTH_UNHEALTHY;
     } else {

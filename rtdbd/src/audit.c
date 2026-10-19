@@ -9,7 +9,7 @@ void irt_audit_init(irt_audit_t* a)
 }
 
 void irt_audit_record(irt_audit_t* a, uint32_t pid, uint32_t uid,
-                      uint32_t point_id, uint64_t ts_ns)
+                      uint32_t partition, uint32_t point_id, uint64_t ts_ns)
 {
     if (!a) return;
 
@@ -17,6 +17,7 @@ void irt_audit_record(irt_audit_t* a, uint32_t pid, uint32_t uid,
     e->pid       = pid;
     e->uid       = uid;
     e->point_id  = point_id;
+    e->partition = partition;
     e->ts_ns     = ts_ns;
 
     a->head = (a->head + 1u) % RTDBD_AUDIT_CAPACITY;

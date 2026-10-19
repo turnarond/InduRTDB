@@ -29,6 +29,15 @@
 #     INDURTDB_TYPE_FLOAT(6) 是类型集合上限，但解析器不产出该值：
 #     "float" 这个词历史上就映射到 double，改动会使既有配置的点位
 #     静默降为单精度，故维持原状。
+#
+# v3.9 T5：可选分区白名单与别名（写在 `points:` 之前）
+#   partitions: [0, 1, 2]                    # 十进制 uint32 白名单；缺省或空列表 = 任意分区合法
+#   partition_alias: {0: "default", 1: "unitA"}  # uint32 → 字符串别名（仅供展示，T5 无协议面）
+#   存在白名单时，别名键必须都在白名单内，否则配置错误（fail-fast，退出码 2）。
+#
+# 示例（取消注释启用）：
+# partitions: [0, 1]
+# partition_alias: {0: "default", 1: "unitA"}
 
 points:
   # ---- 采集点：温度 ----

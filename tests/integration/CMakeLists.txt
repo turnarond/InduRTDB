@@ -121,6 +121,24 @@ if(TARGET rtdbd AND TARGET irtcli)
     add_test(NAME test_rtdbd_proto_v2 COMMAND test_rtdbd_proto_v2)
 endif()
 
+# ---- rtdbd 协议 v3（v3.9 T5：分区/命名空间） ----
+if(TARGET rtdbd AND TARGET irtcli)
+    add_executable(test_rtdbd_proto_v3 test_rtdbd_proto_v3.cpp)
+    target_link_libraries(test_rtdbd_proto_v3 PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_rtdbd_proto_v3 PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_rtdbd_proto_v3 PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_proto_v3 PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_proto_v3 rtdbd irtcli)
+    add_test(NAME test_rtdbd_proto_v3 COMMAND test_rtdbd_proto_v3)
+endif()
+
 # ---- rtdbd 健康 / 错误计数 + 自检（v3.7 主题B B1） ----
 if(TARGET rtdbd)
     add_executable(test_rtdbd_health test_rtdbd_health.cpp)
