@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "irt-migrate"
 version = "1.0.0"
-description = "InduRTDB v1 -> v2 shared-memory segment offline migration tool"
+description = "InduRTDB v1/v2 -> v3 shared-memory segment offline migration tool"
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
