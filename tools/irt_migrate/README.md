@@ -85,14 +85,15 @@ python3 tests/test_migrate.py
 
 ## 升级与回退流程（运维）
 
-1. **停机**：停止所有使用旧段的进程（v3.3.x / v3.4–v3.8 / node-server）。
-2. **迁移**：`python3 -m irt_migrate migrate --src <id> --dst <id> --force`
+1. **先备份段（关键）**：在 rtdbd **仍运行时** 执行 `cp /dev/shm/indurtdb_<id> <backup>`。因为 rtdbd 优雅退出（SIGTERM）会调用 `indurtdb_h_close()`，作为 owner 执行 `shm_unlink`，**段会在停机瞬间被删除**；先停机再迁移将无段可迁。
+2. **停机**：停止所有使用旧段的进程（v3.3.x / v3.4–v3.8 / node-server）。正常 SIGTERM 停机即删除原段（见上）；应急可用 `kill -9`（不执行 `shm_unlink`，段得以保留，但会遗留 seqlock 写锁，**仅应急**）。
+3. **恢复 + 迁移**：先把快照恢复到 `/dev/shm/indurtdb_<id>`，再执行 `python3 -m irt_migrate migrate --src <id> --dst <id> --force`
    （同 id 原地迁移：先完整读入源段内容到内存，再以 `O_CREAT|O_RDWR` +
    `ftruncate` + `mmap` **原地覆写**同一路径；**不会 `shm_unlink`**，
    因此 inode/路径保持不变）；或 `--dst <new_id>` 保留旧源段作为备份。
-3. **校验**：工具自动校验；可再跑 `validate` 复核。
-4. **全进程同时升级**到 v3.9，启动 `rtdbd` 重建心跳。
-5. **回退**：若需回退，重新部署旧版本并清理 `/dev/shm/indurtdb_*`
+4. **校验**：工具自动校验；可再跑 `validate` 复核。
+5. **全进程同时升级**到 v3.9，启动 `rtdbd` 重建心跳。
+6. **回退**：若需回退，重新部署旧版本并清理 `/dev/shm/indurtdb_*`
    （新版段对旧库不可读，会被版本协商拒绝）；若保留了 v1/v2 备份段可直接复用。
 
 ## 关键不变式
@@ -103,3 +104,4 @@ python3 tests/test_migrate.py
   迁移后段能被当前库 `indurtdb_h_open` 成功挂载即证明其字节级兼容。
 - **索引一致**：FNV-1a 32 + 线性探测 + 墓碑，与 `irt_index.c` 一致，
   `find_by_name` 在迁移后段中可用。
+- **迁移对源段非破坏、目标原地写入**：迁移只读源段，不改源段在盘字节；目标以 `O_CREAT|O_RDWR` + `ftruncate` + `mmap` 原地写入、**不 `shm_unlink`**，故 `--dst <other_id>` 可完整保留源段用于回退。演练证据见 [`docs/08-验证记录/v3.9-T8-迁移与回退演练.md`](../../docs/08-验证记录/v3.9-T8-迁移与回退演练.md)。
