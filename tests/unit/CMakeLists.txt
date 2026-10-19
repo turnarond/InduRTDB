@@ -44,6 +44,15 @@ if(TARGET test_c_migration)
         INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools")
 endif()
 
+# T8 B1 跨语言镜像一致性：Python 布局/协议复刻 vs C 头文件。
+# 需要 rtdbd/include（protocol.h）与 tools 目录（import 真实 Python 模块）。
+if(TARGET test_c_mirror)
+    target_include_directories(test_c_mirror PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_c_mirror PRIVATE
+        INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools")
+endif()
+
 # T8 诊断工具集成测试：告知工具目录、harness 路径与源码根
 if(TARGET test_c_diag)
     target_compile_definitions(test_c_diag PRIVATE
