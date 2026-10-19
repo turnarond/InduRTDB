@@ -12,6 +12,7 @@ from rtdb_client import (  # noqa: E402
     CREATE_REQ, DELETE_REQ, RENAME_REQ,
     LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
     OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
+    RTDBD_PROTO_VERSION, PARTITION_ALL,
     RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
@@ -19,23 +20,25 @@ from rtdb_client import (  # noqa: E402
 
 
 def test_struct_sizes_match_c_layout():
-    # 与 rtdbd/include/rtdbd/protocol.h 的 static_assert 保持一致
+    # 与 rtdbd/include/rtdbd/protocol.h 的 static_assert 保持一致（v3：末尾追加 partition）
+    assert RTDBD_PROTO_VERSION == 3
+    assert PARTITION_ALL == 0xFFFFFFFF
     assert REQ_HDR.size == 12
     assert RESP_HDR.size == 12
     assert WRITE_REQ.size == 24
     assert GET_REQ.size == 4
     assert GET_RESP.size == 64
-    assert LIST_REQ.size == 8
-    assert POINT_INFO.size == 72
+    assert LIST_REQ.size == 12          # max + offset + partition（v3）
+    assert POINT_INFO.size == 76        # ... name[64] + partition（v3）
     assert NOTIFY.size == 32
-    assert FIND_REQ.size == 64
+    assert FIND_REQ.size == 68          # name[64] + partition（v3）
     assert FIND_RESP.size == 4
     assert META_REQ.size == 4
     assert META_PAYLOAD.size == 32
-    # v3.6 CRUD
-    assert CREATE_REQ.size == 72
-    assert DELETE_REQ.size == 4
-    assert RENAME_REQ.size == 68
+    # v3.6 CRUD（v3：末尾追加 partition）
+    assert CREATE_REQ.size == 76
+    assert DELETE_REQ.size == 8
+    assert RENAME_REQ.size == 72
     # v3.6 运行日志
     assert LOG_REQ.size == 4
     assert LOG_ENTRY.size == 128
@@ -47,19 +50,41 @@ def test_crud_opcodes():
 
 def test_crud_payload_roundtrip():
     name = b"Test.New_Point".ljust(64, b"\x00")
-    b = CREATE_REQ.pack(20, TYPE_INT32, 3, name)
-    assert len(b) == 72
-    pid, ptype, access, nm = CREATE_REQ.unpack(b)
-    assert pid == 20 and ptype == TYPE_INT32 and access == 3
+    b = CREATE_REQ.pack(20, TYPE_INT32, 3, name, 1)
+    assert len(b) == 76
+    pid, ptype, access, nm, part = CREATE_REQ.unpack(b)
+    assert pid == 20 and ptype == TYPE_INT32 and access == 3 and part == 1
     assert nm.rstrip(b"\x00") == b"Test.New_Point"
 
-    b2 = RENAME_REQ.pack(20, b"Test.Renamed".ljust(64, b"\x00"))
-    assert len(b2) == 68
-    pid2, nm2 = RENAME_REQ.unpack(b2)
-    assert pid2 == 20 and nm2.rstrip(b"\x00") == b"Test.Renamed"
+    b2 = RENAME_REQ.pack(20, b"Test.Renamed".ljust(64, b"\x00"), 1)
+    assert len(b2) == 72
+    pid2, nm2, part2 = RENAME_REQ.unpack(b2)
+    assert pid2 == 20 and nm2.rstrip(b"\x00") == b"Test.Renamed" and part2 == 1
 
-    b3 = DELETE_REQ.pack(20)
-    assert len(b3) == 4 and DELETE_REQ.unpack(b3)[0] == 20
+    b3 = DELETE_REQ.pack(20, 1)
+    assert len(b3) == 8 and DELETE_REQ.unpack(b3) == (20, 1)
+
+
+def test_partition_payload_roundtrip():
+    """v3 名称域请求体末尾 partition 的正确打包/解包往返。"""
+    # LIST 请求：max, offset, partition
+    b = LIST_REQ.pack(1024, 0, PARTITION_ALL)
+    assert len(b) == 12
+    assert LIST_REQ.unpack(b) == (1024, 0, PARTITION_ALL)
+    assert LIST_REQ.unpack(LIST_REQ.pack(10, 5, 1)) == (10, 5, 1)
+
+    # FIND 请求：name[64], partition
+    b = FIND_REQ.pack(b"Pump_Start".ljust(64, b"\x00"), 2)
+    assert len(b) == 68
+    nm, part = FIND_REQ.unpack(b)
+    assert nm.rstrip(b"\x00") == b"Pump_Start" and part == 2
+
+    # POINT_INFO 响应项：以 partition 结尾
+    b = POINT_INFO.pack(21, TYPE_INT32, 3, b"temp".ljust(64, b"\x00"), 1)
+    assert len(b) == 76
+    pid, ptype, access, nm, part = POINT_INFO.unpack(b)
+    assert (pid, ptype, access, part) == (21, TYPE_INT32, 3, 1)
+    assert nm.rstrip(b"\x00") == b"temp"
 
 
 def test_log_entry_roundtrip():
@@ -95,9 +120,13 @@ def test_create_point_type_resolution():
     c = FakeClient()
     RtdbClient.create_point(c, 20, "Test.New_Point", "int32", 3)
     assert captured["opcode"] == OP_CREATE_POINT
-    pid, ptype, access, nm = CREATE_REQ.unpack(captured["payload"])
-    assert (pid, ptype, access) == (20, TYPE_INT32, 3)
+    pid, ptype, access, nm, part = CREATE_REQ.unpack(captured["payload"])
+    assert (pid, ptype, access, part) == (20, TYPE_INT32, 3, 0)  # 默认分区 0
     assert nm.rstrip(b"\x00") == b"Test.New_Point"
+
+    # 显式分区
+    RtdbClient.create_point(c, 21, "Part.One", "int32", 3, partition=1)
+    assert CREATE_REQ.unpack(captured["payload"])[4] == 1
 
     try:
         RtdbClient.create_point(c, 21, "Bad", "int128")
@@ -110,10 +139,10 @@ def test_create_point_type_resolution():
 
 
 def test_req_resp_hdr_layout():
-    b = REQ_HDR.pack(0x52424431, 2, 10, 4)
+    b = REQ_HDR.pack(0x52424431, RTDBD_PROTO_VERSION, 10, 4)
     assert len(b) == 12
     magic, version, opcode, plen = REQ_HDR.unpack(b)
-    assert magic == 0x52424431 and version == 2 and opcode == 10 and plen == 4
+    assert magic == 0x52424431 and version == 3 and opcode == 10 and plen == 4
 
 
 def test_value_roundtrip_numeric():
@@ -147,10 +176,10 @@ def test_get_resp_roundtrip():
 
 
 def test_point_info_roundtrip():
-    b = POINT_INFO.pack(11, TYPE_INT32, 3, b"Pump.Start\x00\x00\x00\x00\x00\x00\x00\x00")
-    assert len(b) == 72
-    pid, ptype, access, name = POINT_INFO.unpack(b)
-    assert pid == 11 and access == 3 and name.rstrip(b"\x00") == b"Pump.Start"
+    b = POINT_INFO.pack(11, TYPE_INT32, 3, b"Pump.Start\x00\x00\x00\x00\x00\x00\x00\x00", 0)
+    assert len(b) == 76
+    pid, ptype, access, name, part = POINT_INFO.unpack(b)
+    assert pid == 11 and access == 3 and part == 0 and name.rstrip(b"\x00") == b"Pump.Start"
 
 
 if __name__ == "__main__":
@@ -161,6 +190,7 @@ if __name__ == "__main__":
     test_point_info_roundtrip()
     test_crud_opcodes()
     test_crud_payload_roundtrip()
+    test_partition_payload_roundtrip()
     test_log_entry_roundtrip()
     test_create_point_type_resolution()
     print("ALL OK")
