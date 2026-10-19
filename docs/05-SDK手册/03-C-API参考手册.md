@@ -776,6 +776,39 @@ const char* indurtdb_get_last_error(void);
 - 重放携带**原始** `source_ts_ns`，采集时刻不失真；
 - `send()` 使用 `MSG_NOSIGNAL`：`rtdbd` 崩溃只返回错误码，**不会以 `SIGPIPE` 终止调用进程**。
 
+### v3.9 T6：分区支持
+
+`OP_SELECT`（连接级默认分区，Redis SELECT 语义）与按分区查找/列举：
+
+| 函数 | 说明 |
+|---|---|
+| `irtcli_select(c, partition)` | 设定本连接默认分区（发 `OP_SELECT`）。成功才更新 `c->partition`，失败**不更新**（fail-closed）。返回 `status_to_cli(status)` |
+| `irtcli_find_by_name(c, name, out_id)` | 按名查找。**v3.9 起按本连接当前默认分区**（`c->partition`，初值 0）分辨，`(partition, name)` 复合键 |
+| `irtcli_find_by_name_in(c, partition, name, out_id)` | 在**指定分区**内按名查找，不依赖连接默认分区 |
+| `irtcli_list_in(c, partition, offset, max, out, cap, out_count)` | 列出指定分区的点位；响应为变长数组，`n > cap` 返回 `ERR_ARG`（不截断、不越界） |
+
+点位信息结构（与 `rtdbd_point_info_t` 逐字段布局一致，**76B**；公共头仅依赖 `indurtdb.h`，不泄漏协议头）：
+
+```c
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  access;
+    uint8_t  reserved[2];
+    char     name[64];
+    uint32_t partition;
+} irtcli_point_info_t;
+```
+
+**要点**：默认分区为 0 时，`irtcli_find_by_name` 的线格式与旧版**逐字节一致**（不影响既有集成）；`--partition` / `select` 二者语义相同，均落到连接级 `OP_SELECT`。
+命令行前端 `irtcli`（目标 `irtcli_cli`，输出名 `irtcli`）提供
+
+```
+irtcli [--sock PATH] [--partition N] [--help] ( select N | find NAME | list ) [...]
+```
+
+命令在同一连接上从左到右顺序执行；退出码映射 `OK=0 / ARG=1 / FULL=2 / IO=3 / DENIED=4 / PROTO=5 / NOT_FOUND=6`。
+
 ## 完整示例
 
 ```c
