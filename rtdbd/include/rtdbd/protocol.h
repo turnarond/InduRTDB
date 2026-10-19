@@ -6,6 +6,14 @@
  * - 不引入 protobuf 等第三方依赖
  * - 协议头带 magic + version，版本不匹配立即拒绝（不静默）
  * - 定长结构，便于零拷贝/最小拷贝
+ *
+ * v3（v3.9 T5，点位分区）：
+ * - 主版本 2 → 3。v2 及更早客户端**被拒绝**（magic/version 不匹配即断连），
+ *   绝不静默按新布局解释旧请求体。
+ * - 名称域请求体（FIND_BY_NAME / CREATE_POINT / RENAME_POINT / DELETE_POINT /
+ *   LIST）在**末尾追加** `uint32 partition`（保持既有字段偏移不变，仅尺寸增大）；
+ *   LIST 响应项 `POINT_INFO` 追加 `partition`；审计条目新增 `partition`。
+ * - 新增 `OP_SELECT`：连接级设定默认分区（Redis SELECT 语义）。
  */
 #ifndef RTDBD_PROTOCOL_H_
 #define RTDBD_PROTOCOL_H_
@@ -20,7 +28,7 @@
 #endif
 
 #define RTDBD_MAGIC        0x52424431u /* "RBD1" */
-#define RTDBD_PROTO_VERSION 2u
+#define RTDBD_PROTO_VERSION 3u
 
 /* ---- 操作码 ---- */
 #define RTDBD_OP_PING        1u
@@ -35,7 +43,7 @@
 #define RTDBD_OP_SET_META     9u /* 请求：point_id + 32B meta；管控写，须鉴权 */
 /* v3.5 监控只读通道（读免鉴权，同 FIND_BY_NAME / GET_META） */
 #define RTDBD_OP_GET        10u /* 请求：point_id；响应：64B 点位值快照（status==OK 时） */
-#define RTDBD_OP_LIST       11u /* 请求：max+offset；响应：点位信息数组（id/type/access/name） */
+#define RTDBD_OP_LIST       11u /* 请求：max+offset+partition；响应：点位信息数组（id/type/access/name/partition） */
 
 /* v3.6 管控写通道：点位 CRUD（须鉴权，deny by default，同 SET_META/WRITE）。
  * 运行时在共享内存注册表内增/删/改名；重命名/删除同步维护 name→id 索引。
@@ -52,6 +60,16 @@
  * 仅新增 opcode，不改动既有负载布局，故协议主版本仍为 2（v3.6 monitor 不发该
  * opcode，行为完全不变）。 */
 #define RTDBD_OP_HEALTH      16u /* 请求：无负载；响应：rtdbd_health_t 快照 */
+
+/* v3.9 T5 协议 v3：连接级选择默认分区（Redis SELECT 语义）。
+ * 请求：uint32 partition；响应：空负载。
+ * 成功即把本连接后续请求的默认分区设为该值（连接断开即复位，不持久化）。 */
+#define RTDBD_OP_SELECT      17u /* 请求：uint32 partition；响应：空负载 */
+
+/* OP_LIST 的分区哨兵：请求 partition == 该值时列出**全部**分区点位。
+ * 取 uint32 最大值（真实分区号几乎不可能用到该值；分区无表、任意值合法，
+ * 但该哨兵是显式的“不过滤”语义，非普通分区）。 */
+#define RTDBD_PARTITION_ALL  0xFFFFFFFFu
 
 /* 单连接最大订阅点数 */
 #define RTDBD_SUB_MAX 32u
@@ -100,13 +118,18 @@ typedef struct {
     uint64_t source_ts_ns;  /* T5 落地后写入 source_timestamp_ns；当前保留 */
 } rtdbd_write_req_t;
 
-/* 审计条目 20B（结构体按 4B 对齐） */
+/* 审计条目 24B（结构体按 4B 对齐）。
+ * v3.9 T5：`partition` 插在 `point_id` 之后——恰好填入原 12..15 的 4B 空洞，
+ * 故 sizeof 仍为 24，`ts_ns` 仍 @16（无尺寸变化）。 */
 typedef struct {
     uint32_t pid;
     uint32_t uid;
     uint32_t point_id;
+    uint32_t partition;   /* v3.9：操作所属分区 */
     uint64_t ts_ns;
 } rtdbd_audit_entry_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_audit_entry_t) == 24, "rtdbd_audit_entry_t must be 24B");
 
 /* 订阅/退订请求负载 4B */
 typedef struct {
@@ -125,10 +148,13 @@ typedef struct {
 
 /* ---- v3.4 T9 新操作负载 ---- */
 
-/* FIND_BY_NAME 请求负载 64B（与 indurtdb_point_t.name[64] 等长） */
+/* FIND_BY_NAME 请求负载 68B（与 indurtdb_point_t.name[64] 等长 + v3 分区） */
 typedef struct {
-    char name[64];
+    char     name[64];
+    uint32_t partition;   /* v3.9 T5：在 (partition, name) 内查找 */
 } rtdbd_find_req_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_find_req_t) == 68, "rtdbd_find_req_t must be 68B");
 
 /* FIND_BY_NAME 响应负载 4B（仅 status==OK 时携带） */
 typedef struct {
@@ -174,50 +200,56 @@ typedef struct {
     uint64_t source_ts_ns;
 } rtdbd_get_resp_t;
 
-/* LIST 请求负载 8B */
+/* LIST 请求负载 12B */
 typedef struct {
-    uint32_t max;    /* 单包最大条数，0 = 全部 */
-    uint32_t offset; /* 起始 id（分页） */
+    uint32_t max;       /* 单包最大条数，0 = 全部 */
+    uint32_t offset;    /* 起始 id（分页） */
+    uint32_t partition; /* v3.9 T5：过滤分区；RTDBD_PARTITION_ALL = 不过滤 */
 } rtdbd_list_req_t;
 
-/* LIST 单条点位信息 72B */
+/* LIST 单条点位信息 76B */
 typedef struct {
     uint32_t point_id;
     uint8_t  type;
     uint8_t  access;
     uint8_t  reserved[2];
     char     name[64];
+    uint32_t partition; /* v3.9 T5：该点位所属分区 */
 } rtdbd_point_info_t;
 
 /* 布局锁死：与 rtdbd.c 的编解码、Python 端复刻保持一致 */
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_get_resp_t) == 64, "rtdbd_get_resp_t must be 64B");
-RTDBD_STATIC_ASSERT(sizeof(rtdbd_point_info_t) == 72, "rtdbd_point_info_t must be 72B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_point_info_t) == 76, "rtdbd_point_info_t must be 76B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_list_req_t) == 12, "rtdbd_list_req_t must be 12B");
 
 /* ---- v3.6 管控写通道：点位 CRUD 负载 ---- */
 
-/* CREATE_POINT 请求负载 72B（id + 类型 + 权限 + 名称） */
+/* CREATE_POINT 请求负载 76B（id + 类型 + 权限 + 名称 + v3 分区） */
 typedef struct {
     uint32_t point_id;
     uint8_t  type;
     uint8_t  access;
     uint8_t  reserved[2];
     char     name[64];
+    uint32_t partition;   /* v3.9 T5：新建点位所属分区 */
 } rtdbd_create_req_t;
 
-/* DELETE_POINT 请求负载 4B */
+/* DELETE_POINT 请求负载 8B */
 typedef struct {
     uint32_t point_id;
+    uint32_t partition;   /* v3.9 T5：点位须属该分区，否则 NOT_FOUND */
 } rtdbd_delete_req_t;
 
-/* RENAME_POINT 请求负载 68B（id + 新名称） */
+/* RENAME_POINT 请求负载 72B（id + 新名称 + v3 分区） */
 typedef struct {
     uint32_t point_id;
     char     name[64];
+    uint32_t partition;   /* v3.9 T5：点位须属该分区，否则 NOT_FOUND */
 } rtdbd_rename_req_t;
 
-RTDBD_STATIC_ASSERT(sizeof(rtdbd_create_req_t) == 72, "rtdbd_create_req_t must be 72B");
-RTDBD_STATIC_ASSERT(sizeof(rtdbd_delete_req_t) == 4, "rtdbd_delete_req_t must be 4B");
-RTDBD_STATIC_ASSERT(sizeof(rtdbd_rename_req_t) == 68, "rtdbd_rename_req_t must be 68B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_create_req_t) == 76, "rtdbd_create_req_t must be 76B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_delete_req_t) == 8, "rtdbd_delete_req_t must be 8B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_rename_req_t) == 72, "rtdbd_rename_req_t must be 72B");
 
 /* ---- v3.6 运行日志 ---- */
 

@@ -5,6 +5,7 @@ cmake_minimum_required(VERSION 3.15)
 
 add_executable(rtdbd
     src/rtdbd.c
+    src/rtdbd_conf.c
     src/policy.c
     src/audit.c
     src/logbuf.c

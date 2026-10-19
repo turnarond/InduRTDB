@@ -2,7 +2,7 @@
  * @file audit.h
  * @brief 写操作审计：定长环形缓冲（无堆分配）
  *
- * 记录每次成功写入的 pid / uid / point_id / ts，供事后追溯"谁在何时写了哪个点"。
+ * 记录每次成功写入的 pid / uid / partition / point_id / ts，供事后追溯"谁在何时写了哪个点"。
  */
 #ifndef RTDBD_AUDIT_H_
 #define RTDBD_AUDIT_H_
@@ -18,7 +18,7 @@ typedef struct {
 
 void     irt_audit_init(irt_audit_t* a);
 void     irt_audit_record(irt_audit_t* a, uint32_t pid, uint32_t uid,
-                          uint32_t point_id, uint64_t ts_ns);
+                          uint32_t partition, uint32_t point_id, uint64_t ts_ns);
 /* 按最旧→最新顺序导出，返回实际导出条数 */
 uint32_t irt_audit_dump(const irt_audit_t* a, rtdbd_audit_entry_t* out, uint32_t cap);
 
