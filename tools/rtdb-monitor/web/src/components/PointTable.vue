@@ -38,6 +38,7 @@
           <el-tag size="small">{{ row.typeName }}</el-tag>
         </template>
       </el-table-column>
+      <el-table-column prop="partition" label="分区" width="90" />
       <el-table-column label="权限" width="90">
         <template #default="{ row }">
           <el-tag size="small" :type="row.access === 1 ? 'success' : 'warning'">

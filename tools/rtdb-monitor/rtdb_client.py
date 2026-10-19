@@ -5,6 +5,11 @@
 提供：PING / GET（按 id 读值）/ LIST（枚举点位）/ WRITE（设值）/
 FIND_BY_NAME / GET_META / SUBSCRIBE→NOTIFY（实时推送）。
 
+协议版本：**v3**（v3.9 T5 起，点位分区）。名称域请求体
+（FIND_BY_NAME / CREATE_POINT / RENAME_POINT / DELETE_POINT / LIST）在末尾追加
+`uint32 partition`；LIST 响应项 `POINT_INFO` 追加 `partition`。
+`OP_GET/WRITE/GET_META/GET_LOG` 负载未变。v2 及更早客户端被 rtdbd 拒绝。
+
 布局（小端 <）与 C 端逐字节一致，改动协议结构须同步此处。
 """
 from __future__ import annotations
@@ -17,7 +22,10 @@ from typing import Callable, Optional
 
 # ---- 协议常量（与 protocol.h 一致） ----
 RTDBD_MAGIC = 0x52424431
-RTDBD_PROTO_VERSION = 2
+RTDBD_PROTO_VERSION = 3
+
+# OP_LIST 的分区哨兵：请求 partition == 该值时列出**全部**分区点位（不过滤）。
+PARTITION_ALL = 0xFFFFFFFF
 
 # 操作码
 OP_PING = 1
@@ -59,16 +67,16 @@ RESP_HDR = struct.Struct("<IHHI")         # magic, version, status, payload_len
 WRITE_REQ = struct.Struct("<IBxxxQQ")     # point_id, type, reserved[3], value_bits, source_ts_ns
 GET_REQ = struct.Struct("<I")             # point_id
 GET_RESP = struct.Struct("<IBB2xQ32sQQ")  # point_id, type, quality, reserved[2], value_bits, value_str[32], ts, source_ts
-LIST_REQ = struct.Struct("<II")           # max, offset
-POINT_INFO = struct.Struct("<IBB2x64s")   # point_id, type, access, reserved[2], name[64]
+LIST_REQ = struct.Struct("<III")          # max, offset, partition（v3）
+POINT_INFO = struct.Struct("<IBB2x64sI")  # point_id, type, access, reserved[2], name[64], partition（v3，76B）
 NOTIFY = struct.Struct("<IB3xQQQ")        # point_id, type, reserved[3], value_bits, ts, source_ts
-FIND_REQ = struct.Struct("<64s")          # name[64]
+FIND_REQ = struct.Struct("<64sI")         # name[64], partition（v3，68B）
 FIND_RESP = struct.Struct("<I")           # point_id
 META_REQ = struct.Struct("<I")            # point_id
 META_PAYLOAD = struct.Struct("<ddfI8x")   # eur_min, eur_max, deadband, flags, reserved[8]
-CREATE_REQ = struct.Struct("<IBB2x64s")   # point_id, type, access, reserved[2], name[64]
-DELETE_REQ = struct.Struct("<I")          # point_id
-RENAME_REQ = struct.Struct("<I64s")        # point_id, name[64]
+CREATE_REQ = struct.Struct("<IBB2x64sI")  # point_id, type, access, reserved[2], name[64], partition（v3，76B）
+DELETE_REQ = struct.Struct("<II")         # point_id, partition（v3，8B）
+RENAME_REQ = struct.Struct("<I64sI")      # point_id, name[64], partition（v3，72B）
 LOG_REQ = struct.Struct("<I")             # max
 LOG_ENTRY = struct.Struct("<QB3x116s")    # ts_ns, level, reserved[3], msg[116]
 
@@ -205,17 +213,22 @@ class RtdbClient:
             "sourceTs": sts,
         }
 
-    def list_points(self, max_per_page: int = 1024) -> list[dict]:
-        """分页拉全量已注册点位，聚合成列表。"""
+    def list_points(self, max_per_page: int = 1024, partition: Optional[int] = None) -> list[dict]:
+        """分页拉全量已注册点位，聚合成列表。
+
+        partition 为 None 时用 PARTITION_ALL（列出全部分区，保留 v3.8 行为）；
+        指定分区号则只返回该分区的点位。每项均携带其 `partition` 字段。
+        """
+        filter_partition = PARTITION_ALL if partition is None else int(partition)
         out: list[dict] = []
         offset = 0
         while True:
-            body = self._ok(OP_LIST, LIST_REQ.pack(max_per_page, offset))
+            body = self._ok(OP_LIST, LIST_REQ.pack(max_per_page, offset, filter_partition))
             if not body:
                 break
             n = len(body) // POINT_INFO.size
             for i in range(n):
-                pid, ptype, access, name = POINT_INFO.unpack(
+                pid, ptype, access, name, part = POINT_INFO.unpack(
                     body[i * POINT_INFO.size:(i + 1) * POINT_INFO.size]
                 )
                 out.append({
@@ -224,6 +237,7 @@ class RtdbClient:
                     "typeName": TYPE_NAME.get(ptype, str(ptype)),
                     "access": access,
                     "name": name.rstrip(b"\x00").decode("utf-8", "replace"),
+                    "partition": part,
                 })
             if n < max_per_page:
                 break
@@ -234,8 +248,9 @@ class RtdbClient:
         vbits = _encode_value(value, ptype)
         self._ok(OP_WRITE, WRITE_REQ.pack(point_id, ptype, vbits, source_ts_ns))
 
-    def find_by_name(self, name: str) -> int:
-        body = self._ok(OP_FIND_BY_NAME, FIND_REQ.pack(name.encode("utf-8")[:64].ljust(64, b"\x00")))
+    def find_by_name(self, name: str, partition: int = 0) -> int:
+        body = self._ok(OP_FIND_BY_NAME, FIND_REQ.pack(
+            name.encode("utf-8")[:64].ljust(64, b"\x00"), int(partition)))
         return FIND_RESP.unpack(body)[0]
 
     def get_meta(self, point_id: int) -> dict:
@@ -244,8 +259,12 @@ class RtdbClient:
         return {"eurMin": eur_min, "eurMax": eur_max, "deadband": deadband, "flags": flags}
 
     # ---- v3.6 管控写通道：点位 CRUD（服务端须放行 uid 策略） ----
-    def create_point(self, point_id: int, name: str, ptype: int, access: int = 3) -> None:
-        """注册点位。ptype 可为 int 或类型名（如 'int32'）。access 默认读写(3)。"""
+    def create_point(self, point_id: int, name: str, ptype: int, access: int = 3,
+                     partition: int = 0) -> None:
+        """注册点位。ptype 可为 int 或类型名（如 'int32'）。access 默认读写(3)。
+
+        partition 为目标分区（(partition, name) 为唯一键），默认 0。
+        """
         if isinstance(ptype, str):
             if ptype not in NAME_TYPE:
                 raise RtdbError(f"unknown type name: {ptype}")
@@ -255,17 +274,17 @@ class RtdbClient:
             raise RtdbError(f"type out of range: {ptype}")
         self._ok(OP_CREATE_POINT, CREATE_REQ.pack(
             int(point_id), ptype, int(access),
-            name.encode("utf-8")[:64].ljust(64, b"\x00"),
+            name.encode("utf-8")[:64].ljust(64, b"\x00"), int(partition),
         ))
 
-    def delete_point(self, point_id: int) -> None:
-        """注销点位（清空 name 并移除 name→id 索引）。"""
-        self._ok(OP_DELETE_POINT, DELETE_REQ.pack(int(point_id)))
+    def delete_point(self, point_id: int, partition: int = 0) -> None:
+        """注销点位（清空 name 并移除 name→id 索引）。点位须属 partition，否则 NOT_FOUND。"""
+        self._ok(OP_DELETE_POINT, DELETE_REQ.pack(int(point_id), int(partition)))
 
-    def rename_point(self, point_id: int, name: str) -> None:
-        """重命名点位（同步维护 name→id 索引）。"""
+    def rename_point(self, point_id: int, name: str, partition: int = 0) -> None:
+        """重命名点位（同步维护 name→id 索引）。点位须属 partition，否则 NOT_FOUND。"""
         self._ok(OP_RENAME_POINT, RENAME_REQ.pack(
-            int(point_id), name.encode("utf-8")[:64].ljust(64, b"\x00"),
+            int(point_id), name.encode("utf-8")[:64].ljust(64, b"\x00"), int(partition),
         ))
 
     def get_logs(self, max_n: int = 0) -> list[dict]:

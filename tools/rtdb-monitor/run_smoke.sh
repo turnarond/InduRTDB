@@ -28,14 +28,14 @@ points:
   - name: AHU_01.Supply_Temp
     id: 10
     type: int32
-    access: read_write
+    access: 3
   - name: Pump_Start_CMD
     id: 11
     type: bool
-    access: read_write
+    access: 3
 YAML
 
-printf '%s:0:63\n' "$(id -u)" > "${POL}"
+printf '%s:*:0:63\n' "$(id -u)" > "${POL}"
 
 echo "[smoke] starting rtdbd ..."
 # 后台启动（rtdbd 自身不识别 --daemon，前台会阻塞脚本）；$! 即其 PID。

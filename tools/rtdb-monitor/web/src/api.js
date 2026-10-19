@@ -14,7 +14,11 @@ async function rest(path, opts = {}) {
 }
 
 export const api = {
-  listPoints: () => rest('/api/points'),
+  // v3.9 T7：分区过滤。无参 = 全部分区点位（v3.8 行为）；传 partition = 仅该分区点位。
+  listPoints: (partition) =>
+    rest(partition === undefined || partition === null ? '/api/points' : `/api/points?partition=${partition}`),
+  // v3.9 T7：已注册分区列表（升序去重）。
+  listPartitions: () => rest('/api/partitions'),
   getPoint: (id) => rest(`/api/points/${id}`),
   setPoint: (id, value) =>
     rest(`/api/points/${id}/set`, { method: 'POST', body: JSON.stringify({ value }) }),
