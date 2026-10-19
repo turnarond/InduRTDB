@@ -1,4 +1,4 @@
-"""InduRTDB 离线迁移工具：v1 段 -> 当前版（v3）段。
+"""InduRTDB 离线迁移工具：v1/v2 段 -> 当前版（v3）段。
 
 纯 Python 实现（不依赖 C 库），逐字节复刻 v1/v2/v3 共享内存布局。
 详见 README.md 与 docs/03-设计文档/07-v3.4-布局v2与APIv2方案设计.md §6、
@@ -26,7 +26,8 @@ from .layout import (MAGIC, SHM_VERSION_V1, SHM_VERSION_V2, SHM_VERSION_V3,
                      shm_path, layout_buckets, layout_index_size,
                      layout_meta_size, off_points_v2, off_index_v2,
                      off_meta_v2, off_subs_v2, total_size_v2,
-                     total_size_v1, parse_v1_header, build_v2_header,
+                     total_size_v1, parse_v1_header, parse_v2_header,
+                     build_v2_header,
                      read_point_name, read_point_partition, name_eq, fnv1a32,
                      compose_hash, build_index, index_probe)
 
@@ -39,7 +40,8 @@ __all__ = [
     "SOURCE_TS_OFFSET", "PARTITION_OFFSET", "INDEX_EMPTY", "INDEX_TOMBSTONE",
     "shm_path", "layout_buckets", "layout_index_size", "layout_meta_size",
     "off_points_v2", "off_index_v2", "off_meta_v2", "off_subs_v2",
-    "total_size_v2", "total_size_v1", "parse_v1_header", "build_v2_header",
+    "total_size_v2", "total_size_v1", "parse_v1_header", "parse_v2_header",
+    "build_v2_header",
     "read_point_name", "read_point_partition", "name_eq", "fnv1a32",
     "compose_hash", "build_index", "index_probe",
 ]
