@@ -66,6 +66,7 @@
 import { ref, computed, watch } from 'vue'
 import { Upload } from '@element-plus/icons-vue'
 import RealtimeChart from './RealtimeChart.vue'
+import { qualityLabel, qualityTagType } from '../quality.js'
 
 const props = defineProps({
   modelValue: Boolean,
@@ -80,8 +81,8 @@ const setVal = ref('')
 const numeric = computed(() => props.point && props.point.type !== 3)
 const displayValue = computed(() => (props.live ? String(props.live.value) : '—'))
 
-const qualityText = computed(() => (props.live && props.live.quality === 0 ? 'Good' : 'Bad/Unknown'))
-const qualityType = computed(() => (props.live && props.live.quality === 0 ? 'success' : 'danger'))
+const qualityText = computed(() => qualityLabel(props.live?.quality))
+const qualityType = computed(() => qualityTagType(props.live?.quality))
 
 watch(
   () => props.point,

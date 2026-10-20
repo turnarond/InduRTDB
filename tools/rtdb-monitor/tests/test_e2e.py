@@ -155,6 +155,14 @@ def main() -> None:
             assert r.status_code == 200, r.text
             assert not any(p["id"] == 20 for p in client.get("/api/points").json())
 
+            # v3.9.1：错误路径必须返回真实 4xx。
+            # 新版 FastAPI 把 (body, status) 元组序列化成 200 + JSON 数组，
+            # 会让前端把失败当成功。
+            r = client.post("/api/points", json={"id": 0, "name": "Bad.Id", "type": "int32"})
+            assert r.status_code == 400, (r.status_code, r.text)
+            r = client.get("/api/points/99999")
+            assert r.status_code == 404, (r.status_code, r.text)
+
             # ---- v3.6 命令终端 ----
             def cmd(c):
                 rr = client.post("/api/cmd", json={"cmd": c})
