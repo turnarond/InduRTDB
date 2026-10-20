@@ -23,6 +23,9 @@ Web 仪表盘形态，后端为纯 Python（FastAPI），经 UDS 连接 `rtdbd` 
 cd tools/rtdb-monitor
 pip install -r requirements.txt
 
+# Vite 前端产物 web/dist 未入库，首次运行前构建（缺产物时首页 404）
+npm --prefix web ci && npm --prefix web run build
+
 # 依赖一个已启动的 rtdbd 实例（其 socket 路径）
 export RTDBD_SOCK=/run/indurtdb/default.sock
 # 可选：设置后需 token 鉴权

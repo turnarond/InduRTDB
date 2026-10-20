@@ -38,7 +38,7 @@ export function qualityLabel(q) {
   if (n === null) return '—'
   const base = n & 0x0f
   const limit = (n >> 4) & 0x03
-  const suffix = limit === 1 ? ' · Lo' : limit === 2 ? ' · Hi' : ''
+  const suffix = limit === 1 ? ' · Lo' : limit === 2 ? ' · Hi' : limit === 3 ? ' · Const' : ''
   return (BASE_LABEL[base] || `Code ${base}`) + suffix
 }
 
