@@ -4,6 +4,51 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.9.0] — 2026-10-20「点位分区 / 命名空间」
+
+点位获得 `uint32` 分区维度：共享内存段版本升到 3，`name→id` 索引键改为 `partition‖name`，
+同名点位可跨分区共存；协议升到 v3，`rtdbd`/`irtcli`/监控台全链路支持分区选择与过滤；
+迁移工具扩展到 v1→v3 与 v2→v3。默认分区 0 与 v3.8 语义等价，旧调用零改动。
+
+### Changed
+- **段版本 `IRT_SHM_VERSION` 2 → 3（ABI 相关）**：`indurtdb_point_t` 的 `reserved[0:4)` 更名并具名为
+  `uint32 partition`，偏移 **120**；`sizeof(indurtdb_point_t)` 仍为 **128**，其余字段偏移逐字节不变
+  （`name`@45 / `quality`@41 / `source_timestamp_ns`@112）。v2 段被 v3 库**拒绝挂载**，不静默按新布局解释。
+- **索引分区化**：哈希输入改为 `FNV1a32(partition_le32 ‖ name)` 加 2 步尾混，冲突比较同时比对
+  `partition` 与 `name[64]`；`irt_index_*` 增加分区参数。分区 0 的注册/查找结果与 v3.8 语义一致。
+- **策略格式统一为 4 段** `<uid>:<partition|*>:<min_id>:<max_id>`：`*` 放行全分区，分区限定行生效，
+  deny-by-default 不变。旧 **3 段写法 fail-fast（退出码 2）**。
+- **协议 v3**：`RTDBD_PROTO_VERSION` 2 → 3；名称域请求体在末尾追加 `partition`（默认分区 0 的线格式
+  对读路径逐字节兼容），新增 `RTDBD_OP_SELECT = 17` 与 `RTDBD_PARTITION_ALL` 哨兵；v2 客户端被拒。
+- **工具链**：`irtcli` 新增 `--partition N` 与 `select N`（`irtcli_select` / `find_by_name_in` / `list_in`）；
+  监控台新增 `GET /api/partitions`、`/api/points?partition=N` 与 `partitions` 视图。
+
+### Added
+- **API 分区重载族**（v2 句柄函数 **50 → 55**）：名称域 `_in` 系列 4 个
+  （`find_by_name_in` / `create_point_in` / `rename_point_in` / `delete_point_in`）+
+  `indurtdb_h_set_partition`。默认值跟随句柄状态（`h_default_partition`），显式形参优先；
+  既有无 `_in` 函数保留为委托，`partition==0` 时逐位等价。公开 API 共 **117 个**（v1 **62** + v2 **55**）。
+- **迁移工具 v2→v3**（`tools/irt_migrate`）：在保留 v1→v3 的同时新增 v2→v3。目标段 `partition` 强制置 0、
+  v2 元数据区（32B/点）逐字节保留、索引按 `partition‖name` 从最终点位字节重建、Header 版本改写为 3
+  并重封 CRC32，源版本（v3/未知）受保护拒绝。Python 镜像 `layout.py` 与 C 侧经 `Mirror.PythonLayoutMatches` 对齐。
+- `docs/08-验证记录/v3.9-T8-迁移与回退演练.md`：真机 rtdbd 上 v3.8 建 v2 段 → 迁移 → v3.9 挂载实读 →
+  v3.8 挂载 v3 段被拒 → 回退重迁的完整证据（`checked=4096`、`crc_ok=true`、`meta_preserved=true`）。
+- `tests/integration/test_rtdbd_proto_v3.cpp`、`test_irtcli_cli`、`test_c_mirror` 等分区/协议/镜像用例；
+  `docs/08-验证记录/v3.9-T7-分区视图.png` 截图留档。
+
+### Notes
+- **性能（x86_64 / Release `-O2`，`run_bench.sh --quick`，2026-10-20）**：P99 全部远优于 10 μs，
+  与 v3.8 无显著退化。write_int32 P50 **0.183** / P99 **0.478 μs**；write_double **0.101** / **0.239**；
+  read_int32 **0.044** / **0.081**；read_double **0.045** / **0.083**；peek **0.036** / **0.070**；
+  read_range P50 **0.231 μs**；write_range P50 **1.400 μs**；mixed_rw ≈ **21.1M op/s**。
+  （v3.8 基线 write_int32 P99 0.103 μs，属机器差异。）
+- **SylixOS / ARM：未实测**（不阻塞发布），性能结论不外推。
+- **分区不是安全隔离边界**：鉴权仍为 uid × id 区间（可选按分区限定），读路径免鉴权不变（评审 Q7）。
+- 分区为点位属性，无独立分区表与管理 API；创建后固定，跨分区移动需 `delete` + `create`（Q8/Q9）。
+- 迁移前不支持新旧进程混跑；`rtdbd` 正常退出会 `shm_unlink` 段，停机迁移须先备份（见 T8 记录）。
+
+---
+
 ## [3.8.0] — 2026-10-08「部署能力补齐 + 文档治理 + 缺陷修复」
 
 ### Added
