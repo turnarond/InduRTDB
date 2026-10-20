@@ -28,6 +28,15 @@ uint64_t irt_time_now_ns(void) {
     return 0;
 }
 
+uint64_t irt_time_realtime_ns(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_REALTIME, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+    /* 墙钟不可用时退化到单调时钟，保证仍返回非 0 时间戳。 */
+    return irt_time_now_ns();
+}
+
 void irt_time_sleep_ns(uint64_t duration_ns) {
     struct timespec req, rem;
     req.tv_sec  = (time_t)(duration_ns / 1000000000ULL);
