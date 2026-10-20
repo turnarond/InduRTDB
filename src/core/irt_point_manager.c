@@ -65,7 +65,9 @@ static int pm_write_impl_q(irt_pm_t* pm, uint32_t id,
         break;
     default: break;
     }
-    p->timestamp_ns = irt_time_now_ns();
+    /* v3.9.1：入库时刻对外语义是「墙钟时间」，用 REALTIME 而非单调时钟，
+     * 便于监控台/上位机直接渲染为日期。check_timeouts 必须使用同一时钟。 */
+    p->timestamp_ns = irt_time_realtime_ns();
     p->quality      = quality;
     /* 采集时刻：0 表示"未提供"，语义退化为仅用入库时刻（旧行为不变） */
     p->source_timestamp_ns = source_ts_ns;
@@ -206,7 +208,8 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
     indurtdb_point_t*  pts = irt_shm_points(pm->shm);
     if (!hdr || !pts) return 0;
 
-    uint64_t now = irt_time_now_ns();
+    /* 必须与写入 timestamp_ns 使用同一时钟（REALTIME），否则跨时钟相减无意义。 */
+    uint64_t now = irt_time_realtime_ns();
     /* 时钟获取失败(返回0)时跳过超时检测, 避免将所有点标记为 TIMEOUT */
     if (now == 0) return 0;
     uint32_t maxp = hdr->max_points;

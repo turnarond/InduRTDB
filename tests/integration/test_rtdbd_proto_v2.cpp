@@ -496,6 +496,17 @@ TEST(ProtoV2, GetLog)
     EXPECT_NE(std::string(e.msg).find("rtdbd listening on"), std::string::npos)
         << "unexpected first entry: " << e.msg;
 
+    /* v3.9.1：msg 的 NUL 之后必须全 0。此前 logbuf 按整个 msg[] 拷贝未初始化栈，
+     * 会把残留内存回传给客户端（信息泄露 + 前端乱码）。 */
+    {
+        size_t used = strnlen(e.msg, sizeof(e.msg));
+        ASSERT_LT(used, sizeof(e.msg)) << "msg is not NUL-terminated";
+        for (size_t i = used + 1; i < sizeof(e.msg); ++i) {
+            ASSERT_EQ(e.msg[i], '\0')
+                << "uninitialized tail leaked at offset " << i;
+        }
+    }
+
     /* 管控写(create)应记入日志 */
     rtdbd_create_req_t c;
     memset(&c, 0, sizeof(c));

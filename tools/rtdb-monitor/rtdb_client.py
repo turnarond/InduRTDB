@@ -337,26 +337,33 @@ class NotifyListener:
 
     def _loop(self) -> None:
         assert self._sock is not None
-        try:
-            while not self._stop.is_set():
-                # 订阅确认回的是 RESP_HDR，NOTIFY 推送回的是 REQ_HDR（opcode=OP_NOTIFY）；
-                # 两者二进制布局相同（magic, version, kind, payload_len），故统一按 REQ_HDR 解。
+        while not self._stop.is_set():
+            # 订阅确认回的是 RESP_HDR，NOTIFY 推送回的是 REQ_HDR（opcode=OP_NOTIFY）；
+            # 两者二进制布局相同（magic, version, kind, payload_len），故统一按 REQ_HDR 解。
+            try:
                 hdr = self._recv_exact(REQ_HDR.size)
-                magic, version, kind, plen = REQ_HDR.unpack(hdr)
+            except (socket.timeout, TimeoutError):
+                # v3.9.1：空闲超时不是连接断开。此前的实现把它当 OSError 吞掉，
+                # 导致监听线程在 2s 无数据后永久退出，实时推送整条链路静默失效。
+                continue
+            except (OSError, RtdbError):
+                break
+            magic, version, kind, plen = REQ_HDR.unpack(hdr)
+            if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION:
+                break
+            try:
                 body = self._recv_exact(plen) if plen else b""
-                if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION:
-                    break
-                if kind == OP_NOTIFY and plen == NOTIFY.size:
-                    pid, ptype, vbits, ts, sts = NOTIFY.unpack(body)
-                    self.on_notify(pid, {
-                        "id": pid, "type": ptype,
-                        "typeName": TYPE_NAME.get(ptype, str(ptype)),
-                        "value": _decode_value(vbits, b"", ptype),
-                        "ts": ts, "sourceTs": sts,
-                    })
-                # 其余（订阅确认等响应）忽略
-        except (OSError, RtdbError):
-            pass
+            except (OSError, RtdbError):
+                break
+            if kind == OP_NOTIFY and plen == NOTIFY.size:
+                pid, ptype, vbits, ts, sts = NOTIFY.unpack(body)
+                self.on_notify(pid, {
+                    "id": pid, "type": ptype,
+                    "typeName": TYPE_NAME.get(ptype, str(ptype)),
+                    "value": _decode_value(vbits, b"", ptype),
+                    "ts": ts, "sourceTs": sts,
+                })
+            # 其余（订阅确认等响应）忽略
 
     def _recv_exact(self, n: int) -> bytes:
         assert self._sock is not None

@@ -4,6 +4,32 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.9.1] — 2026-10-20「监控台实时链路与时间戳修复」
+
+Web 管理台（`tools/rtdb-monitor`）实测暴露的三个缺陷修复；无协议、段格式与 API 变更，
+与 3.9.0 二进制/共享内存完全兼容。
+
+### Fixed
+- **实时推送 2 秒后静默失效**：`NotifyListener` 的 socket 为等待 NOTIFY 设了 2s 超时，
+  而 `_loop` 把超时当致命 `OSError` 吞掉，线程在链路空闲 2s 后永久退出——连接仍在、
+  前端永远收不到 `update`。现仅在**帧边界**把空闲超时视为「继续等待」，帧内超时仍按断链处理；
+  前端在收到 `list` 后显式 `subscribe` 当前清单，覆盖自动重连与新增点位。
+- **`GET /api/logs` 返回未初始化栈内存**：`irt_logbuf_emit` 用局部 `msg[116]` 组装日志后
+  按整块 `memcpy` 入环形缓冲，NUL 之后的栈残留一并回传（信息泄露 + 界面乱码）。
+  现先 `memset` 清零再格式化，NUL 之后恒为 0。
+- **点位时间戳被渲染成 40432 年**：`indurtdb_point_t.timestamp_ns` 原取 `CLOCK_MONOTONIC_RAW`，
+  对外却按 Unix epoch 毫秒解释。新增 `irt_time_realtime_ns()`（POSIX / SylixOS 两实现），
+  点位入库时刻改用墙钟；`check_timeouts` 同步改用同一时钟，心跳/订阅超时仍用单调时钟不受影响。
+
+### Added
+- 回归用例：监控台 E2E 增加「静默 >2s 后仍收到 update」；C 侧增加 `msg` 尾零断言与
+  `irt_time_realtime_ns()` 墙钟合理性断言（沿用既有测试二进制，`ctest` 仍为 **42** 项）。
+
+### Changed
+- 版本号四处同步至 **3.9.1**（`VERSION` / CMake `project(VERSION)` / `indurtdb.h` / README+CHANGELOG）。
+
+---
+
 ## [3.9.0] — 2026-10-20「点位分区 / 命名空间」
 
 点位获得 `uint32` 分区维度：共享内存段版本升到 3，`name→id` 索引键改为 `partition‖name`，

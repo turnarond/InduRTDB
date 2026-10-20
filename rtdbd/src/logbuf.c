@@ -28,6 +28,9 @@ static uint64_t now_wall_ns(void)
 void irt_logbuf_emit(irt_logbuf_t* b, uint8_t level, const char* fmt, ...)
 {
     char msg[RTDBD_LOG_ENTRY_MSG_MAX];
+    /* 先清零：下面按整个 msg[] 拷入环形缓冲，若不初始化会把栈上残留
+     * 数据一并回传给 GET_LOG 客户端（未初始化内存泄露 + 前端乱码）。 */
+    memset(msg, 0, sizeof(msg));
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(msg, sizeof(msg), fmt, ap);
