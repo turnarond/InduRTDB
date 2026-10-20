@@ -40,3 +40,23 @@ if(INDURTDB_IS_TOP_LEVEL)
     install(TARGETS irtcli ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
     install(DIRECTORY include/irtcli DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
 endif()
+
+# v3.9 T6：irtcli 命令行前端。目标名用 irtcli_cli（库目标名 irtcli 已占用），
+# 输出名设为 irtcli（安装后即为 `irtcli` 可执行文件，与部署文档口径一致）。
+add_executable(irtcli_cli src/irtcli_main.c)
+set_target_properties(irtcli_cli PROPERTIES
+    OUTPUT_NAME irtcli
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS ON
+)
+target_link_libraries(irtcli_cli PRIVATE irtcli)
+target_compile_definitions(irtcli_cli PRIVATE _GNU_SOURCE)
+
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(irtcli_cli PRIVATE -Wall -Wextra -Werror)
+endif()
+
+if(INDURTDB_IS_TOP_LEVEL)
+    install(TARGETS irtcli_cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+endif()

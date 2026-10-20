@@ -150,6 +150,7 @@ int irtcli_init(irtcli_t* c, const char* sock_path, uint32_t cap,
     c->user_data = user_data;
     c->fd        = -1;
     c->connected = false;
+    c->partition = 0;   /* v3.9 T6：显式清零，防栈上未初始化的 irtcli_t 携带垃圾分区 */
     c->queue     = (irtcli_entry_t*)calloc(c->cap, sizeof(irtcli_entry_t));
     if (!c->queue) return IRTCLI_ERR_IO;
     return IRTCLI_OK;
@@ -356,13 +357,15 @@ static int status_to_cli(uint16_t st)
     }
 }
 
-int irtcli_find_by_name(irtcli_t* c, const char* name, uint32_t* out_id)
+int irtcli_find_by_name_in(irtcli_t* c, uint32_t partition, const char* name,
+                           uint32_t* out_id)
 {
     if (!c || !name || !out_id) return IRTCLI_ERR_ARG;
 
     rtdbd_find_req_t f;
     memset(&f, 0, sizeof(f));
     strncpy(f.name, name, sizeof(f.name) - 1);
+    f.partition = partition;
 
     uint16_t st = RTDBD_ST_INTERNAL;
     rtdbd_find_resp_t r;
@@ -372,6 +375,84 @@ int irtcli_find_by_name(irtcli_t* c, const char* name, uint32_t* out_id)
 
     if (st == RTDBD_ST_OK) *out_id = r.point_id;
     return status_to_cli(st);
+}
+
+/* v3.9 T6：签名不变，改为委托按连接当前默认分区查找。 */
+int irtcli_find_by_name(irtcli_t* c, const char* name, uint32_t* out_id)
+{
+    if (!c) return IRTCLI_ERR_ARG;
+    return irtcli_find_by_name_in(c, c->partition, name, out_id);
+}
+
+/* v3.9 T6：连接级默认分区选择（OP_SELECT，Redis SELECT 语义）。
+ * 成功才更新 c->partition；失败保持原值（fail-closed）。 */
+int irtcli_select(irtcli_t* c, uint32_t partition)
+{
+    if (!c) return IRTCLI_ERR_ARG;
+
+    uint32_t p = partition;
+    uint16_t st = RTDBD_ST_INTERNAL;
+    int rc = rt_submit(c, RTDBD_OP_SELECT, &p, sizeof(p), NULL, 0, &st);
+    if (rc != IRTCLI_OK) return rc;
+
+    int cr = status_to_cli(st);
+    if (cr == IRTCLI_OK) c->partition = partition;
+    return cr;
+}
+
+/* v3.9 T6：按分区列举点位（OP_LIST）。响应是变长数组，不能复用定长 resp_len 的
+ * rt_submit，故此处手写「发请求头+负载 → 读响应头 → 校验 magic/version → 处理
+ * 变长体」的收发流程；复用已有的 send_all/recv_all。 */
+int irtcli_list_in(irtcli_t* c, uint32_t partition, uint32_t offset, uint32_t max,
+                   irtcli_point_info_t* out, uint32_t cap, uint32_t* out_count)
+{
+    if (!c || !out || !out_count) return IRTCLI_ERR_ARG;
+    *out_count = 0;
+
+    rtdbd_list_req_t l;
+    memset(&l, 0, sizeof(l));
+    l.max       = max;
+    l.offset    = offset;
+    l.partition = partition;
+
+    if (!c->connected && irtcli_connect(c) != IRTCLI_OK) return IRTCLI_ERR_IO;
+
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic       = RTDBD_MAGIC;
+    req.version     = RTDBD_PROTO_VERSION;
+    req.opcode      = RTDBD_OP_LIST;
+    req.payload_len = (uint32_t)sizeof(l);
+
+    if (send_all(c->fd, &req, sizeof(req)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (send_all(c->fd, &l, sizeof(l)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+
+    rtdbd_resp_hdr_t resp;
+    if (recv_all(c->fd, &resp, sizeof(resp)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (resp.magic != RTDBD_MAGIC || resp.version != RTDBD_PROTO_VERSION) {
+        return IRTCLI_ERR_PROTO;
+    }
+    if (resp.status != RTDBD_ST_OK) {
+        return status_to_cli(resp.status);
+    }
+
+    uint32_t n = resp.payload_len / (uint32_t)sizeof(irtcli_point_info_t);
+    if (n > cap) return IRTCLI_ERR_ARG;   /* 不截断、不越界 */
+    if (n > 0 && recv_all(c->fd, out, (size_t)n * sizeof(irtcli_point_info_t)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    *out_count = n;
+    return IRTCLI_OK;
 }
 
 int irtcli_get_meta(irtcli_t* c, uint32_t id, indurtdb_meta_t* out)

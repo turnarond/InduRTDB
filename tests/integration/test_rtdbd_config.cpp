@@ -8,6 +8,7 @@
  *   - BadEurRangeExits2           EUR 上下限颠倒 → 退出码 2
  *   - UnknownFlagsExits2          meta flags 含未知位 → 退出码 2
  *   - PercentDeadbandNoEurExits2 百分比死区但未启用量程 → 退出码 2
+ *   - PolicyMalformedExits2      非法 policy 行 → 退出码 2（v3.9 T3，不静默跳过）
  *   - BadInstanceExits1           非法 --instance 字符 → 退出码 1
  *   - ZeroMaxPointsExits1         --max-points 0 → 退出码 1
  *   - OversizeMaxSubsExits1      --max-subs 超上限 → 退出码 1
@@ -366,7 +367,7 @@ TEST(RtdbdConfig, SetMetaRejectsInvalid)
     ASSERT_GE(fd, 0);
 
     char pol[128];
-    snprintf(pol, sizeof(pol), "%lu:0:63\n", (unsigned long)getuid());
+    snprintf(pol, sizeof(pol), "%lu:*:0:63\n", (unsigned long)getuid());
     std::string pol_path = make_tmp_file("cfg_setmeta_pol.txt", pol);
 
     /* 重启一次让新实例加载 policy（策略在启动时读取） */
@@ -437,7 +438,30 @@ TEST(RtdbdConfig, Exit2PreservesSegment)
     drop_segment("cfg_preserve");   /* 本用例验证段存活，验完自行清理 */
 }
 
-/* 9. 非法 --instance 字符 → 退出码 1 */
+/* 9. 非法 policy 行 → fail-fast 退出码 2（v3.9 T3）。
+ *    护栏一：旧实现对格式不符的行静默 continue —— 坏策略等同「拒绝所有写」
+ *            却启动成功，运维无从察觉。
+ *    护栏二：policy 加载失败曾以退出码 1 退出，而 supervisor/systemd 只对
+ *            致命码 2/4 停止 respawn → 坏策略会触发无限重启循环。 */
+TEST(RtdbdConfig, PolicyMalformedExits2)
+{
+    /* 3 段是 v3.9 之前的旧格式，现已非合法输入（须写 uid:partition|*:min:max） */
+    std::string pol = make_tmp_file("cfg_badpolicy.txt", "1000:0:999\n");
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_badpolicy.sock",
+        "--instance", "cfg_badpolicy",
+        "--policy", pol.c_str(),
+        "--max-points", "64",
+        "--max-subs", "4"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("invalid policy"), std::string::npos) << err;
+    EXPECT_NE(err.find("line 1"), std::string::npos) << err;
+    drop_segment("cfg_badpolicy");
+}
+
+/* 10. 非法 --instance 字符 → 退出码 1 */
 TEST(RtdbdConfig, BadInstanceExits1)
 {
     std::string err;

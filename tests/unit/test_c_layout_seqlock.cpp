@@ -20,7 +20,7 @@ TEST(CLayout, SizesMatchV2) {
     EXPECT_EQ(sizeof(indurtdb_point_t), 128u);
     EXPECT_EQ(sizeof(irt_subscriber_entry_t), 16u);
     EXPECT_EQ(IRT_MAGIC, 0x1DBA1DBAu);
-    EXPECT_EQ(IRT_SHM_VERSION, 2u);
+    EXPECT_EQ(IRT_SHM_VERSION, 3u);
 }
 
 TEST(CLayout, PointFieldOffsets) {
@@ -33,6 +33,8 @@ TEST(CLayout, PointFieldOffsets) {
     EXPECT_EQ(offsetof(indurtdb_point_t, unit), 42u);
     EXPECT_EQ(offsetof(indurtdb_point_t, access), 44u);
     EXPECT_EQ(offsetof(indurtdb_point_t, name), 45u);
+    EXPECT_EQ(offsetof(indurtdb_point_t, source_timestamp_ns), 112u);
+    EXPECT_EQ(offsetof(indurtdb_point_t, partition), 120u); /* v3.9 分区字段 */
 }
 
 class CSeqlockTest : public ::testing::Test {

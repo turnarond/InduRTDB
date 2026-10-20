@@ -17,6 +17,7 @@
 #include <stdio.h>
 
 #include <rtdbd/protocol.h>   /* RTDBD_HEALTH_*：单一事实来源，杜绝数值漂移 */
+#include <indurtdb/indurtdb.h> /* v3.9 T5：自检改走句柄 API，需要 indurtdb_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,10 +47,11 @@ void rtdbd_stats_mark_start(void);
 void rtdbd_stats_note_error(void);
 
 /* 自检（核心段 + 计数分类，由 stats.c 实现，不依赖连接表）。
+ * v3.9 T5：核心段自检改走句柄 API，需传入实例句柄 h。
  * 返回 RTDBD_HEALTH_*，并写入 g_stats.health。
  * 规则：核心段损坏 → UNHEALTHY；仅错误计数非零（有被拒写/丢通知等）→ DEGRADED；
  *       一切正常 → OK。 */
-int rtdbd_self_check_core(void);
+int rtdbd_self_check_core(indurtdb_t* h);
 
 /* 文本化导出（SIGUSR1 dump 走此路径，在主循环内调用，非信号上下文） */
 void rtdbd_stats_dump(FILE* fp);

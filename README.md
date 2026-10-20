@@ -28,7 +28,7 @@
 | write_range (100点) | 1.398 μs | 1.433 μs | 14.2M pt/s |
 | mixed_rw | -- | -- | 23.0M op/s |
 
-> 设计目标 P99 ≤ 10 μs, x86 实测全部通过（v3.7.0 主题A 改动后复测，热路径未变、无回归；机器差异导致绝对值与 v3.4 行不同）。
+> 设计目标 P99 ≤ 10 μs。上表为 **v3.9.0 复测基线**（x86_64 / Release `-O2`，2026-10-20，`run_bench.sh --quick`），P99 全部 PASS，与 v3.7/v3.8 数值在机器差异范围内一致、无显著退化。
 > 详见 `tests/bench/bench.c` + `scripts/run_bench.sh`。
 
 ## 快速开始 (C)
@@ -108,6 +108,15 @@ systemd 部署需配套 `RestartPreventExitStatus=2 4`。
 **不拖垮服务端**；值仍落库，GET 轮询可读到。
 
 ## 版本
+
+**v3.9.0** — 点位分区 / 命名空间：
+
+- **段版本 3**：`IRT_SHM_VERSION` 2 → 3，`indurtdb_point_t` 偏移 120 新增具名字段 `uint32 partition`（`sizeof==128` 不变）；v2 段被 v3 库拒绝挂载。
+- **分区索引**：`name→id` 索引键改为 `partition‖name`，同名点位可跨分区共存；默认分区 0 与 v3.8 语义等价。
+- **策略 4 段**：统一 `<uid>:<partition|*>:<min_id>:<max_id>`，旧 3 段写法 fail-fast（退出码 2）。
+- **API**：v2 句柄函数 50 → 55（名称域 `_in` ×4 + `set_partition`），公开 API 共 117（v1 62 + v2 55）。
+- **协议 v3 + 工具链**：`rtdbd` v3、`irtcli --partition/select`、监控台 `partitions` 视图。
+- **迁移工具**：`tools/irt_migrate` 扩展 v1→v3 与 v2→v3（分区清零、元数据保留、索引重建、CRC 重封、版本保护），并完成回退演练。
 
 **v3.8.0** — 部署能力补齐 + 文档治理 + 缺陷修复：
 

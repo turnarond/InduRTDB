@@ -60,6 +60,15 @@ jobs:
         working-directory: build
         run: ctest --output-on-failure -j$(nproc)
 
+      # ---- 迁移工具自检（纯标准库，无需第三方依赖） ----
+      - name: irt_migrate self-test
+        working-directory: tools/irt_migrate
+        run: python3 tests/test_migrate.py
+
+      # ---- 监控客户端冒烟（复用已构建的 rtdbd） ----
+      - name: monitor smoke
+        run: bash scripts/run_monitor_smoke.sh
+
       # ---- 端到端混合角色（v3.3 T6 + v3.4 T9/T10） ----
       - name: run_e2e.sh
         run: E2E_BUILD_DIR=build bash scripts/run_e2e.sh

@@ -121,6 +121,43 @@ if(TARGET rtdbd AND TARGET irtcli)
     add_test(NAME test_rtdbd_proto_v2 COMMAND test_rtdbd_proto_v2)
 endif()
 
+# ---- rtdbd 协议 v3（v3.9 T5：分区/命名空间） ----
+if(TARGET rtdbd AND TARGET irtcli)
+    add_executable(test_rtdbd_proto_v3 test_rtdbd_proto_v3.cpp)
+    target_link_libraries(test_rtdbd_proto_v3 PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_rtdbd_proto_v3 PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_rtdbd_proto_v3 PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_proto_v3 PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_proto_v3 rtdbd irtcli)
+    add_test(NAME test_rtdbd_proto_v3 COMMAND test_rtdbd_proto_v3)
+endif()
+
+# ---- irtcli CLI 分区支持（v3.9 T6） ----
+if(TARGET rtdbd AND TARGET irtcli AND TARGET irtcli_cli)
+    add_executable(test_irtcli_cli test_irtcli_cli.cpp)
+    target_link_libraries(test_irtcli_cli PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb irtcli)
+    target_include_directories(test_irtcli_cli PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/client/include)
+    target_compile_definitions(test_irtcli_cli PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>"
+        IRTCLI_BIN="$<TARGET_FILE:irtcli_cli>")
+    set_target_properties(test_irtcli_cli PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_irtcli_cli rtdbd irtcli irtcli_cli)
+    add_test(NAME test_irtcli_cli COMMAND test_irtcli_cli)
+endif()
+
 # ---- rtdbd 健康 / 错误计数 + 自检（v3.7 主题B B1） ----
 if(TARGET rtdbd)
     add_executable(test_rtdbd_health test_rtdbd_health.cpp)

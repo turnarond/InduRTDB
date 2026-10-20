@@ -4,7 +4,7 @@ rtdbd 的配置样例，可直接复制为部署起点。
 
 | 文件 | 对应参数 | 格式 |
 |---|---|---|
-| `policy.conf` | `--policy` | 自定义 `uid:min_id:max_id` 逐行格式（**非 YAML**） |
+| `policy.conf` | `--policy` | 自定义 `uid:partition\|*:min_id:max_id` 逐行格式（**非 YAML**） |
 | `points.yaml` | `--config` | YAML 子集，仅 `points:` 之后被解析 |
 
 ## 用法
@@ -26,11 +26,10 @@ rtdbd --instance hvac_ahu01 \
 
 ⚠️ **`policy.conf` 不给等于关闭所有写。** 详见 [`02-启动与守护.md` §2](../../docs/07-部署运维/02-启动与守护.md)。
 
-⚠️ `policy.conf` 中格式错误的行被**静默跳过**，启动不报错。自查：
-
-```bash
-grep -vE '^\s*(#|$)' /etc/rtdbd/policy.conf | wc -l   # 必须等于预期规则数
-```
+⚠️ `policy.conf` 格式错误即 **fail-fast**：任何一行不合规（段数不是 4、非十进制
+数字、数值溢出 `uint32`、`min_id > max_id`、单行超长、规则数超 32），rtdbd 打印
+`invalid policy <path>: line <n>: <原因>` 并以**退出码 2** 终止——**不再静默跳过**。
+（v3.9 T3 之前的版本会把格式错误的行悄悄跳过，坏策略等同「拒绝所有写」却启动成功。）
 
 ## 本样例的验证状态
 

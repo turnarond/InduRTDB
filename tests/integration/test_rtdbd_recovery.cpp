@@ -166,7 +166,7 @@ bool shm_read_int32(const std::string& instance, uint32_t id, int32_t* out)
 std::string policy_for_self()
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%lu:0:63\n", (unsigned long)getuid());
+    snprintf(buf, sizeof(buf), "%lu:*:0:63\n", (unsigned long)getuid());
     return std::string(buf);
 }
 

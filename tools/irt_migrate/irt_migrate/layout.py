@@ -1,6 +1,6 @@
 """InduRTDB 共享内存段布局常量与底层字节工具。
 
-本模块不依赖 C 库，纯 Python 复刻 v1/v2 共享内存布局，供迁移工具
+本模块不依赖 C 库，纯 Python 复刻 v1/v2/v3 共享内存布局，供迁移工具
 （tools/irt_migrate）离线读写段。布局常量与 src/internal/irt_types.h、
 src/core/irt_shm.h 严格一致 —— 任何改动须同步。
 """
@@ -12,7 +12,9 @@ import zlib
 # ---- 通用常量 ----
 MAGIC = 0x1DBA1DBA
 SHM_VERSION_V1 = 1          # v3.3 及以前
-SHM_VERSION_V2 = 2          # v3.4 布局 v2
+SHM_VERSION_V2 = 2          # v3.4 布局 v2（历史；v3.9 起被 V3 取代）
+SHM_VERSION_V3 = 3          # v3.9 起：点位新增 partition 字段
+SHM_VERSION_CURRENT = SHM_VERSION_V3   # 当前库期望的段版本（迁移输出目标）
 
 HEADER_V1_SIZE = 64         # == v2.x InduRTDBHeader（旧）
 HEADER_V2_SIZE = 128        # 布局 v2
@@ -25,6 +27,7 @@ META_SIZE_PER_POINT = 32    # indurtdb_meta_t
 NAME_OFFSET = 45
 NAME_LEN = 64
 SOURCE_TS_OFFSET = 112      # source_timestamp_ns（8B）
+PARTITION_OFFSET = 120      # partition（u32，v3.9 新增；v1/v2 此处为 reserved，恒 0）
 
 # 索引槽特殊值（与 irt_index.h 一致）
 INDEX_EMPTY = 0xFFFFFFFF
@@ -93,15 +96,54 @@ def parse_v1_header(raw: bytes):
     if version != SHM_VERSION_V1:
         raise ValueError(
             f"source segment is not v1 (version={version}); "
-            f"本工具只迁移 v1 -> v2")
+            f"本工具只迁移 v1/v2 -> v3")
     if max_points == 0:
         raise ValueError("v1 header max_points == 0")
     return version, max_points, max_subscribers
 
 
+# ---- v2/v3 Header 解析（两种版本逐字节同构，仅 version 值不同）----
+# 与 src/internal/irt_types.h:irt_header_t 严格对应（前 80B；其后 reserved[48]）。
+HEADER_V2_FMT = "<IIIIQiQQIIIIIIIII"
+HEADER_V2_FIELD_NAMES = (
+    "magic", "version", "max_points", "max_subscribers",
+    "write_seq", "owner_pid", "writes", "timeouts",
+    "crc32", "flags", "reserved_scan",
+    "off_points", "off_index", "off_meta", "off_subs",
+    "index_count", "scan_skipped",
+)
+
+
+def parse_v2_header(raw: bytes, expected_version=None) -> dict:
+    """解析 128B 布局 v2/v3 Header，返回字段字典。
+
+    expected_version 非 None 时严格校验版本（v2 源段传 2，v3 目标段传 3）。
+    magic / 容量 / 版本不符一律抛 ValueError。
+    """
+    need = struct.calcsize(HEADER_V2_FMT)
+    if len(raw) < need:
+        raise ValueError(
+            f"v2/v3 header too short: {len(raw)} bytes (need >= {need})")
+    values = struct.unpack_from(HEADER_V2_FMT, raw, 0)
+    hdr = dict(zip(HEADER_V2_FIELD_NAMES, values))
+    if hdr["magic"] != MAGIC:
+        raise ValueError(
+            f"bad magic: {hdr['magic']:#x} (expect {MAGIC:#x})")
+    if expected_version is not None and hdr["version"] != expected_version:
+        raise ValueError(
+            f"segment version={hdr['version']} does not match expected "
+            f"version={expected_version}")
+    if hdr["max_points"] == 0:
+        raise ValueError("v2/v3 header max_points == 0")
+    return hdr
+
+
 # ---- v2 Header 构造 ----
 def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
-    """构造 128B v2 Header（含 CRC32）。
+    """构造 128B 当前版段 Header（含 CRC32）。
+
+    v3.9 起输出段版本 SHM_VERSION_CURRENT(=3)；布局结构（尺寸 / 偏移 /
+    CRC 区间）与 v3.4 的 v2 逐字节相同，仅 version 字段值不同。
 
     CRC 覆盖 [0:16]（magic/version/max_points/max_subscribers）
     与 [48:72]（flags/保留/off_points/off_index/off_meta/off_subs），
@@ -115,7 +157,7 @@ def build_v2_header(max_points: int, max_subscribers: int) -> bytes:
     om = off_meta_v2(max_points)
     os_ = off_subs_v2(max_points)
     # [0:16] magic/version/max_points/max_subscribers
-    struct.pack_into("<IIII", raw, 0, MAGIC, SHM_VERSION_V2,
+    struct.pack_into("<IIII", raw, 0, MAGIC, SHM_VERSION_CURRENT,
                      max_points, max_subscribers)
     # [48:56] flags=0, 保留(原拟 scan_skipped 位, 因在 CRC 范围[48:72]内改为保留)
     struct.pack_into("<II", raw, 48, 0, 0)
@@ -139,11 +181,20 @@ def read_point_name(points: bytes, point_id: int) -> bytes:
     return chunk[:nul]
 
 
-def name_eq(points: bytes, point_id: int, name: bytes) -> bool:
+def read_point_partition(points: bytes, point_id: int) -> int:
+    """读取点位的归属分区（v3 新增；v1/v2 源段此处恒 0 = 默认分区）。"""
+    base = point_id * POINT_SIZE + PARTITION_OFFSET
+    return struct.unpack_from("<I", points, base)[0]
+
+
+def name_eq(points: bytes, point_id: int, name: bytes, partition: int = 0) -> bool:
+    """索引键相等判定：分区与名字须同时匹配（复刻 irt_index_slot_matches）。"""
+    if read_point_partition(points, point_id) != partition:
+        return False
     return read_point_name(points, point_id) == name
 
 
-# ---- FNV-1a 32 哈希（复刻 irt_index.c:irt_hash_fnv1a32）----
+# ---- FNV-1a 32 哈希（复刻 irt_index.c:irt_hash_fnv1a32；分区 0 的单名哈希）----
 def fnv1a32(name: bytes) -> int:
     h = 0x811C9DC5
     for b in name:
@@ -151,6 +202,32 @@ def fnv1a32(name: bytes) -> int:
             break
         h ^= b
         h = (h * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+# ---- v3.9 复合键哈希（复刻 irt_index.c:irt_index_compose_hash）----
+def compose_hash(partition: int, name: bytes) -> int:
+    """FNV-1a32(partition_le32 ‖ name) + 2 步尾混。
+
+    尾混不可省：前置 4 个常量零字节在 partition==0 时等价于更换 FNV 的
+    offset basis（h -> h*prime^4），实测使负载 0.5 时平均探测从 0.246
+    劣化为 0.660（最长 7 -> 17）；尾混后回到 0.461/8，与理想随机哈希
+    基线（0.465/9）等效。与 C 实现必须逐字节一致，否则迁移后
+    find_by_name 会整体查不到。
+    """
+    h = 0x811C9DC5
+    for i in range(4):
+        h ^= (partition >> (8 * i)) & 0xFF
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    for b in name:
+        if b == 0:
+            break
+        h ^= b
+        h = (h * 0x01000193) & 0xFFFFFFFF
+    h ^= h >> 16
+    h = (h * 0x01000193) & 0xFFFFFFFF
+    h ^= h >> 13
+    h = (h * 0x01000193) & 0xFFFFFFFF
     return h
 
 
@@ -173,7 +250,8 @@ def build_index(points: bytes, max_points: int, capacity: int):
         name = read_point_name(points, pid)
         if not name:
             continue
-        h = fnv1a32(name)
+        part = read_point_partition(points, pid)
+        h = compose_hash(part, name)
         home = h & mask
         tomb = capacity
         placed = False
@@ -190,7 +268,7 @@ def build_index(points: bytes, max_points: int, capacity: int):
                 if tomb == capacity:
                     tomb = i
                 continue
-            if sh == h and name_eq(points, spid, name):
+            if sh == h and name_eq(points, spid, name, part):
                 # 同名重注册：更新 id，不增计数（与 C 一致）
                 struct.pack_into("<II", slots, i * INDEX_SLOT_SIZE, h, pid)
                 updated = True
@@ -206,10 +284,10 @@ def build_index(points: bytes, max_points: int, capacity: int):
 
 # ---- 索引探测（供校验：按名定位 id）----
 def index_probe(slots: bytes, capacity: int, points: bytes,
-                name: bytes):
+                name: bytes, partition: int = 0):
     """复刻 irt_index_probe。命中返回 point_id，否则 None。"""
     mask = capacity - 1
-    h = fnv1a32(name)
+    h = compose_hash(partition, name)
     home = h & mask
     for d in range(capacity):
         i = (home + d) & mask
@@ -218,6 +296,6 @@ def index_probe(slots: bytes, capacity: int, points: bytes,
             return None
         if spid == INDEX_TOMBSTONE:
             continue
-        if sh == h and name_eq(points, spid, name):
+        if sh == h and name_eq(points, spid, name, partition):
             return spid
     return None

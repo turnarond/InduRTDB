@@ -60,6 +60,39 @@ bool create_v1_segment(const char* instance, uint32_t max_points, uint32_t max_s
     return true;
 }
 
+/* 构造一个"自洽的 v2 段"（v3.4 布局）：magic 正确、version=2、区段偏移合法、
+ * CRC 有效。用于证明拒绝来自**版本协商**，而非 magic/CRC/容量任一失配。 */
+bool create_v2_segment(const char* instance, uint32_t max_points, uint32_t max_subs)
+{
+    std::string name = std::string(IRT_SHM_PREFIX) + instance;
+    size_t size = irt_shm_total_size(max_points, max_subs);
+
+    shm_unlink(name.c_str());
+    int fd = shm_open(name.c_str(), O_CREAT | O_RDWR, 0600);
+    if (fd < 0) return false;
+    if (ftruncate(fd, (off_t)size) != 0) { close(fd); return false; }
+
+    void* base = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (base == MAP_FAILED) { close(fd); return false; }
+
+    irt_header_t* h = (irt_header_t*)base;
+    memset(h, 0, sizeof(*h));
+    h->magic           = IRT_MAGIC;
+    h->version         = 2u;            /* v3.4 布局版本（v3.9 已升为 3） */
+    h->max_points      = max_points;
+    h->max_subscribers = max_subs;
+    h->owner_pid       = (int32_t)getpid();
+    h->off_points      = irt_layout_off_points();
+    h->off_index       = irt_layout_off_index(max_points);
+    h->off_meta        = irt_layout_off_meta(max_points);
+    h->off_subs        = irt_layout_off_subs(max_points);
+    if (irt_header_seal(h) != 0) { munmap(base, size); close(fd); return false; }
+
+    munmap(base, size);
+    close(fd);
+    return true;
+}
+
 } // namespace
 
 /* 1. Header v2 为 128 字节 */
@@ -130,4 +163,21 @@ TEST(LayoutV2, RejectsV1Segment)
     if (rc == 0) irt_shm_shutdown(&s);
 
     shm_unlink((std::string(IRT_SHM_PREFIX) + "layout_v2_v1seg").c_str());
+}
+
+/* 6. 挂载 v2（v3.4 布局）旧段被明确拒绝 —— v3.9 段版本 2→3。
+ * 造一个 magic/CRC/容量全部合法、仅 version=2 的自洽段，以证明拒绝来自
+ * **版本协商**，而非其他校验项。 */
+TEST(LayoutV2, RejectsV2Segment)
+{
+    const char* id = "layout_v2_v2seg";
+    ASSERT_TRUE(create_v2_segment(id, 16, 2));
+
+    irt_shm_t s;
+    int rc = irt_shm_init(&s, id, 16, 2);
+    EXPECT_EQ(rc, IRT_SHM_ERR_VERSION)
+        << "自洽的 v2 段（magic/CRC/容量均合法，仅 version=2）必须被 v3.9 拒绝挂载";
+    if (rc == 0) irt_shm_shutdown(&s);
+
+    shm_unlink((std::string(IRT_SHM_PREFIX) + id).c_str());
 }

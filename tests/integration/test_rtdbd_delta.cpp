@@ -167,7 +167,7 @@ bool raw_exchange(int fd, uint16_t op, const void* payload, uint32_t plen,
 std::string policy_allow()
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%lu:0:63\n", (unsigned long)getuid());
+    snprintf(buf, sizeof(buf), "%lu:*:0:63\n", (unsigned long)getuid());
     return std::string(buf);
 }
 

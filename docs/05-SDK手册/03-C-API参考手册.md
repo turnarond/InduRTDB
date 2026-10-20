@@ -1,6 +1,6 @@
 # InduRTDB C API 参考手册
 
-**版本**: 3.8.0 | **更新日期**: 2026-10-08 | **变更**: 计数对齐 v3.8 实际头文件。公开 API 共 **112 个**：v1 全局函数 **62** + v2 句柄函数 **50**。
+**版本**: 3.9.0 | **更新日期**: 2026-10-20 | **变更**: v3.9 T4 新增分区重载族与 `set_partition`（v2 +5）；同步计数对齐头文件。公开 API 共 **117 个**：v1 全局函数 **62** + v2 句柄函数 **55**。
 
 > 此前本段长期记为「90 个 = 47 + 43」，而 v3.7 主题 A/B 已新增多个 API。该计数是 `scripts/check_api_count.py`（CI 第一道门禁）的基准，两者失配会让流水线在 10 秒内直接失败。改动 API 时须同步三处：本文首段 · 该脚本 `EXPECTED_*` · 其注释中的版本标注。
 
@@ -16,7 +16,7 @@ v3.4 起支持**去单例化**：同一进程可同时持有多个实例，各�
 - `indurtdb_t`：不透明句柄（定义于库实现）。
 - `indurtdb_h_open(&h, instance_id, &cfg)` / `indurtdb_h_close(h)`：打开 / 关闭实例。
 - v2 函数一律加 `_h_` 前缀（C 无重载），入参首位为 `indurtdb_t* h`，返回**语义化错误码**（见下）。
-- v1 的 47 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
+- v1 的 62 个全局函数**全部保留**，行为不变，等于默认句柄 `g_default` 的薄封装 —— 既有调用方**零改动**即可升级到 v3.4。v1 在 v3.5 起标注 `deprecated` 并最终移除。
 
 ### 多实例示例
 
@@ -47,7 +47,7 @@ indurtdb_h_close(b);
 
 > v1 接口向后兼容：只判 `< 0` 的旧代码行为完全不变；`ERR_NOT_INIT` 对 v1 被映射回 `-1`。
 
-### v2 句柄函数完整清单（共 43 个）
+### v2 句柄函数完整清单（共 55 个）
 
 所有 `indurtdb_h_*` 与对应 v1 全局函数**签名同构**（仅入参首位多 `indurtdb_t* h`），返回**语义化错误码**（见上方错误码表）。下表为全量收录，与 `indurtdb.h` 公开 API 一一对应。
 
@@ -71,8 +71,19 @@ indurtdb_h_close(b);
 | `indurtdb_h_check_timeouts` | `indurtdb_check_timeouts` | 校验 |
 | `indurtdb_h_get_write_count` / `h_get_timeout_count` / `h_get_scan_skipped` | `indurtdb_get_write_count` / `get_timeout_count` / `get_scan_skipped` | 统计 |
 | `indurtdb_h_validate_id` | `indurtdb_validate_id` | 校验 |
+| `indurtdb_h_find_by_name_in` / `h_create_point_in` / `h_rename_point_in` / `h_delete_point_in` | `—`（v3.9 新增，无 v1 对应） | 索引/CRUD·分区限定（v3.9） |
+| `indurtdb_h_set_partition` | `—`（v3.9 新增，无 v1 对应） | 分区默认值（v3.9） |
 
 > v2 句柄函数同样支持 `indurtdb_cfg_t { max_points, max_subscribers }`（`indurtdb_h_open` 第三参）。多实例下 `g_default` 与 `h_open` 创建的句柄互不干扰。
+
+#### 分区（partition）语义（v3.9 新增）
+
+- **分区限定的是名字**：点位名在 `(partition, name)` 上唯一，同名可跨分区共存；`point_id` 仍**全局唯一且稠密**，分区不改变 id 空间。
+- **默认分区为 0**：`indurtdb_h_find_by_name` / `h_create_point` / `h_rename_point` / `h_delete_point` 等旧签名函数按**句柄默认分区**操作（初值 0，与 v3.8 逐位等价）。
+- **`indurtdb_h_set_partition(h, n)`** 改变本句柄后续非显式调用的默认分区；显式形参（`_in` 族）始终优先。复位为 0 即调用 `set_partition(h, 0)`。
+- **分区创建后固定、不可移动**：`h_rename_point_in` / `h_delete_point_in` 传入与点位不同的分区返回 `INDURTDB_ERR_NOT_FOUND`，不改动任何状态；跨分区迁移只能 delete + create。
+- **无分区表**：任意 `uint32_t` 分区值均合法，不校验存在性。
+- **分区不是安全边界**：它只解决命名冲突/组织问题，管控写鉴权仍由 `rtdbd` 的本机 UID 策略承担 —— 请勿用分区做访问隔离。
 
 ---
 
@@ -764,6 +775,39 @@ const char* indurtdb_get_last_error(void);
 - 同点位合并去重（只保留最新值）；队列满触发告警回调，**绝不静默丢弃**；
 - 重放携带**原始** `source_ts_ns`，采集时刻不失真；
 - `send()` 使用 `MSG_NOSIGNAL`：`rtdbd` 崩溃只返回错误码，**不会以 `SIGPIPE` 终止调用进程**。
+
+### v3.9 T6：分区支持
+
+`OP_SELECT`（连接级默认分区，Redis SELECT 语义）与按分区查找/列举：
+
+| 函数 | 说明 |
+|---|---|
+| `irtcli_select(c, partition)` | 设定本连接默认分区（发 `OP_SELECT`）。成功才更新 `c->partition`，失败**不更新**（fail-closed）。返回 `status_to_cli(status)` |
+| `irtcli_find_by_name(c, name, out_id)` | 按名查找。**v3.9 起按本连接当前默认分区**（`c->partition`，初值 0）分辨，`(partition, name)` 复合键 |
+| `irtcli_find_by_name_in(c, partition, name, out_id)` | 在**指定分区**内按名查找，不依赖连接默认分区 |
+| `irtcli_list_in(c, partition, offset, max, out, cap, out_count)` | 列出指定分区的点位；响应为变长数组，`n > cap` 返回 `ERR_ARG`（不截断、不越界） |
+
+点位信息结构（与 `rtdbd_point_info_t` 逐字段布局一致，**76B**；公共头仅依赖 `indurtdb.h`，不泄漏协议头）：
+
+```c
+typedef struct {
+    uint32_t point_id;
+    uint8_t  type;
+    uint8_t  access;
+    uint8_t  reserved[2];
+    char     name[64];
+    uint32_t partition;
+} irtcli_point_info_t;
+```
+
+**要点**：默认分区为 0 时，`irtcli_find_by_name` 的线格式与旧版**逐字节一致**（不影响既有集成）；`--partition` / `select` 二者语义相同，均落到连接级 `OP_SELECT`。
+命令行前端 `irtcli`（目标 `irtcli_cli`，输出名 `irtcli`）提供
+
+```
+irtcli [--sock PATH] [--partition N] [--help] ( select N | find NAME | list ) [...]
+```
+
+命令在同一连接上从左到右顺序执行；退出码映射 `OK=0 / ARG=1 / FULL=2 / IO=3 / DENIED=4 / PROTO=5 / NOT_FOUND=6`。
 
 ## 完整示例
 

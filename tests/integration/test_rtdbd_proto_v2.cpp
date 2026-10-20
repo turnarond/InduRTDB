@@ -141,7 +141,7 @@ const char* kConfig =
 std::string policy_for_uid(unsigned long uid)
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%lu:0:63\n", uid);
+    snprintf(buf, sizeof(buf), "%lu:*:0:63\n", uid);
     return std::string(buf);
 }
 

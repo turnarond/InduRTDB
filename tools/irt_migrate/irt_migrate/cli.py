@@ -1,8 +1,8 @@
 """irt_migrate 命令行入口。
 
 用法:
-  python -m irt_migrate migrate  --src <v1_id> --dst <v2_id> [--source-ts-mode zero|keep] [--force]
-  python -m irt_migrate validate --src <v1_id> --dst <v2_id> [--sample N]
+  python -m irt_migrate migrate  --src <v1/v2_id> --dst <v3_id> [--source-ts-mode zero|keep] [--force]
+  python -m irt_migrate validate --src <v1/v2_id> --dst <v3_id> [--sample N]
   python -m irt_migrate info     <id>
 """
 from __future__ import annotations
@@ -21,6 +21,9 @@ def _cmd_migrate(args) -> int:
         stat = M.migrate(args.src, args.dst,
                          source_ts_mode=args.source_ts_mode, force=args.force)
     except FileExistsError as e:
+        print(f"错误: {e}", file=sys.stderr)
+        return 2
+    except ValueError as e:
         print(f"错误: {e}", file=sys.stderr)
         return 2
     print(json.dumps({"op": "migrate", **stat}, ensure_ascii=False, indent=2))
@@ -56,33 +59,52 @@ def _cmd_info(args) -> int:
         print(f"段不存在: {path}", file=sys.stderr)
         return 1
     try:
-        v1 = M.read_v1_segment(args.id)
-        kind = "v1"
-        info = {
-            "id": args.id,
-            "version": v1["version"],
-            "max_points": v1["max_points"],
-            "max_subscribers": v1["max_subscribers"],
-            "total_bytes": L.total_size_v1(v1["max_points"],
-                                          v1["max_subscribers"]),
-        }
-    except ValueError:
-        try:
-            v2 = V.read_v2_segment(args.id)
+        version = M.peek_segment_version(args.id)
+        if version == L.SHM_VERSION_V1:
+            seg = M.read_v1_segment(args.id)
+            kind = "v1"
+            info = {
+                "id": args.id,
+                "version": seg["version"],
+                "max_points": seg["max_points"],
+                "max_subscribers": seg["max_subscribers"],
+                "total_bytes": L.total_size_v1(seg["max_points"],
+                                               seg["max_subscribers"]),
+            }
+        elif version == L.SHM_VERSION_V2:
+            seg = M.read_v2_source_segment(args.id)
             kind = "v2"
             info = {
                 "id": args.id,
-                "version": v2["version"],
-                "max_points": v2["max_points"],
-                "max_subscribers": v2["max_subscribers"],
-                "index_capacity": L.layout_buckets(v2["max_points"]),
-                "index_count": v2["index_count"],
-                "total_bytes": v2["total"],
-                "crc32": f"{v2['crc32']:#010x}",
+                "version": seg["version"],
+                "max_points": seg["max_points"],
+                "max_subscribers": seg["max_subscribers"],
+                "index_capacity": L.layout_buckets(seg["max_points"]),
+                "index_count": seg["index_count"],
+                "meta_bytes": L.layout_meta_size(seg["max_points"]),
+                "total_bytes": seg["total"],
+                "crc32": f"{seg['crc32']:#010x}",
             }
-        except ValueError as e:
-            print(f"无法识别的段: {e}", file=sys.stderr)
+        elif version == L.SHM_VERSION_V3:
+            seg = V.read_v2_segment(args.id)
+            kind = "v3"
+            info = {
+                "id": args.id,
+                "version": seg["version"],
+                "max_points": seg["max_points"],
+                "max_subscribers": seg["max_subscribers"],
+                "index_capacity": L.layout_buckets(seg["max_points"]),
+                "index_count": seg["index_count"],
+                "meta_bytes": L.layout_meta_size(seg["max_points"]),
+                "total_bytes": seg["total"],
+                "crc32": f"{seg['crc32']:#010x}",
+            }
+        else:
+            print(f"无法识别的段: 未知版本 {version}", file=sys.stderr)
             return 1
+    except ValueError as e:
+        print(f"无法识别的段: {e}", file=sys.stderr)
+        return 1
     info["kind"] = kind
     print(json.dumps(info, ensure_ascii=False, indent=2))
     return 0
@@ -91,12 +113,12 @@ def _cmd_info(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="irt_migrate",
-        description="InduRTDB v1 -> v2 共享内存段离线迁移工具")
+        description="InduRTDB v1/v2 -> v3 共享内存段离线迁移工具")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    m = sub.add_parser("migrate", help="迁移 v1 段到 v2 段")
-    m.add_argument("--src", required=True, help="源 v1 实例 id")
-    m.add_argument("--dst", required=True, help="目标 v2 实例 id")
+    m = sub.add_parser("migrate", help="迁移 v1/v2 段到 v3 段")
+    m.add_argument("--src", required=True, help="源 v1/v2 实例 id")
+    m.add_argument("--dst", required=True, help="目标 v3 实例 id")
     m.add_argument("--source-ts-mode", choices=["zero", "keep"], default="zero",
                    help="source_timestamp_ns 处理：zero=置0(默认)，keep=保留")
     m.add_argument("--force", action="store_true",
