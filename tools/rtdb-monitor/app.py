@@ -68,7 +68,9 @@ def _broadcast(pid: int, info: dict) -> None:
         "pointId": name_by_id.get(pid, str(pid)),
         "id": pid,
         "value": str(info["value"]),
-        "quality": str(info.get("quality", 0)),
+        # NOTIFY 帧没有质量字段；缺失时下发 null，由前端保留最近一次 REST 读值，
+        # 而不是伪造 Good（0）把 Bad/Timeout 覆盖掉。
+        "quality": str(info["quality"]) if "quality" in info else None,
         "ts": info.get("ts", 0),
         "sourceTs": info.get("sourceTs", 0),
         "type": info.get("type"),
@@ -227,7 +229,7 @@ def api_create(payload: dict, token: str | None = Query(default=None),
         return _err({"error": "id and name are required"}, 400)
     # 面向用户的 ID 从 1 开始分配；0 仍是底层合法索引（配置/历史点位），
     # 但不在监控台中作为「新建点位」的入口。
-    if not isinstance(pid, int) or pid < 1:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid < 1:
         return _err({"error": "id 必须为 ≥ 1 的整数（0 保留给历史/配置点位）"}, 400)
     try:
         api_client.create_point(pid, name, payload.get("type", "int32"),

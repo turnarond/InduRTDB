@@ -318,6 +318,9 @@ class NotifyListener:
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._subscribed: set[int] = set()
+        # subscribe() 可能同时被事件循环（WS 端点）与线程池（REST CRUD）调用；
+        # header/body 必须作为一整帧原子发送，否则会交错破坏协议帧。
+        self._send_lock = threading.Lock()
 
     def start(self) -> None:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -328,12 +331,21 @@ class NotifyListener:
         self._thread.start()
 
     def subscribe(self, point_ids: list[int]) -> None:
-        if not self._sock:
+        sock = self._sock
+        if not sock:
             raise RtdbError("listener not started")
-        for pid in point_ids:
-            self._sock.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_SUBSCRIBE, 4))
-            self._sock.sendall(struct.Struct("<I").pack(pid))
-            self._subscribed.add(pid)
+        with self._send_lock:
+            for pid in point_ids:
+                pid = int(pid)
+                # 去重：前端每次收到 list 都会订阅当前清单，CRUD 后服务端也会
+                # 重新订阅；重复发送会耗尽 rtdbd 的连接订阅上限（RTDBD_SUB_MAX）。
+                if pid in self._subscribed:
+                    continue
+                sock.sendall(
+                    REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_SUBSCRIBE, 4)
+                    + struct.pack("<I", pid)
+                )
+                self._subscribed.add(pid)
 
     def _loop(self) -> None:
         assert self._sock is not None
@@ -366,10 +378,19 @@ class NotifyListener:
             # 其余（订阅确认等响应）忽略
 
     def _recv_exact(self, n: int) -> bytes:
-        assert self._sock is not None
+        sock = self._sock
+        if sock is None:
+            raise RtdbError("listener stopped")
         buf = bytearray()
         while len(buf) < n:
-            chunk = self._sock.recv(n - len(buf))
+            try:
+                chunk = sock.recv(n - len(buf))
+            except socket.timeout:
+                # 只有「一个字节都没读到」才是帧边界空闲，可安全重试；
+                # 帧内超时已读走的字节无法放回内核缓冲，继续读会永久错帧。
+                if not buf:
+                    raise
+                raise RtdbError("timeout mid-frame")
             if not chunk:
                 raise RtdbError("connection closed")
             buf += chunk

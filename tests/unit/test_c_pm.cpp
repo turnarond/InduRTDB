@@ -35,6 +35,13 @@ TEST_F(CPmTest, WriteAndReadBool) {
     EXPECT_EQ(p.type, INDURTDB_TYPE_BOOL);
     EXPECT_EQ(p.quality, INDURTDB_QUALITY_GOOD);
     EXPECT_GT(p.timestamp_ns, 0u);
+    /* v3.9.1：入库时刻必须是墙钟 epoch，而非开机以来的单调时钟。
+     * 若源头退回 irt_time_now_ns()，与 REALTIME 的差值会达到数年。 */
+    uint64_t wall = irt_time_realtime_ns();
+    uint64_t diff = p.timestamp_ns > wall ? p.timestamp_ns - wall : wall - p.timestamp_ns;
+    EXPECT_LT(diff, 86400ULL * 1000000000ULL)
+        << "point timestamp is not wall clock: ts=" << p.timestamp_ns
+        << " wall=" << wall;
 }
 
 TEST_F(CPmTest, WriteAndReadInt32) {
