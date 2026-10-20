@@ -18,7 +18,11 @@ extern "C" {
 #endif
 
 /* ---- 时间 ---- */
+/* 单调时钟：用于超时/心跳等时间差比较，墙钟跳变不影响。 */
 uint64_t irt_time_now_ns(void);
+/* 墙钟（CLOCK_REALTIME，Unix epoch）：用于对外暴露的入库时刻。
+ * 获取失败时退化为 irt_time_now_ns()。 */
+uint64_t irt_time_realtime_ns(void);
 void     irt_time_sleep_ns(uint64_t duration_ns);
 
 /* ---- 共享内存 ---- */

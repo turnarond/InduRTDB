@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
+#include <ctime>
 
 extern "C" {
 #include "osal/irt_osal.h"
@@ -17,6 +18,17 @@ TEST(COsalTime, MonotonicNowNs) {
     irt_time_sleep_ns(1000000ULL);      /* 1 ms */
     uint64_t t2 = irt_time_now_ns();
     EXPECT_GT(t2, t1);
+}
+
+/* v3.9.1：对外暴露的入库时刻必须是墙钟（Unix epoch），不能是开机以来的单调时钟 */
+TEST(COsalTime, RealtimeNsIsWallClock) {
+    uint64_t rt = irt_time_realtime_ns();
+    ASSERT_GT(rt, 0u);
+    uint64_t wall = (uint64_t)std::time(nullptr) * 1000000000ULL;
+    uint64_t diff = rt > wall ? rt - wall : wall - rt;
+    /* 允许 NTP 微调与秒级截断误差；单调时钟会相差数天到数月，必然超出此窗口 */
+    EXPECT_LT(diff, 86400ULL * 1000000000ULL)
+        << "realtime_ns=" << rt << " wall=" << wall;
 }
 
 TEST(COsalShm, MapOwnerAndAttach) {

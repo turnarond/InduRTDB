@@ -124,6 +124,19 @@ def main() -> None:
                 assert update["value"] == "123", update                   # value 字符串化对齐
                 assert update["quality"] == "0", update                  # quality 字符串化对齐
 
+                # v3.9.1 回归：监听线程必须熬过 socket 空闲超时（原实现 2s 后静默退出，
+                # 导致「连接正常但永远收不到 update」）。这里静默 >2s 再写。
+                time.sleep(3.0)
+                client.post("/api/points/10/set", json={"value": 124})
+                late = None
+                for _ in range(100):
+                    m = ws.receive_json()
+                    if m.get("op") == "update" and m.get("value") == "124":
+                        late = m
+                        break
+                assert late is not None, "no update after >2s idle (listener died?)"
+                assert late["id"] == 10, late
+
             # ---- v3.6 点位 CRUD（REST）----
             r = client.post("/api/points", json={
                 "id": 20, "name": "Test.New_Point", "type": "int32", "access": 3})
