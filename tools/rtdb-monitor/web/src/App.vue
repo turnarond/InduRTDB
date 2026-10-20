@@ -271,6 +271,9 @@ async function loadValues(list) {
 function onMessage(msg) {
   if (msg.op === 'list') {
     points.value = msg.points || []
+    // v3.9.1：连接（含自动重连）后显式订阅当前清单，避免服务端仅按启动时
+    // 点位集合订阅造成新增点位在重连后收不到 update。
+    if (socket) socket.subscribe(points.value.map((p) => p.id))
     loadValues()
   } else if (msg.op === 'update') {
     const id = msg.id
