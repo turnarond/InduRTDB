@@ -261,7 +261,11 @@ async function loadValues(list) {
     arr.map(async (p) => {
       try {
         const d = await api.getPoint(p.id)
-        values[p.id] = { value: d.value, quality: Number(d.quality), ts: d.ts }
+        values[p.id] = {
+          value: d.value,
+          quality: d.quality === null || d.quality === undefined ? null : Number(d.quality),
+          ts: d.ts
+        }
       } catch (e) {
         /* ignore */
       }
@@ -278,7 +282,11 @@ function onMessage(msg) {
     loadValues()
   } else if (msg.op === 'update') {
     const id = msg.id
-    values[id] = { value: msg.value, quality: Number(msg.quality), ts: msg.ts }
+    // NOTIFY 帧不携带质量，服务端会下发 quality=null；此时保留最近一次
+    // REST 读到的质量，避免每次实时更新都把 Bad/Timeout 覆盖成 Good。
+    const prevQ = values[id] ? values[id].quality : null
+    const q = msg.quality === null || msg.quality === undefined ? prevQ : Number(msg.quality)
+    values[id] = { value: msg.value, quality: q, ts: msg.ts }
     if (selected.value && selected.value.id === id && selected.value.type !== 3) {
       history.value.push({ ts: Date.now(), value: Number(msg.value) })
       if (history.value.length > 300) history.value.shift()
@@ -299,7 +307,8 @@ async function onSet({ id, value }) {
   try {
     await api.setPoint(id, value)
   } catch (e) {
-    // 错误由后续的 WS update 失败静默；简单提示
+    // 错误状态码恢复 4xx 后必须显式提示，不能静默当成功。
+    ElMessage.error(e?.message || '写入失败')
   }
 }
 

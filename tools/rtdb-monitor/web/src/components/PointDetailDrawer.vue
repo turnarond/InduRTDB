@@ -100,7 +100,9 @@ function fmt(v) {
   return v === undefined || v === null ? '—' : v
 }
 function formatTs(ts) {
-  const d = new Date(Number(ts) * (ts < 1e12 ? 1000 : 1))
-  return d.toLocaleString()
+  // 协议里的 ts 是 Unix epoch 纳秒（v3.9.1 起点位入库时刻为墙钟）。
+  const ns = Number(ts)
+  if (!Number.isFinite(ns) || ns <= 0) return '—'
+  return new Date(ns / 1e6).toLocaleString()
 }
 </script>

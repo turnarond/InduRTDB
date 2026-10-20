@@ -6,11 +6,13 @@
 用法：python3 tests/test_e2e.py
 """
 import os
+import queue
 import sys
 import signal
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -43,6 +45,27 @@ def ensure_built() -> None:
                     "-DCMAKE_BUILD_TYPE", "Release"], check=True)
     subprocess.run(["cmake", "--build", os.path.join(REPO, "build"),
                     "-j", str(os.cpu_count() or 1)], check=True)
+
+
+def ws_recv_json(ws, timeout: float = 5.0):
+    """带超时的 WS 读取：TestClient 的 receive_json 会永久阻塞，
+    回归失败时必须让测试红掉，而不是把 CI 挂到 job 超时。"""
+    q: queue.Queue = queue.Queue()
+
+    def _rx() -> None:
+        try:
+            q.put(("ok", ws.receive_json()))
+        except Exception as e:  # noqa: BLE001
+            q.put(("err", e))
+
+    threading.Thread(target=_rx, daemon=True).start()
+    try:
+        kind, val = q.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(f"no WS message within {timeout}s")
+    if kind == "err":
+        raise val
+    return val
 
 
 def main() -> None:
@@ -122,15 +145,15 @@ def main() -> None:
                 assert update["id"] == 10, update
                 assert update["pointId"] == "AHU_01.Supply_Temp", update  # 点名对齐 HmiPointValueDto
                 assert update["value"] == "123", update                   # value 字符串化对齐
-                assert update["quality"] == "0", update                  # quality 字符串化对齐
+                assert update["quality"] is None, update                 # NOTIFY 无质量字段 → null
 
                 # v3.9.1 回归：监听线程必须熬过 socket 空闲超时（原实现 2s 后静默退出，
                 # 导致「连接正常但永远收不到 update」）。这里静默 >2s 再写。
                 time.sleep(3.0)
                 client.post("/api/points/10/set", json={"value": 124})
                 late = None
-                for _ in range(100):
-                    m = ws.receive_json()
+                for _ in range(20):
+                    m = ws_recv_json(ws, 5.0)
                     if m.get("op") == "update" and m.get("value") == "124":
                         late = m
                         break
