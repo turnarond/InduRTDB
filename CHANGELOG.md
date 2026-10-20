@@ -6,8 +6,9 @@ All notable changes to InduRTDB.
 
 ## [3.9.1] — 2026-10-20「监控台实时链路与时间戳修复」
 
-Web 管理台（`tools/rtdb-monitor`）实测暴露的三个缺陷修复；无协议、段格式与 API 变更，
-与 3.9.0 二进制/共享内存完全兼容。
+Web 管理台（`tools/rtdb-monitor`）实测暴露的缺陷修复；无协议、段格式与 API 变更。
+结构与 ABI 和 3.9.0 兼容；注意 `timestamp_ns` 的时钟源语义由单调时钟改为墙钟 epoch，
+3.9.0 遗留点位在首次写入前仍是旧时钟值。
 
 ### Fixed
 - **实时推送 2 秒后静默失效**：`NotifyListener` 的 socket 为等待 NOTIFY 设了 2s 超时，
@@ -20,9 +21,11 @@ Web 管理台（`tools/rtdb-monitor`）实测暴露的三个缺陷修复；无�
 - **点位时间戳被渲染成 40432 年**：`indurtdb_point_t.timestamp_ns` 原取 `CLOCK_MONOTONIC_RAW`，
   对外却按 Unix epoch 毫秒解释。新增 `irt_time_realtime_ns()`（POSIX / SylixOS 两实现），
   点位入库时刻改用墙钟；`check_timeouts` 同步改用同一时钟，心跳/订阅超时仍用单调时钟不受影响。
+  前端 `formatTs` 同步按「纳秒 → 毫秒」转换，详情抽屉不再显示 40432 年或 `Invalid Date`。
 - **质量列为空**：WS 推送按 HMI DTO 把 `quality` 字符串化（`"0"`），前端用 `"0" === 0` 严格比较恒为
   假，且只识别 Good 一种状态。现统一归一化为数字，并按 `INDURTDB_QUALITY_*` 渲染
-  Good / Bad / Timeout / Uncertain / Comm Failure 等标签及量程位（`· Lo` / `· Hi`）。
+  Good / Bad / Timeout / Uncertain / Comm Failure 等标签及量程位（`· Lo` / `· Hi` / `· Const`）。
+  NOTIFY 帧不携带质量，实时更新会保留最近一次 REST 读取的质量，不再伪造 Good。
 - **错误响应一律返回 200**：新版 FastAPI 不再把 `(body, status)` 元组解释为状态码，而是序列化成 `200` + JSON 数组，导致创建/写入/读取失败的调用在前端看起来「成功」。现统一改为 `JSONResponse(status_code=...)`，恢复 400/401/404 语义。
 - **新建点位 ID 从 0 开始**：新建对话框默认值与最小值改为 **1**（自动取下一个空闲 ID），
   REST `POST /api/points` 对 `id < 1` 返回 400；ID 0 仍作为底层合法索引保留给配置/历史点位。
