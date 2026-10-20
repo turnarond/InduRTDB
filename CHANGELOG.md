@@ -20,6 +20,12 @@ Web 管理台（`tools/rtdb-monitor`）实测暴露的三个缺陷修复；无�
 - **点位时间戳被渲染成 40432 年**：`indurtdb_point_t.timestamp_ns` 原取 `CLOCK_MONOTONIC_RAW`，
   对外却按 Unix epoch 毫秒解释。新增 `irt_time_realtime_ns()`（POSIX / SylixOS 两实现），
   点位入库时刻改用墙钟；`check_timeouts` 同步改用同一时钟，心跳/订阅超时仍用单调时钟不受影响。
+- **质量列为空**：WS 推送按 HMI DTO 把 `quality` 字符串化（`"0"`），前端用 `"0" === 0` 严格比较恒为
+  假，且只识别 Good 一种状态。现统一归一化为数字，并按 `INDURTDB_QUALITY_*` 渲染
+  Good / Bad / Timeout / Uncertain / Comm Failure 等标签及量程位（`· Lo` / `· Hi`）。
+- **错误响应一律返回 200**：新版 FastAPI 不再把 `(body, status)` 元组解释为状态码，而是序列化成 `200` + JSON 数组，导致创建/写入/读取失败的调用在前端看起来「成功」。现统一改为 `JSONResponse(status_code=...)`，恢复 400/401/404 语义。
+- **新建点位 ID 从 0 开始**：新建对话框默认值与最小值改为 **1**（自动取下一个空闲 ID），
+  REST `POST /api/points` 对 `id < 1` 返回 400；ID 0 仍作为底层合法索引保留给配置/历史点位。
 
 ### Added
 - 回归用例：监控台 E2E 增加「静默 >2s 后仍收到 update」；C 侧增加 `msg` 尾零断言与
