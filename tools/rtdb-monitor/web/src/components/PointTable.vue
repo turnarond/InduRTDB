@@ -51,10 +51,10 @@
           <span class="mono">{{ liveOf(row.id) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="质量" width="100">
+      <el-table-column label="质量" width="130">
         <template #default="{ row }">
-          <el-tag size="small" :type="qualityOf(row.id) === 0 ? 'success' : 'info'">
-            {{ qualityOf(row.id) === 0 ? 'Good' : '—' }}
+          <el-tag size="small" :type="qualityTagType(values[row.id]?.quality)">
+            {{ qualityLabel(values[row.id]?.quality) }}
           </el-tag>
         </template>
       </el-table-column>
@@ -82,6 +82,7 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
+import { qualityLabel, qualityTagType } from '../quality.js'
 
 const props = defineProps({
   points: { type: Array, default: () => [] },
@@ -113,10 +114,6 @@ const paged = computed(() => {
 function liveOf(id) {
   const v = props.values[id]
   return v ? String(v.value) : '—'
-}
-function qualityOf(id) {
-  const v = props.values[id]
-  return v ? v.quality : null
 }
 </script>
 

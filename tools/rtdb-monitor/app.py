@@ -26,6 +26,7 @@ import json
 import os
 
 from fastapi import FastAPI, Query, Header, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from rtdb_client import RtdbClient, NotifyListener
@@ -141,7 +142,7 @@ def api_partitions(token: str | None = Query(default=None),
     try:
         pts = api_client.list_points()
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 400
+        return _err({"error": str(e)}, 400)
     return {"partitions": sorted({p.get("partition", 0) for p in pts})}
 
 
@@ -153,7 +154,7 @@ def api_point(point_id: int, token: str | None = Query(default=None),
     try:
         return api_client.get_point(point_id)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e), "status": "not_found"}, 404
+        return _err({"error": str(e), "status": "not_found"}, 404)
 
 
 @app.post("/api/points/{point_id}/set")
@@ -168,11 +169,11 @@ def api_set(point_id: int, payload: dict, token: str | None = Query(default=None
         try:
             ptype = api_client.get_point(point_id)["type"]
         except Exception:  # noqa: BLE001
-            return {"error": "cannot resolve point type"}, 400
+            return _err({"error": "cannot resolve point type"}, 400)
     try:
         api_client.write_point(point_id, int(ptype), value)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 400
+        return _err({"error": str(e)}, 400)
     return {"ok": True, "id": point_id, "value": value}
 
 
@@ -184,11 +185,16 @@ def api_meta(point_id: int, token: str | None = Query(default=None),
     try:
         return api_client.get_meta(point_id)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 404
+        return _err({"error": str(e)}, 404)
+
+
+def _err(payload: dict, status_code: int) -> JSONResponse:
+    """错误响应。新版 FastAPI 不再把 (body, status) 元组解释为状态码，
+    必须显式返回 JSONResponse，否则错误会被序列化成 200 + JSON 数组。"""
+    return JSONResponse(payload, status_code=status_code)
 
 
 def _deny():
-    from fastapi.responses import JSONResponse
     return JSONResponse({"error": "unauthorized"}, status_code=401)
 
 
@@ -218,12 +224,16 @@ def api_create(payload: dict, token: str | None = Query(default=None),
     pid = payload.get("id")
     name = payload.get("name")
     if pid is None or not name:
-        return {"error": "id and name are required"}, 400
+        return _err({"error": "id and name are required"}, 400)
+    # 面向用户的 ID 从 1 开始分配；0 仍是底层合法索引（配置/历史点位），
+    # 但不在监控台中作为「新建点位」的入口。
+    if not isinstance(pid, int) or pid < 1:
+        return _err({"error": "id 必须为 ≥ 1 的整数（0 保留给历史/配置点位）"}, 400)
     try:
         api_client.create_point(pid, name, payload.get("type", "int32"),
                                 payload.get("access", 3))
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 400
+        return _err({"error": str(e)}, 400)
     _refresh_registry()
     return {"ok": True, "id": pid, "name": name}
 
@@ -236,7 +246,7 @@ def api_delete(point_id: int, token: str | None = Query(default=None),
     try:
         api_client.delete_point(point_id)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 404
+        return _err({"error": str(e)}, 404)
     _refresh_registry()
     return {"ok": True, "id": point_id}
 
@@ -248,11 +258,11 @@ def api_rename(point_id: int, payload: dict, token: str | None = Query(default=N
         return _deny()
     name = payload.get("name")
     if not name:
-        return {"error": "name is required"}, 400
+        return _err({"error": "name is required"}, 400)
     try:
         api_client.rename_point(point_id, name)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 400
+        return _err({"error": str(e)}, 400)
     _refresh_registry()
     return {"ok": True, "id": point_id, "name": name}
 
@@ -361,7 +371,7 @@ def api_logs(max_n: int = 0, token: str | None = Query(default=None),
     try:
         return api_client.get_logs(max_n)
     except Exception as e:  # noqa: BLE001
-        return {"error": str(e)}, 400
+        return _err({"error": str(e)}, 400)
 
 
 @app.post("/api/cmd")

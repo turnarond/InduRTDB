@@ -99,7 +99,8 @@
     <el-dialog v-model="createVisible" title="新建点位" width="460px">
       <el-form :model="form" label-width="80px">
         <el-form-item label="ID">
-          <el-input-number v-model="form.id" :min="0" :max="4294967295" />
+          <el-input-number v-model="form.id" :min="1" :max="4294967295" />
+          <div class="field-hint">自动从 1 开始分配下一个空闲 ID（0 保留给历史/配置点位）</div>
         </el-form-item>
         <el-form-item label="名称">
           <el-input v-model="form.name" placeholder="如 AHU_02.Supply_Temp" />
@@ -188,7 +189,7 @@ async function loadPartitionPoints() {
 
 // ---- v3.6 点位 CRUD ----
 const createVisible = ref(false)
-const form = ref({ id: 0, name: '', type: 'int32', access: 3 })
+const form = ref({ id: 1, name: '', type: 'int32', access: 3 })
 const typeNames = ['bool', 'int32', 'double', 'string', 'int64', 'uint32', 'float']
 
 function nextFreeId() {
@@ -260,7 +261,7 @@ async function loadValues(list) {
     arr.map(async (p) => {
       try {
         const d = await api.getPoint(p.id)
-        values[p.id] = { value: d.value, quality: d.quality, ts: d.ts }
+        values[p.id] = { value: d.value, quality: Number(d.quality), ts: d.ts }
       } catch (e) {
         /* ignore */
       }
@@ -277,7 +278,7 @@ function onMessage(msg) {
     loadValues()
   } else if (msg.op === 'update') {
     const id = msg.id
-    values[id] = { value: msg.value, quality: msg.quality, ts: msg.ts }
+    values[id] = { value: msg.value, quality: Number(msg.quality), ts: msg.ts }
     if (selected.value && selected.value.id === id && selected.value.type !== 3) {
       history.value.push({ ts: Date.now(), value: Number(msg.value) })
       if (history.value.length > 300) history.value.shift()
@@ -367,5 +368,12 @@ onBeforeUnmount(() => socket && socket.close())
 .count {
   color: var(--el-text-color-secondary);
   font-size: 13px;
+}
+.field-hint {
+  width: 100%;
+  margin-top: 2px;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.5;
 }
 </style>
