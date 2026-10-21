@@ -76,6 +76,46 @@ struct Proc {
         return false;
     }
 
+    /* 带 YAML 点位配置启动：用于构造“已注册但策略拒绝”的点位。 */
+    bool start_cfg(const std::string& tag, const std::string& policy_body,
+                   uint32_t max_points, uint32_t max_subs,
+                   const std::string& cfg_body)
+    {
+        sock     = "/tmp/indurtdb_notify_" + tag + ".sock";
+        instance = "notify_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
+        policy   = "/tmp/notify_policy_" + tag + ".txt";
+        std::string cfg = "/tmp/notify_cfg_" + tag + ".yaml";
+
+        FILE* f = fopen(policy.c_str(), "w");
+        if (f) { fwrite(policy_body.data(), 1, policy_body.size(), f); fclose(f); }
+        f = fopen(cfg.c_str(), "w");
+        if (f) { fwrite(cfg_body.data(), 1, cfg_body.size(), f); fclose(f); }
+
+        unlink(sock.c_str());
+        pid = fork();
+        if (pid < 0) return false;
+        if (pid == 0) {
+            const std::string mp = std::to_string(max_points);
+            const std::string ms = std::to_string(max_subs);
+            execl(RTDBD_BIN, "rtdbd",
+                  "--socket", sock.c_str(),
+                  "--instance", instance.c_str(),
+                  "--policy", policy.c_str(),
+                  "--config", cfg.c_str(),
+                  "--max-points", mp.c_str(),
+                  "--max-subs", ms.c_str(),
+                  (char*)NULL);
+            _exit(127);
+        }
+        for (int i = 0; i < 500; ++i) {
+            struct stat st;
+            if (stat(sock.c_str(), &st) == 0) return true;
+            usleep(10000);
+        }
+        return false;
+    }
+
     ~Proc() { stop(); }
 
     void stop()
@@ -150,6 +190,37 @@ bool unsubscribe(int fd, uint32_t point_id)
     return r.status == RTDBD_ST_OK;
 }
 
+/* SET_SUBS 批量订阅：发送 count + ids[]，返回响应状态码 */
+uint16_t set_subs(int fd, const std::vector<uint32_t>& ids)
+{
+    std::vector<uint8_t> payload(4 + 4 * ids.size());
+    uint32_t count = (uint32_t)ids.size();
+    memcpy(payload.data(), &count, 4);
+    for (size_t i = 0; i < ids.size(); ++i) {
+        memcpy(payload.data() + 4 + 4 * i, &ids[i], 4);
+    }
+    if (!send_req(fd, RTDBD_OP_SET_SUBS, payload.data(), (uint32_t)payload.size())) return 0xFFFF;
+    rtdbd_resp_hdr_t r;
+    if (!recv_resp(fd, &r)) return 0xFFFF;
+    return r.status;
+}
+
+/* 接收一帧 NOTIFY（含头部），超时 ms 返回 false */
+bool recv_notify(int fd, rtdbd_notify_t* out, int timeout_ms = 2000)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    int ready = poll(&pfd, 1, timeout_ms);
+    if (ready <= 0) return false;
+
+    rtdbd_req_hdr_t nh;
+    if (recv(fd, &nh, sizeof(nh), MSG_WAITALL) != (ssize_t)sizeof(nh)) return false;
+    if (nh.magic != RTDBD_MAGIC || nh.opcode != RTDBD_OP_NOTIFY) return false;
+    if (recv(fd, out, sizeof(*out), MSG_WAITALL) != (ssize_t)sizeof(*out)) return false;
+    return true;
+}
+
 bool write_int32(int fd, uint32_t point_id, int32_t value)
 {
     rtdbd_write_req_t w;
@@ -214,10 +285,16 @@ TEST(RtdbdNotify, CrossProcessReceivesChange)
     Proc p;
     ASSERT_TRUE(p.start("chg", policy_for_self()));
 
+    int ctl = connect_to(p.sock);
     int sub = connect_to(p.sock);
     int wri = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
     ASSERT_GE(sub, 0);
     ASSERT_GE(wri, 0);
+
+    char name[32];
+    snprintf(name, sizeof(name), "Chg_5");
+    ASSERT_TRUE(create_point(ctl, 5, name)) << "create point 5";
 
     ASSERT_TRUE(subscribe(sub, 5)) << "订阅应成功";
 
@@ -242,6 +319,7 @@ TEST(RtdbdNotify, CrossProcessReceivesChange)
 
     close(sub);
     close(wri);
+    close(ctl);
 }
 
 /* 2. 大量订阅/退订循环后不泄漏 fd */
@@ -249,6 +327,13 @@ TEST(RtdbdNotify, NoFdLeakUnderChurn)
 {
     Proc p;
     ASSERT_TRUE(p.start("churn", policy_for_self()));
+
+    int ctl = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    char name[32];
+    snprintf(name, sizeof(name), "Churn_6");
+    ASSERT_TRUE(create_point(ctl, 6, name)) << "create point 6";
+    close(ctl);
 
     int before = count_fds(p.pid);
     ASSERT_GT(before, 0);
@@ -319,6 +404,373 @@ TEST(RtdbdNotify, MaxSubsPerConnectionEnforced)
     EXPECT_FALSE(subscribe(fd, 4)) << "5th subscription must exceed --max-subs 4";
 
     close(fd);
+    close(ctl);
+}
+
+/* 5. SET_SUBS 快照：3 个点位，按 id 升序收到 3 帧 NOTIFY，quality 与 GET 一致 */
+TEST(RtdbdNotify, SetSubsSnapshotThree)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs3", policy_for_self_range(12), 64, 16));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 10; i <= 12; ++i) {
+        snprintf(name, sizeof(name), "Snap_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+    }
+    /* 写入初始值 */
+    ASSERT_TRUE(write_int32(ctl, 10, 100));
+    ASSERT_TRUE(write_int32(ctl, 11, 200));
+    ASSERT_TRUE(write_int32(ctl, 12, 300));
+
+    /* SET_SUBS {10,11,12} */
+    EXPECT_EQ(set_subs(sub, {10, 11, 12}), RTDBD_ST_OK);
+
+    /* 收到 3 帧 NOTIFY，按 id 升序 */
+    rtdbd_notify_t nt;
+    int32_t expected_values[] = {100, 200, 300};
+    for (int i = 0; i < 3; ++i) {
+        uint32_t expected_id = 10 + i;
+        ASSERT_TRUE(recv_notify(sub, &nt)) << "missing notify for " << expected_id;
+        EXPECT_EQ(nt.point_id, expected_id);
+        EXPECT_EQ(nt.type, RTDBD_TYPE_INT32);
+        EXPECT_EQ((int32_t)(int64_t)nt.value_bits, expected_values[i]);
+        EXPECT_EQ(nt.reserved[0], INDURTDB_QUALITY_GOOD);  /* quality 在 reserved[0] */
+    }
+    /* 第 4 帧不应存在（短轮询确认） */
+    EXPECT_FALSE(recv_notify(sub, &nt, 200));
+
+    close(sub);
+    close(ctl);
+}
+
+/* 6. SET_SUBS 替换旧订阅集：先 {10,11}，再 {12}，只收到 1 帧；写 10 不再通知 */
+TEST(RtdbdNotify, SetSubsReplacesOldSet)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_repl", policy_for_self_range(12), 64, 16));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 10; i <= 12; ++i) {
+        snprintf(name, sizeof(name), "Repl_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+    }
+    ASSERT_TRUE(write_int32(ctl, 10, 100));
+    ASSERT_TRUE(write_int32(ctl, 11, 200));
+    ASSERT_TRUE(write_int32(ctl, 12, 300));
+
+    /* 第一次 SET_SUBS {10,11} */
+    EXPECT_EQ(set_subs(sub, {10, 11}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 11u);
+    EXPECT_FALSE(recv_notify(sub, &nt, 200));
+
+    /* 第二次 SET_SUBS {12} 替换 */
+    EXPECT_EQ(set_subs(sub, {12}), RTDBD_ST_OK);
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 12u);
+    EXPECT_FALSE(recv_notify(sub, &nt, 200));
+
+    /* 写 10 不应再产生通知（已被替换） */
+    ASSERT_TRUE(write_int32(ctl, 10, 999));
+    EXPECT_FALSE(recv_notify(sub, &nt, 500));
+
+    close(sub);
+    close(ctl);
+}
+
+/* 7. SET_SUBS 拒绝未注册 id：{10,99} → NOT_FOUND，旧订阅 {10} 仍收通知 */
+TEST(RtdbdNotify, SetSubsRejectsUnregistered)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_unreg", policy_for_self_range(10), 64, 16));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    snprintf(name, sizeof(name), "Unreg_10");
+    ASSERT_TRUE(create_point(ctl, 10, name));
+
+    /* 先用 SUBSCRIBE 订阅 10（旧接口） */
+    ASSERT_TRUE(subscribe(sub, 10));
+    /* 写入初始值，订阅后写入才会收到通知 */
+    ASSERT_TRUE(write_int32(ctl, 10, 100));
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 100);
+
+    /* SET_SUBS {10, 99} → 99 未注册，应返回 NOT_FOUND */
+    EXPECT_EQ(set_subs(sub, {10, 99}), RTDBD_ST_NOT_FOUND);
+
+    /* 旧订阅 {10} 应保持不变，写 10 仍收到通知 */
+    ASSERT_TRUE(write_int32(ctl, 10, 200));
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 200);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 7b. SET_SUBS 拒绝策略不允许的 id：{10,11} → DENIED；旧订阅 {10} 不变 */
+TEST(RtdbdNotify, SetSubsRejectsDenied)
+{
+    Proc p;
+    const std::string cfg =
+        "points:\n"
+        "  - id: 10\n"
+        "    name: \"Cfg_Allow10\"\n"
+        "    type: int32\n"
+        "    access: 3\n"
+        "  - id: 11\n"
+        "    name: \"Cfg_Deny11\"\n"
+        "    type: int32\n"
+        "    access: 3\n";
+    ASSERT_TRUE(p.start_cfg("setsubs_denied", policy_for_self_range(10), 64, 16, cfg));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    /* 先建立旧订阅 {10} */
+    EXPECT_EQ(set_subs(sub, {10}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+
+    /* {10,11} 中 11 被 policy 拒绝 → DENIED，旧订阅保持不变 */
+    EXPECT_EQ(set_subs(sub, {10, 11}), RTDBD_ST_DENIED);
+    ASSERT_TRUE(write_int32(ctl, 10, 200));
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 200);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 7c. SET_SUBS count 超过 --max-subs → BAD_REQUEST，旧订阅不变 */
+TEST(RtdbdNotify, SetSubsCountOverMaxSubs)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_overmax", policy_for_self_range(14), 64, 4));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 10; i <= 14; ++i) {
+        snprintf(name, sizeof(name), "OverMax_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+    }
+
+    EXPECT_EQ(set_subs(sub, {10}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+
+    EXPECT_EQ(set_subs(sub, {10, 11, 12, 13, 14}), RTDBD_ST_BAD_REQUEST);
+
+    ASSERT_TRUE(write_int32(ctl, 10, 71));
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 71);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 8. SET_SUBS 拒绝重复 id：{10,10} → BAD_REQUEST */
+TEST(RtdbdNotify, SetSubsRejectsDuplicate)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_dup", policy_for_self_range(10), 64, 16));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    snprintf(name, sizeof(name), "Dup_10");
+    ASSERT_TRUE(create_point(ctl, 10, name));
+    ASSERT_TRUE(write_int32(ctl, 10, 100));
+
+    /* SET_SUBS {10, 10} → 重复，应返回 BAD_REQUEST */
+    EXPECT_EQ(set_subs(sub, {10, 10}), RTDBD_ST_BAD_REQUEST);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 9. SET_SUBS 空集合清空订阅：{} → OK，之后写旧点无通知 */
+TEST(RtdbdNotify, SetSubsEmptyClears)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_empty", policy_for_self_range(10), 64, 16));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    snprintf(name, sizeof(name), "Empty_10");
+    ASSERT_TRUE(create_point(ctl, 10, name));
+
+    /* 先订阅 10 */
+    ASSERT_TRUE(subscribe(sub, 10));
+    /* 写入初始值，订阅后写入才会收到通知 */
+    ASSERT_TRUE(write_int32(ctl, 10, 100));
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt)); EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 100);
+
+    /* SET_SUBS {} 清空 */
+    EXPECT_EQ(set_subs(sub, {}), RTDBD_ST_OK);
+    EXPECT_FALSE(recv_notify(sub, &nt, 200));
+
+    /* 写 10 不应再产生通知 */
+    ASSERT_TRUE(write_int32(ctl, 10, 200));
+    EXPECT_FALSE(recv_notify(sub, &nt, 500));
+
+    close(sub);
+    close(ctl);
+}
+
+/* 10. SET_SUBS 500 点快照全部收到，health.notify_drop == 0 */
+TEST(RtdbdNotify, SetSubsSnapshot500Fits)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_500", policy_for_self_range(599), 600, 1024));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 100; i < 600; ++i) {
+        snprintf(name, sizeof(name), "P500_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+        ASSERT_TRUE(write_int32(ctl, i, (int32_t)i));
+    }
+
+    std::vector<uint32_t> ids;
+    ids.reserve(500);
+    for (uint32_t i = 100; i < 600; ++i) ids.push_back(i);
+
+    EXPECT_EQ(set_subs(sub, ids), RTDBD_ST_OK);
+
+    rtdbd_notify_t nt;
+    uint32_t received = 0;
+    for (uint32_t i = 0; i < 500; ++i) {
+        if (recv_notify(sub, &nt, 5000)) {
+            EXPECT_EQ(nt.point_id, 100 + i);
+            EXPECT_EQ((int32_t)(int64_t)nt.value_bits, (int32_t)(100 + i));
+            EXPECT_EQ(nt.reserved[0], INDURTDB_QUALITY_GOOD);
+            received++;
+        } else {
+            break;
+        }
+    }
+    EXPECT_EQ(received, 500u) << "should receive all 500 snapshots";
+
+    /* 查询 health 确认 notify_drop == 0 */
+    int health_fd = connect_to(p.sock);
+    ASSERT_GE(health_fd, 0);
+    rtdbd_req_hdr_t hreq;
+    memset(&hreq, 0, sizeof(hreq));
+    hreq.magic = RTDBD_MAGIC;
+    hreq.version = RTDBD_PROTO_VERSION;
+    hreq.opcode = RTDBD_OP_HEALTH;
+    hreq.payload_len = 0;
+    ASSERT_TRUE(send(health_fd, &hreq, sizeof(hreq), 0) == (ssize_t)sizeof(hreq));
+    rtdbd_resp_hdr_t hresp;
+    ASSERT_TRUE(recv(health_fd, &hresp, sizeof(hresp), MSG_WAITALL) == (ssize_t)sizeof(hresp));
+    EXPECT_EQ(hresp.status, RTDBD_ST_OK);
+    rtdbd_health_t health;
+    ASSERT_TRUE(recv(health_fd, &health, sizeof(health), MSG_WAITALL) == (ssize_t)sizeof(health));
+    EXPECT_EQ(health.notify_drop, 0ull) << "notify_drop should be 0 after snapshot replacement";
+    close(health_fd);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 11. SET_SUBS 替换不计入 notify_drop：连续 10 次替换 50 点页，notify_drop 不增长 */
+TEST(RtdbdNotify, SetSubsReplaceDoesNotCountDrop)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_nodrop", policy_for_self_range(599), 600, 1024));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 100; i < 600; ++i) {
+        snprintf(name, sizeof(name), "NDrop_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+        ASSERT_TRUE(write_int32(ctl, i, (int32_t)i));
+    }
+
+    /* 先查询初始 notify_drop */
+    int health_fd = connect_to(p.sock);
+    ASSERT_GE(health_fd, 0);
+    rtdbd_req_hdr_t hreq;
+    memset(&hreq, 0, sizeof(hreq));
+    hreq.magic = RTDBD_MAGIC;
+    hreq.version = RTDBD_PROTO_VERSION;
+    hreq.opcode = RTDBD_OP_HEALTH;
+    hreq.payload_len = 0;
+    ASSERT_TRUE(send(health_fd, &hreq, sizeof(hreq), 0) == (ssize_t)sizeof(hreq));
+    rtdbd_resp_hdr_t hresp;
+    ASSERT_TRUE(recv(health_fd, &hresp, sizeof(hresp), MSG_WAITALL) == (ssize_t)sizeof(hresp));
+    rtdbd_health_t health_before;
+    ASSERT_TRUE(recv(health_fd, &health_before, sizeof(health_before), MSG_WAITALL) == (ssize_t)sizeof(health_before));
+    close(health_fd);
+
+    /* 连续 10 次替换 50 点页 */
+    for (int round = 0; round < 10; ++round) {
+        std::vector<uint32_t> ids;
+        ids.reserve(50);
+        uint32_t base = 100 + (round % 10) * 50;
+        for (uint32_t i = 0; i < 50; ++i) ids.push_back(base + i);
+        EXPECT_EQ(set_subs(sub, ids), RTDBD_ST_OK);
+
+        /* 排空快照 */
+        rtdbd_notify_t nt;
+        for (uint32_t i = 0; i < 50; ++i) {
+            recv_notify(sub, &nt, 2000);
+        }
+    }
+
+    /* 再次查询 health，notify_drop 应不变 */
+    health_fd = connect_to(p.sock);
+    ASSERT_GE(health_fd, 0);
+    ASSERT_TRUE(send(health_fd, &hreq, sizeof(hreq), 0) == (ssize_t)sizeof(hreq));
+    ASSERT_TRUE(recv(health_fd, &hresp, sizeof(hresp), MSG_WAITALL) == (ssize_t)sizeof(hresp));
+    rtdbd_health_t health_after;
+    ASSERT_TRUE(recv(health_fd, &health_after, sizeof(health_after), MSG_WAITALL) == (ssize_t)sizeof(health_after));
+    close(health_fd);
+
+    EXPECT_EQ(health_after.notify_drop, health_before.notify_drop)
+        << "SET_SUBS replacement should not increase notify_drop";
+
+    close(sub);
     close(ctl);
 }
 

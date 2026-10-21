@@ -185,6 +185,21 @@ bool subscribe(int fd, uint32_t point_id)
     return r.status == RTDBD_ST_OK;
 }
 
+bool create_point(int fd, uint32_t point_id, const char* name)
+{
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id  = point_id;
+    c.type      = RTDBD_TYPE_INT32;
+    c.access    = 3;
+    c.partition = 0;
+    snprintf(c.name, sizeof(c.name), "%s", name);
+    if (!send_req(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c))) return false;
+    rtdbd_resp_hdr_t r;
+    if (recv(fd, &r, sizeof(r), MSG_WAITALL) != (ssize_t)sizeof(r)) return false;
+    return r.status == RTDBD_ST_OK;
+}
+
 std::string policy_for_self()
 {
     char buf[128];
@@ -334,6 +349,14 @@ TEST(E2E, HmiReceivesNotifyWithSourceTs)
     Proc p;
     ASSERT_TRUE(p.start("hmi", policy_for_self()));
 
+    /* 先创建点位 8，再启动 HMI 订阅 */
+    int ctl = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    char name[32];
+    snprintf(name, sizeof(name), "Hmi_8");
+    ASSERT_TRUE(create_point(ctl, 8, name)) << "create point 8";
+    close(ctl);
+
     HmiChild hmi;
     ASSERT_TRUE(hmi_spawn(p.sock, 8, &hmi)) << "HMI 进程应能启动";
     ASSERT_TRUE(hmi_wait_ready(&hmi)) << "HMI 订阅应就绪";
@@ -392,6 +415,14 @@ TEST(E2E, MixedRolesNoFdLeak)
 {
     Proc p;
     ASSERT_TRUE(p.start("mixed", policy_for_self()));
+
+    /* 先创建点位 9 */
+    int ctl = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    char name[32];
+    snprintf(name, sizeof(name), "Mixed_9");
+    ASSERT_TRUE(create_point(ctl, 9, name)) << "create point 9";
+    close(ctl);
 
     int before = count_fds(p.pid);
     ASSERT_GT(before, 0);

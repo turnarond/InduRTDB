@@ -72,6 +72,9 @@ static indurtdb_t* g_h = NULL;
 static irt_logbuf_t      g_logbuf;
 static rtdbd_log_entry_t g_log_out[RTDBD_LOG_CAPACITY];
 
+/* SET_SUBS 读取 id 数组的静态缓冲（BSS，单线程串行处理，无并发） */
+static uint32_t g_set_subs_ids[RTDBD_SUB_MAX];
+
 static void on_signal(int sig)
 {
     /* 信号处理器只置 volatile sig_atomic_t 标志（信号安全：不做 IO、不格式化） */
@@ -200,6 +203,17 @@ static void conn_discard_outq(rtdbd_conn_t* c)
          * n_writes 在涨、通知收不到、而 health 仍是 OK，排查被带偏。 */
         rtdbd_stats_note_error();
     }
+    c->outq_count = 0;
+    c->outq_head  = 0;
+    c->outq_tail  = 0;
+    c->outq_sent  = 0;
+}
+
+/* SET_SUBS 替换订阅集时的软清理：仅复位出站队列指针，**不**计入 notify_drop、
+ * **不**调用 rtdbd_stats_note_error()。用于整组替换时丢弃旧快照/待发通知，
+ * 这属正常业务流程而非背压丢弃。 */
+static void conn_clear_outq_soft(rtdbd_conn_t* c)
+{
     c->outq_count = 0;
     c->outq_head  = 0;
     c->outq_tail  = 0;
@@ -493,6 +507,66 @@ typedef struct {
     rtdbd_resp_hdr_t       resp;    /* 本次响应头（magic/version 已置） */
 } rtdbd_ctx_t;
 
+/* 校验单个 point_id 是否可订阅。
+ * 返回 0 表示可订阅；否则返回对应的状态码（NOT_FOUND/DENIED/BAD_REQUEST）。
+ * 成功时通过输出参数返回 point 的 partition、uid 与点位快照。 */
+static int point_subscribable(rtdbd_ctx_t* cx, uint32_t id,
+                              uint32_t* out_partition, uint32_t* out_uid,
+                              indurtdb_point_t* out_point)
+{
+    if (id >= g_max_points) return RTDBD_ST_NOT_FOUND;
+
+    indurtdb_point_t pt;
+    if (indurtdb_h_read_point(cx->h, id, &pt) != 0) return RTDBD_ST_NOT_FOUND;
+    if (pt.name[0] == '\0') return RTDBD_ST_NOT_FOUND;
+
+    uint32_t pid = 0, uid = 0;
+    if (peer_cred(cx->conn->fd, &pid, &uid) != 0) return RTDBD_ST_INTERNAL;
+
+    if (!irt_policy_allows(cx->policy, uid, pt.partition, id)) return RTDBD_ST_DENIED;
+    if (!rtdbd_conf_partition_allowed(cx->conf, pt.partition)) return RTDBD_ST_DENIED;
+
+    if (out_partition) *out_partition = pt.partition;
+    if (out_uid) *out_uid = uid;
+    if (out_point) *out_point = pt;
+    return 0;
+}
+
+/* 替换连接的整个订阅集：清空旧 subs/subtab，按升序插入新 ids，
+ * 并为每个 id 入队一帧当前值快照 NOTIFY。 */
+static void conn_replace_subs(rtdbd_conn_t* c, const uint32_t* ids, uint32_t n,
+                              indurtdb_t* h, uint32_t max_subs)
+{
+    c->nsubs = 0;
+    rtdbd_subtab_clear(&c->sub);
+
+    for (uint32_t i = 0; i < n; ++i) {
+        uint32_t id = ids[i];
+        if (c->nsubs >= max_subs || c->nsubs >= RTDBD_SUB_MAX) break;
+        if (!rtdbd_subtab_insert(&c->sub, id)) continue;
+        c->subs[c->nsubs++] = id;
+
+        /* 构造当前值快照 NOTIFY */
+        indurtdb_point_t pt;
+        if (indurtdb_h_read_point(h, id, &pt) != 0) continue;
+        if (pt.name[0] == '\0') continue;
+
+        rtdbd_notify_t nt;
+        memset(&nt, 0, sizeof(nt));
+        nt.point_id     = id;
+        nt.type         = pt.type;
+        nt.reserved[0]  = pt.quality;  /* v3.10 T5：quality 放在 reserved[0] */
+        /* 字符串值不走 notify（32B 放不下），value_bits 保持 0；
+         * 监控台字符串点走 REST/GET。 */
+        if (pt.type != RTDBD_TYPE_STRING)
+            memcpy(&nt.value_bits, &pt.value, sizeof(nt.value_bits));
+        nt.timestamp_ns   = pt.timestamp_ns;
+        nt.source_ts_ns   = pt.source_timestamp_ns;
+
+        outq_push(c, &nt);
+    }
+}
+
 /* 处理器签名只带 fd 与上下文；请求头经 cx->req 取。这样分发签名里不会出现
  * 用不到的形参，也就无需以 (void) 消警（工程约定禁 (void) 消警）。 */
 typedef int (*rtdbd_handler_fn)(int fd, rtdbd_ctx_t* cx);
@@ -587,13 +661,26 @@ static int op_subscribe(int fd, rtdbd_ctx_t* cx)
         (void)send_all(fd, &cx->resp, sizeof(cx->resp));
         return 1;
     }
-    int rc = (cx->req->opcode == RTDBD_OP_SUBSCRIBE)
-                 ? conn_add_sub(cx->conn, s.point_id, cx->max_subs)
-                 : (conn_del_sub(cx->conn, s.point_id), 0);
 
-    cx->resp.status      = (rc == 0) ? RTDBD_ST_OK : RTDBD_ST_INTERNAL;
-    cx->resp.payload_len = 0;
-    return send_all(fd, &cx->resp, sizeof(cx->resp));
+    if (cx->req->opcode == RTDBD_OP_SUBSCRIBE) {
+        /* 校验：点位已注册、策略允许、分区白名单允许、未超 max_subs */
+        int rc = point_subscribable(cx, s.point_id, NULL, NULL, NULL);
+        if (rc != 0) {
+            cx->resp.status      = (uint16_t)rc;
+            cx->resp.payload_len = 0;
+            return send_all(fd, &cx->resp, sizeof(cx->resp));
+        }
+        rc = conn_add_sub(cx->conn, s.point_id, cx->max_subs);
+        cx->resp.status      = (rc == 0) ? RTDBD_ST_OK : RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
+    } else {
+        /* UNSUBSCRIBE：无需校验，直接删除 */
+        conn_del_sub(cx->conn, s.point_id);
+        cx->resp.status      = RTDBD_ST_OK;
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
+    }
 }
 
 /* ---- v3.4 T9：按名查找（读，无需鉴权）；v3.9：名字域为 (partition, name) ---- */
@@ -990,6 +1077,132 @@ static int op_select(int fd, rtdbd_ctx_t* cx)
     return send_all(fd, &cx->resp, sizeof(cx->resp));
 }
 
+/* ---- v3.10 T4：SET_SUBS 批量订阅整组替换 + 当前值快照 ----
+ * 请求：u32 count; u32 ids[count]
+ * 响应：空负载，status=OK 表示成功
+ * 成功后：清空出站队列（不计 notify_drop），替换订阅集，按 id 升序推送快照 NOTIFY
+ * 失败：旧订阅集保持不变，返回对应错误码 */
+static int op_set_subs(int fd, rtdbd_ctx_t* cx)
+{
+    /* 若出站队列有部分已发送帧，关闭连接而不回包：
+     * 部分发送的 NOTIFY 帧在流中，插入响应会破坏帧边界。 */
+    if (cx->conn->outq_sent != 0) return 1;
+
+    /* 最小负载：4 字节 count；超过 4+4*1024 直接断连（无法安全 drain，
+     * 也避免恶意超大 payload 让服务端空读）。 */
+    if (cx->req->payload_len < 4 ||
+        cx->req->payload_len > 4 + 4 * RTDBD_SET_SUBS_MAX) return 1;
+
+    uint32_t count = 0;
+    if (recv_all(fd, &count, sizeof(count)) != 0) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    /* count 超过单次 SET_SUBS 上限 */
+    if (count > RTDBD_SET_SUBS_MAX) {
+        /* 安全 drain 剩余 payload（最多 4*1024 字节） */
+        uint8_t drain_buf[256];
+        uint32_t remaining = cx->req->payload_len - 4;
+        while (remaining > 0) {
+            uint32_t chunk = remaining > sizeof(drain_buf) ? sizeof(drain_buf) : remaining;
+            if (recv_all(fd, drain_buf, chunk) != 0) break;
+            remaining -= chunk;
+        }
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    /* payload_len 必须精确匹配 4 + 4*count */
+    uint32_t expected_len = 4 + 4 * count;
+    if (cx->req->payload_len != expected_len) {
+        /* 安全 drain */
+        uint8_t drain_buf[256];
+        uint32_t remaining = cx->req->payload_len - 4;
+        while (remaining > 0) {
+            uint32_t chunk = remaining > sizeof(drain_buf) ? sizeof(drain_buf) : remaining;
+            if (recv_all(fd, drain_buf, chunk) != 0) break;
+            remaining -= chunk;
+        }
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    /* count 超过连接订阅上限 */
+    if (count > cx->max_subs) {
+        uint8_t drain_buf[256];
+        uint32_t remaining = cx->req->payload_len - 4;
+        while (remaining > 0) {
+            uint32_t chunk = remaining > sizeof(drain_buf) ? sizeof(drain_buf) : remaining;
+            if (recv_all(fd, drain_buf, chunk) != 0) break;
+            remaining -= chunk;
+        }
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 0;  /* 保持连接，旧订阅不变 */
+    }
+
+    /* 读取所有 id 到静态缓冲 */
+    for (uint32_t i = 0; i < count; ++i) {
+        if (recv_all(fd, &g_set_subs_ids[i], sizeof(uint32_t)) != 0) {
+            cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+            cx->resp.payload_len = 0;
+            (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+            return 1;
+        }
+    }
+
+    /* 校验重复 id（O(n^2)，n <= 1024 可接受） */
+    for (uint32_t i = 0; i < count; ++i) {
+        for (uint32_t j = i + 1; j < count; ++j) {
+            if (g_set_subs_ids[i] == g_set_subs_ids[j]) {
+                cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+                cx->resp.payload_len = 0;
+                (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+                return 0;  /* 旧订阅不变 */
+            }
+        }
+    }
+
+    /* 逐个校验每个 id（注册/策略/分区白名单） */
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t id = g_set_subs_ids[i];
+        int rc = point_subscribable(cx, id, NULL, NULL, NULL);
+        if (rc != 0) {
+            cx->resp.status      = (uint16_t)rc;
+            cx->resp.payload_len = 0;
+            (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+            return 0;  /* 旧订阅不变 */
+        }
+    }
+
+    /* 升序排序（插入排序，n <= 1024） */
+    for (uint32_t i = 1; i < count; ++i) {
+        uint32_t key = g_set_subs_ids[i];
+        int32_t j = (int32_t)i - 1;
+        while (j >= 0 && g_set_subs_ids[j] > key) {
+            g_set_subs_ids[j + 1] = g_set_subs_ids[j];
+            j--;
+        }
+        g_set_subs_ids[j + 1] = key;
+    }
+
+    /* 全部校验通过：软清理出站队列，替换订阅集并入队快照 */
+    conn_clear_outq_soft(cx->conn);
+    conn_replace_subs(cx->conn, g_set_subs_ids, count, cx->h, cx->max_subs);
+
+    cx->resp.status      = RTDBD_ST_OK;
+    cx->resp.payload_len = 0;
+    return send_all(fd, &cx->resp, sizeof(cx->resp));
+}
+
 /* opcode → 处理器。查找失败 = 未知 opcode → BAD_REQUEST + 关连接（同 v2 行为）。 */
 static const struct {
     uint16_t         op;
@@ -1011,6 +1224,7 @@ static const struct {
     { RTDBD_OP_GET_LOG,      op_get_log      },
     { RTDBD_OP_HEALTH,       op_health       },
     { RTDBD_OP_SELECT,       op_select       },
+    { RTDBD_OP_SET_SUBS,     op_set_subs     },
 };
 
 static int handle_request(int fd, rtdbd_ctx_t* cx)
