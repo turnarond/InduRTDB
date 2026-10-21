@@ -370,6 +370,35 @@ class NotifyListener:
                                       OP_SET_SUBS, len(payload)) + payload)
             self._subscribed = set(ids)
 
+    def replace_subs_legacy(self, point_ids: list[int], limit: int = 32) -> list[int]:
+        """旧服务端（无 SET_SUBS）整组替换：UNSUBSCRIBE 旧点后逐点订阅新点。"""
+        sock = self._sock
+        if not sock:
+            raise RtdbError("listener not started")
+        ids: list[int] = []
+        seen: set[int] = set()
+        for raw in point_ids:
+            pid = int(raw)
+            if pid not in seen:
+                seen.add(pid)
+                ids.append(pid)
+            if len(ids) >= limit:
+                break
+        target = set(ids)
+        with self._send_lock:
+            for pid in sorted(self._subscribed - target):
+                sock.sendall(
+                    REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_UNSUBSCRIBE, 4)
+                    + struct.pack("<I", pid)
+                )
+            self._subscribed = target
+            for pid in ids:
+                sock.sendall(
+                    REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_SUBSCRIBE, 4)
+                    + struct.pack("<I", pid)
+                )
+        return ids
+
     def _loop(self) -> None:
         assert self._sock is not None
         while not self._stop.is_set():

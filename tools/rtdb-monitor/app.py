@@ -7,7 +7,8 @@
            POST /api/points/{id}/set 设置点位值（经 rtdbd WRITE，受策略管控）
            GET  /api/meta/{id}       读取点位元数据
   - WS:    /ws                       连接即推送全量清单；点位变更经 NOTIFY 实时推送 update；
-           浏览器可发 {op:"set", id, value} / {op:"list"} / {op:"subscribe", pointIds}
+           浏览器可发 {op:"set", id, value} / {op:"list"} / {op:"set_subs", ids}
+           或兼容旧前端的 {op:"subscribe", pointIds}
 
 安全：默认仅绑 127.0.0.1；设置 RTDB_MONITOR_TOKEN 后需 Bearer/query token。
 写值权限最终由 rtdbd 的 SO_PEERCRED + uid 策略决定（web 服务运行 uid 须在策略允许列表）。
@@ -24,12 +25,13 @@ import asyncio
 import datetime
 import json
 import os
+import threading
 
 from fastapi import FastAPI, Query, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from rtdb_client import RtdbClient, NotifyListener
+from rtdb_client import RtdbClient, NotifyListener, probe_set_subs
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -38,10 +40,13 @@ SOCK = os.environ.get("RTDBD_SOCK", "/run/indurtdb/default.sock")
 TOKEN = os.environ.get("RTDB_MONITOR_TOKEN")  # None 表示不鉴权
 
 api_client: RtdbClient | None = None
-listener: NotifyListener | None = None
 ws_clients: set[WebSocket] = set()
+ws_listeners: dict[WebSocket, NotifyListener] = {}
 loop: asyncio.AbstractEventLoop | None = None
 name_by_id: dict[int, str] = {}  # id -> point name，用于 WS update.pointId 对齐 HmiPointValueDto
+registry: list[dict] = []
+registry_lock = threading.Lock()
+supports_set_subs = False
 
 
 def _authed(token: str | None, authorization: str | None = None) -> bool:
@@ -57,32 +62,27 @@ def _authed(token: str | None, authorization: str | None = None) -> bool:
     return False
 
 
-def _broadcast(pid: int, info: dict) -> None:
-    """NOTIFY 线程回调：把 update 推给所有 WS 客户端。
-
-    value/quality 字符串化，对齐 node-server HmiPointValueDto（value:String / quality:String），
-    便于复用其 HMI 前端组件。
-    """
-    msg = {
+def _notify_msg(pid: int, info: dict) -> dict:
+    """把 NOTIFY 回调信息转成前端 update JSON（value/quality 字符串化）。"""
+    return {
         "op": "update",
         "pointId": name_by_id.get(pid, str(pid)),
         "id": pid,
         "value": str(info["value"]),
-        # NOTIFY 帧没有质量字段；缺失时下发 null，由前端保留最近一次 REST 读值，
-        # 而不是伪造 Good（0）把 Bad/Timeout 覆盖掉。
         "quality": str(info["quality"]) if "quality" in info else None,
         "ts": info.get("ts", 0),
         "sourceTs": info.get("sourceTs", 0),
         "type": info.get("type"),
     }
-    if loop is None:
-        return
-    dead = []
-    for ws in list(ws_clients):
-        fut = asyncio.run_coroutine_threadsafe(_safe_send(ws, msg), loop)
-        fut.add_done_callback(lambda f, w=ws: dead.append(w) if f.exception() else None)
-    for w in dead:
-        ws_clients.discard(w)
+
+
+def _make_notify_callback(ws: WebSocket):
+    """每个 WS 独占 NotifyListener；回调只投递到本 WS 的事件循环。"""
+    def _on_notify(pid: int, info: dict) -> None:
+        if loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(_safe_send(ws, _notify_msg(pid, info)), loop)
+    return _on_notify
 
 
 async def _safe_send(ws: WebSocket, msg: dict) -> None:
@@ -92,57 +92,102 @@ async def _safe_send(ws: WebSocket, msg: dict) -> None:
         ws_clients.discard(ws)
 
 
+async def _registry_retry() -> None:
+    """rtdbd 未就绪时后台重试；不阻塞 Web 启动。"""
+    for _ in range(50):
+        await asyncio.sleep(0.2)
+        if _refresh_registry():
+            return
+
+
 @app.on_event("startup")
 async def _startup() -> None:
-    global api_client, listener, loop
-    loop = asyncio.get_event_loop()
+    global api_client, loop, supports_set_subs
+    loop = asyncio.get_running_loop()
     api_client = RtdbClient(SOCK)
     try:
         api_client.connect()
     except Exception as e:  # noqa: BLE001
-        # rtdb 尚未就绪：Web 仍启动，API 调用会返回错误；rtdbd 就绪后自动恢复。
         print(f"[warn] rtdb-monitor: 初始连接 rtdb 失败（{e}），API 暂不可用", flush=True)
-    # 订阅全量点位（先拿清单，再订阅其 id）
-    try:
-        pts = api_client.list_points()
-        ids = [p["id"] for p in pts]
-        name_by_id.clear()
-        for p in pts:
-            name_by_id[p["id"]] = p["name"]
-    except Exception:
-        ids = []
-    listener = NotifyListener(SOCK, on_notify=_broadcast)
-    listener.start()
-    if ids:
-        listener.subscribe(ids)
+    else:
+        supports_set_subs = probe_set_subs(api_client)
+        if not supports_set_subs:
+            # 探测失败可能已让旧服务端关闭连接；重连后走逐点 SUBSCRIBE 降级。
+            try:
+                api_client.close()
+                api_client = RtdbClient(SOCK).connect()
+            except Exception:  # noqa: BLE001
+                pass
+    if not _refresh_registry():
+        asyncio.create_task(_registry_retry())
 
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
-    if listener:
-        listener.stop()
+    for l in list(ws_listeners.values()):
+        l.stop()
+    ws_listeners.clear()
     if api_client:
         api_client.close()
+
+
+def _registry_snapshot() -> list[dict]:
+    with registry_lock:
+        return list(registry)
+
+
+def _ensure_registry() -> list[dict]:
+    pts = _registry_snapshot()
+    if pts:
+        return pts
+    _refresh_registry()
+    return _registry_snapshot()
 
 
 @app.get("/api/points")
 def api_points(token: str | None = Query(default=None),
               authorization: str | None = Header(default=None),
-              partition: int | None = Query(default=None)):
+              partition: int | None = Query(default=None),
+              offset: int | None = Query(default=None, ge=0),
+              limit: int | None = Query(default=None, ge=1, le=500),
+              q: str | None = Query(default=None),
+              point_type: str | None = Query(default=None, alias="type"),
+              access: int | None = Query(default=None)):
     if not _authed(token, authorization):
         return _deny()
-    # 不传 partition → None → 列出全部（v3.8 行为不变）；传 N → 仅该分区。
-    return api_client.list_points(partition=partition)
+
+    pts = _ensure_registry()
+    if partition is not None:
+        pts = [p for p in pts if p.get("partition", 0) == partition]
+    if q:
+        needle = q.lower()
+        pts = [p for p in pts if needle in str(p.get("name", "")).lower()]
+    if point_type is not None:
+        want = str(point_type)
+        pts = [p for p in pts
+               if want in (str(p.get("type")), str(p.get("typeName")))]
+    if access is not None:
+        pts = [p for p in pts if p.get("access") == access]
+    pts = sorted(pts, key=lambda p: p.get("id", 0))
+
+    page_mode = any(v is not None for v in (offset, limit, q, point_type, access))
+    if not page_mode:
+        return pts
+
+    o = offset or 0
+    l = limit if limit is not None else 50
+    total = len(pts)
+    return {"points": pts[o:o + l], "total": total, "offset": o, "limit": l}
 
 
 @app.get("/api/partitions")
 def api_partitions(token: str | None = Query(default=None),
                    authorization: str | None = Header(default=None)):
-    """已注册点位的分区列表（升序去重），derive 自全量点位。"""
+    """已注册点位的分区列表（升序去重），derive 自注册表缓存。"""
     if not _authed(token, authorization):
         return _deny()
     try:
-        pts = api_client.list_points()
+        pts = _ensure_registry()
     except Exception as e:  # noqa: BLE001
         return _err({"error": str(e)}, 400)
     return {"partitions": sorted({p.get("partition", 0) for p in pts})}
@@ -202,20 +247,20 @@ def _deny():
 
 # ---- v3.6 管控写通道：点位 CRUD ----
 
-def _refresh_registry() -> None:
-    """CRUD 后刷新 id→name 缓存，并让监听线程订阅新增 id（含改名后的清单同步）。"""
+def _refresh_registry() -> bool:
+    """CRUD/启动时刷新注册表缓存；失败返回 False，由调用方决定重试。"""
+    if api_client is None:
+        return False
     try:
         pts = api_client.list_points()
     except Exception:  # noqa: BLE001
-        return
-    name_by_id.clear()
-    for p in pts:
-        name_by_id[p["id"]] = p["name"]
-    if listener:
-        try:
-            listener.subscribe([p["id"] for p in pts])
-        except Exception:  # noqa: BLE001
-            pass
+        return False
+    with registry_lock:
+        registry[:] = pts
+        name_by_id.clear()
+        for p in pts:
+            name_by_id[p["id"]] = p["name"]
+    return True
 
 
 @app.post("/api/points")
@@ -385,6 +430,27 @@ def api_cmd(payload: dict, token: str | None = Query(default=None),
     return {"cmd": line, "output": _run_cmd(line)}
 
 
+def _resolve_ws_ids(raw) -> list[int]:
+    out: list[int] = []
+    seen: set[int] = set()
+    for x in raw or []:
+        try:
+            if isinstance(x, bool):
+                continue
+            if isinstance(x, int):
+                pid = x
+            elif isinstance(x, str) and x.lstrip("-").isdigit():
+                pid = int(x)
+            else:
+                pid = api_client.find_by_name(str(x))
+        except Exception:  # noqa: BLE001
+            continue
+        if pid not in seen:
+            seen.add(pid)
+            out.append(pid)
+    return out
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
     auth = ws.headers.get("authorization")
@@ -392,14 +458,25 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
         await ws.close(code=4401)
         return
     await ws.accept()
+    if len(ws_clients) >= 32:
+        await ws.close(code=1013)
+        return
+
     ws_clients.add(ws)
+    ws_listener = NotifyListener(SOCK, on_notify=_make_notify_callback(ws))
+    ws_listeners[ws] = ws_listener
     try:
-        # 连接即推送全量清单
-        try:
-            pts = api_client.list_points()
-        except Exception:  # noqa: BLE001
-            pts = []
+        ws_listener.start()
+        pts = _ensure_registry()
         await ws.send_json({"op": "list", "points": pts})
+
+        # 旧前端兼容：默认只订阅首屏前 32 点；新前端随后发 set_subs 整组替换。
+        initial = [p["id"] for p in pts[:32]]
+        if initial:
+            ws_listener.subscribe(initial)
+        if not supports_set_subs:
+            await ws.send_json({"type": "legacy", "page_size": 32})
+
         while True:
             raw = await ws.receive_text()
             try:
@@ -408,28 +485,40 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
                 continue
             op = msg.get("op")
             if op == "list":
-                await ws.send_json({"op": "list", "points": pts})
+                await ws.send_json({"op": "list", "points": _ensure_registry()})
             elif op == "set":
                 await _ws_set(ws, msg)
+            elif op == "set_subs":
+                ids = _resolve_ws_ids(msg.get("ids") or msg.get("pointIds") or [])
+                if supports_set_subs:
+                    ws_listener.set_subs(ids)
+                else:
+                    ids = ws_listener.replace_subs_legacy(ids)
+                    await ws.send_json({"type": "legacy", "page_size": 32,
+                                        "ids": ids})
+                await ws.send_json({"op": "subscribed", "ids": ids})
             elif op == "subscribe":
-                ids = msg.get("pointIds") or []
-                # 支持按名订阅：解析为 id
-                resolved = []
-                for x in ids:
-                    if isinstance(x, int):
-                        resolved.append(x)
-                    else:
-                        try:
-                            resolved.append(api_client.find_by_name(str(x)))
-                        except Exception:  # noqa: BLE001
-                            pass
-                if resolved and listener:
-                    listener.subscribe(resolved)
-                await ws.send_json({"op": "subscribed", "ids": resolved})
+                ids = _resolve_ws_ids(msg.get("ids") or msg.get("pointIds") or [])
+                if supports_set_subs:
+                    ws_listener.subscribe(ids[:1024])
+                else:
+                    ids = ws_listener.replace_subs_legacy(ids)
+                    await ws.send_json({"type": "legacy", "page_size": 32,
+                                        "ids": ids})
+                await ws.send_json({"op": "subscribed", "ids": ids})
+            elif op == "ping":
+                await ws.send_json({"type": "pong"})
     except WebSocketDisconnect:
         pass
+    except Exception as e:  # noqa: BLE001
+        try:
+            await ws.send_json({"op": "error", "msg": str(e)})
+        except Exception:  # noqa: BLE001
+            pass
     finally:
+        ws_listeners.pop(ws, None)
         ws_clients.discard(ws)
+        ws_listener.stop()
 
 
 async def _ws_set(ws: WebSocket, msg: dict) -> None:

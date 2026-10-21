@@ -145,7 +145,7 @@ def main() -> None:
                 assert update["id"] == 10, update
                 assert update["pointId"] == "AHU_01.Supply_Temp", update  # 点名对齐 HmiPointValueDto
                 assert update["value"] == "123", update                   # value 字符串化对齐
-                assert update["quality"] is None, update                 # NOTIFY 无质量字段 → null
+                assert update["quality"] == "0", update                   # v3.10 NOTIFY 携带 quality=Good
 
                 # v3.9.1 回归：监听线程必须熬过 socket 空闲超时（原实现 2s 后静默退出，
                 # 导致「连接正常但永远收不到 update」）。这里静默 >2s 再写。
