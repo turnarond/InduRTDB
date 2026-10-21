@@ -14,7 +14,28 @@ async function rest(path, opts = {}) {
 }
 
 export const api = {
-  // v3.9 T7：分区过滤。无参 = 全部分区点位（v3.8 行为）；传 partition = 仅该分区点位。
+  // v3.10：服务端分页。返回 {points,total,offset,limit}；无分页参数时兼容旧数组。
+  fetchPoints: async ({ partition, offset, limit, q, type, access } = {}) => {
+    const qs = new URLSearchParams()
+    const put = (k, v) => {
+      if (v !== undefined && v !== null && v !== '') qs.set(k, String(v))
+    }
+    put('partition', partition)
+    put('offset', offset)
+    put('limit', limit)
+    put('q', q)
+    put('type', type)
+    put('access', access)
+    const data = await rest(`/api/points${qs.toString() ? `?${qs}` : ''}`)
+    if (Array.isArray(data)) {
+      // 旧后端忽略分页参数并返回全量数组：在前端切片并标记 legacy，触发 32 点/页降级。
+      const o = Number(offset) || 0
+      const l = limit === undefined || limit === null ? data.length : Number(limit)
+      return { points: data.slice(o, o + l), total: data.length, offset: o, limit: l, legacy: true }
+    }
+    return data
+  },
+  // v3.9 T7：分区过滤（无分页旧接口；保留给分区视图/兼容调用）。
   listPoints: (partition) =>
     rest(partition === undefined || partition === null ? '/api/points' : `/api/points?partition=${partition}`),
   // v3.9 T7：已注册分区列表（升序去重）。
@@ -68,6 +89,9 @@ export class RtdbSocket {
   }
   subscribe(ids) {
     this.send({ op: 'subscribe', pointIds: ids })
+  }
+  setSubs(ids) {
+    this.send({ op: 'set_subs', ids })
   }
   close() {
     this.closed = true

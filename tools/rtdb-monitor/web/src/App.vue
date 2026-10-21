@@ -37,14 +37,30 @@
       </el-header>
 
       <el-main class="main">
+        <el-alert
+          v-if="legacyMode"
+          class="legacy-alert"
+          type="warning"
+          :closable="false"
+          show-icon
+          :title="`旧版 rtdbd 不支持批量订阅，已降级为每页 ${legacyPageSize} 点`"
+        />
         <PointTable
           v-if="view === 'points'"
           :points="points"
           :values="values"
+          :total="total"
+          :page="page"
+          :page-size="pageSize"
+          :page-sizes="pageSizes"
+          :type-options="typeNames"
           @row-click="openPoint"
           @create="onCreate"
           @rename="onRename"
           @delete="onDelete"
+          @page-change="onPageChange"
+          @page-size-change="onPageSizeChange"
+          @filter="onFilter"
         />
         <div v-else-if="view === 'partitions'" class="partition-view">
           <el-form :inline="true" class="filter-bar">
@@ -59,17 +75,25 @@
               </el-select>
             </el-form-item>
             <el-form-item>
-              <span class="count">共 {{ partitionPoints.length }} 个点位</span>
+              <span class="count">共 {{ total }} 个点位</span>
             </el-form-item>
           </el-form>
           <PointTable
             v-if="selectedPartition !== null && selectedPartition !== undefined"
-            :points="partitionPoints"
+            :points="points"
             :values="values"
+            :total="total"
+            :page="page"
+            :page-size="pageSize"
+            :page-sizes="pageSizes"
+            :type-options="typeNames"
             @row-click="openPoint"
             @create="onCreate"
             @rename="onRename"
             @delete="onDelete"
+            @page-change="onPageChange"
+            @page-size-change="onPageSizeChange"
+            @filter="onFilter"
           />
           <div v-else class="placeholder">
             <el-result icon="info" title="选择分区" sub-title="请从上方下拉选择一个分区以查看该分区点位。" />
@@ -137,7 +161,15 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 
 const view = ref('points')
 const status = ref('down')
-const points = ref([])
+const points = ref([]) // 当前页
+const allPoints = ref([]) // WS list 全量，仅用于分配新建 ID
+const total = ref(0)
+const page = ref(1)
+const pageSize = ref(50)
+const legacyMode = ref(false)
+const legacyPageSize = ref(32)
+const pageSizes = computed(() => (legacyMode.value ? [legacyPageSize.value] : [10, 20, 32, 50, 100]))
+const filters = reactive({ q: '', type: '', access: null })
 const values = reactive({}) // id -> {value, quality, ts}
 const selected = ref(null)
 const drawerVisible = ref(false)
@@ -155,13 +187,21 @@ const placeholderHint = computed(() => (placeholderMap[view.value] ? placeholder
 // ---- v3.9 T7 分区视图 ----
 const partitions = ref([])
 const selectedPartition = ref(null)
-const partitionPoints = ref([])
 
 function onMenu(index) {
   view.value = index
-  if (index === 'partitions') {
+  if (index === 'points') {
+    page.value = 1
+    loadPage()
+  } else if (index === 'partitions') {
     if (partitions.value.length === 0) loadPartitions()
-    if (selectedPartition.value !== null && selectedPartition.value !== undefined) loadPartitionPoints()
+    if (selectedPartition.value !== null && selectedPartition.value !== undefined) {
+      page.value = 1
+      loadPage()
+    } else {
+      points.value = []
+      total.value = 0
+    }
   }
 }
 
@@ -175,16 +215,79 @@ async function loadPartitions() {
 }
 
 async function loadPartitionPoints() {
-  if (selectedPartition.value === null || selectedPartition.value === undefined) {
-    partitionPoints.value = []
+  page.value = 1
+  await loadPage()
+}
+
+// ---- v3.10 服务端分页 ----
+let loadSeq = 0
+let resyncTimer = null
+
+function activePartition() {
+  return view.value === 'partitions' ? selectedPartition.value : null
+}
+
+async function loadPage() {
+  const part = activePartition()
+  if (view.value === 'partitions' && (part === null || part === undefined)) {
+    points.value = []
+    total.value = 0
     return
   }
+  const seq = ++loadSeq
   try {
-    partitionPoints.value = await api.listPoints(selectedPartition.value)
-    await loadValues(partitionPoints.value)
+    const data = await api.fetchPoints({
+      partition: part,
+      offset: (page.value - 1) * pageSize.value,
+      limit: pageSize.value,
+      ...filters
+    })
+    if (seq !== loadSeq) return
+    if (data.legacy) {
+      legacyMode.value = true
+      legacyPageSize.value = 32
+      if (pageSize.value !== 32) {
+        pageSize.value = 32
+        page.value = 1
+        return loadPage()
+      }
+    }
+    points.value = data.points || []
+    total.value = data.total ?? points.value.length
+    const maxPage = Math.max(1, Math.ceil(total.value / pageSize.value))
+    if (page.value > maxPage) {
+      page.value = maxPage
+      return loadPage()
+    }
+    await loadValues(points.value)
+    syncSubs()
   } catch (e) {
     /* ignore */
   }
+}
+
+function syncSubs() {
+  if (!socket) return
+  socket.setSubs(points.value.map((p) => p.id))
+}
+
+function onPageChange(p) {
+  page.value = p
+  loadPage()
+}
+
+function onPageSizeChange(size) {
+  pageSize.value = size
+  page.value = 1
+  loadPage()
+}
+
+function onFilter(f) {
+  filters.q = f.q
+  filters.type = f.type
+  filters.access = f.access
+  page.value = 1
+  loadPage()
 }
 
 // ---- v3.6 点位 CRUD ----
@@ -193,7 +296,7 @@ const form = ref({ id: 1, name: '', type: 'int32', access: 3 })
 const typeNames = ['bool', 'int32', 'double', 'string', 'int64', 'uint32', 'float']
 
 function nextFreeId() {
-  const used = new Set(points.value.map((p) => p.id))
+  const used = new Set((allPoints.value.length ? allPoints.value : points.value).map((p) => p.id))
   let i = 1
   while (used.has(i)) i++
   return i
@@ -245,11 +348,8 @@ async function refresh() {
   try {
     if (view.value === 'partitions') {
       await loadPartitions()
-      await loadPartitionPoints()
-    } else {
-      points.value = await api.listPoints()
-      await loadValues()
     }
+    await loadPage()
   } catch (e) {
     /* ignore */
   }
@@ -275,15 +375,15 @@ async function loadValues(list) {
 
 function onMessage(msg) {
   if (msg.op === 'list') {
-    points.value = msg.points || []
-    // v3.9.1：连接（含自动重连）后显式订阅当前清单，避免服务端仅按启动时
-    // 点位集合订阅造成新增点位在重连后收不到 update。
-    if (socket) socket.subscribe(points.value.map((p) => p.id))
-    loadValues()
+    allPoints.value = msg.points || []
+    // 服务端已连接/重连；只刷新当前页并重发当前页订阅，避免 2 万点全量推送。
+    loadValues(points.value)
+    syncSubs()
   } else if (msg.op === 'update') {
     const id = msg.id
-    // NOTIFY 帧不携带质量，服务端会下发 quality=null；此时保留最近一次
-    // REST 读到的质量，避免每次实时更新都把 Bad/Timeout 覆盖成 Good。
+    // 只接收当前页订阅点的推送；其它页即使服务端误发也不污染状态。
+    if (!points.value.some((p) => p.id === id)) return
+    // v3.10 NOTIFY 携带 quality；null 时保留最近一次 REST 读值，兼容旧服务端。
     const prevQ = values[id] ? values[id].quality : null
     const q = msg.quality === null || msg.quality === undefined ? prevQ : Number(msg.quality)
     values[id] = { value: msg.value, quality: q, ts: msg.ts }
@@ -291,6 +391,18 @@ function onMessage(msg) {
       history.value.push({ ts: Date.now(), value: Number(msg.value) })
       if (history.value.length > 300) history.value.shift()
     }
+  } else if (msg.type === 'legacy') {
+    legacyMode.value = true
+    legacyPageSize.value = Number(msg.page_size) || 32
+    if (pageSize.value !== legacyPageSize.value) {
+      pageSize.value = legacyPageSize.value
+      page.value = 1
+      loadPage()
+    }
+  } else if (msg.type === 'resync') {
+    // notify_drop 后去抖重发当前页订阅，避免风暴。
+    clearTimeout(resyncTimer)
+    resyncTimer = setTimeout(syncSubs, 2000)
   }
 }
 
@@ -318,8 +430,12 @@ function toggleDark(v) {
 
 onMounted(() => {
   socket = new RtdbSocket({ onMessage, onStatus: (s) => (status.value = s) })
+  loadPage()
 })
-onBeforeUnmount(() => socket && socket.close())
+onBeforeUnmount(() => {
+  clearTimeout(resyncTimer)
+  socket && socket.close()
+})
 </script>
 
 <style scoped>
@@ -377,6 +493,9 @@ onBeforeUnmount(() => socket && socket.close())
 .count {
   color: var(--el-text-color-secondary);
   font-size: 13px;
+}
+.legacy-alert {
+  margin-bottom: 12px;
 }
 .field-hint {
   width: 100%;

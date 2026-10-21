@@ -2,7 +2,12 @@
   <div>
     <el-form :inline="true" class="filter-bar">
       <el-form-item label="名称">
-        <el-input v-model="name" placeholder="按名称搜索" clearable style="width: 200px" />
+        <el-input
+          v-model="name"
+          placeholder="按名称搜索"
+          clearable
+          style="width: 200px"
+        />
       </el-form-item>
       <el-form-item label="类型">
         <el-select v-model="typeFilter" placeholder="全部" clearable style="width: 130px">
@@ -16,7 +21,7 @@
         </el-select>
       </el-form-item>
       <el-form-item>
-        <span class="count">共 {{ filtered.length }} 个点位</span>
+        <span class="count">共 {{ total }} 个点位（当前页 {{ points.length }}）</span>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" :icon="Plus" @click="$emit('create')">新建点位</el-button>
@@ -24,7 +29,7 @@
     </el-form>
 
     <el-table
-      :data="paged"
+      :data="points"
       stripe
       border
       height="100%"
@@ -68,48 +73,54 @@
 
     <div class="pager">
       <el-pagination
-        v-model:current-page="page"
-        v-model:page-size="pageSize"
-        :total="filtered.length"
-        :page-sizes="[10, 20, 50, 100]"
+        :current-page="page"
+        :page-size="pageSize"
+        :page-sizes="pageSizes"
+        :total="total"
         layout="total, sizes, prev, pager, next, jumper"
         background
+        @current-change="$emit('page-change', $event)"
+        @size-change="$emit('page-size-change', $event)"
       />
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, watch, onBeforeUnmount } from 'vue'
 import { Plus } from '@element-plus/icons-vue'
 import { qualityLabel, qualityTagType } from '../quality.js'
 
 const props = defineProps({
-  points: { type: Array, default: () => [] },
-  values: { type: Object, default: () => ({}) } // id -> {value,quality,ts}
+  points: { type: Array, default: () => [] }, // 当前页
+  values: { type: Object, default: () => ({}) }, // id -> {value,quality,ts}
+  total: { type: Number, default: 0 },
+  page: { type: Number, default: 1 },
+  pageSize: { type: Number, default: 50 },
+  pageSizes: { type: Array, default: () => [10, 20, 32, 50, 100] },
+  typeOptions: { type: Array, default: () => [] }
 })
-const emit = defineEmits(['row-click', 'create', 'rename', 'delete'])
+const emit = defineEmits([
+  'row-click', 'create', 'rename', 'delete',
+  'page-change', 'page-size-change', 'filter'
+])
 
 const name = ref('')
 const typeFilter = ref('')
 const accessFilter = ref('')
-const page = ref(1)
-const pageSize = ref(20)
+let filterTimer = null
 
-const typeOptions = computed(() => [...new Set(props.points.map((p) => p.typeName))])
-
-const filtered = computed(() =>
-  props.points.filter((p) => {
-    if (name.value && !p.name.toLowerCase().includes(name.value.toLowerCase())) return false
-    if (typeFilter.value && p.typeName !== typeFilter.value) return false
-    if (accessFilter.value !== '' && p.access !== accessFilter.value) return false
-    return true
-  })
-)
-const paged = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filtered.value.slice(start, start + pageSize.value)
+watch([name, typeFilter, accessFilter], () => {
+  clearTimeout(filterTimer)
+  filterTimer = setTimeout(() => {
+    emit('filter', {
+      q: name.value.trim(),
+      type: typeFilter.value || '',
+      access: accessFilter.value === '' ? null : accessFilter.value
+    })
+  }, 250)
 })
+onBeforeUnmount(() => clearTimeout(filterTimer))
 
 function liveOf(id) {
   const v = props.values[id]
