@@ -29,6 +29,7 @@ extern "C" {
 
 #include "core/irt_shm.h"
 #include "core/irt_point_manager.h"
+#include "core/irt_meta_timeout.h"
 #include "internal/irt_types.h"
 }
 
@@ -172,6 +173,50 @@ TEST_F(MetaTest, PublicApiRoundTrip) {
 
     indurtdb_shutdown();
     ::unlink(("/dev/shm/indurtdb_" + inst).c_str());
+}
+
+/* ---- v3.10 任务1：per-point timeout 元数据 ---- */
+
+/* bit3 置位且 timeout_ms > 0 → 合法；reserved[0..3] 小端存值 */
+TEST(MetaTimeout, MetaTimeoutFlagValid) {
+    indurtdb_meta_t m{};
+    irt_meta_set_timeout_ms(&m, 1500);
+    EXPECT_EQ(m.flags & INDURTDB_META_FLAG_TIMEOUT, INDURTDB_META_FLAG_TIMEOUT);
+    EXPECT_EQ(irt_meta_timeout_ms(&m), 1500u);
+    EXPECT_EQ(m.reserved[0], 0xDCu);  /* 1500 = 0x000005DC, little-endian */
+    EXPECT_EQ(m.reserved[1], 0x05u);
+    EXPECT_EQ(m.reserved[2], 0x00u);
+    EXPECT_EQ(m.reserved[3], 0x00u);
+    EXPECT_EQ(indurtdb_validate_point_meta(&m, nullptr), INDURTDB_CFG_OK);
+}
+
+/* bit3 置位但 timeout_ms == 0 → 拒绝 */
+TEST(MetaTimeout, MetaTimeoutFlagRejectsZero) {
+    indurtdb_meta_t m{};
+    m.flags = INDURTDB_META_FLAG_TIMEOUT;
+    uint32_t fld = 0;
+    EXPECT_EQ(indurtdb_validate_point_meta(&m, &fld), INDURTDB_CFG_ERR_FLAGS);
+    EXPECT_EQ(fld, INDURTDB_CFG_FLD_FLAGS);
+}
+
+/* timeout_ms > 0 但 bit3 未置位（孤儿值）→ 拒绝 */
+TEST(MetaTimeout, MetaTimeoutRejectsOrphanValue) {
+    indurtdb_meta_t m{};
+    irt_meta_set_timeout_ms(&m, 1500);
+    m.flags &= ~INDURTDB_META_FLAG_TIMEOUT;
+    uint32_t fld = 0;
+    EXPECT_EQ(indurtdb_validate_point_meta(&m, &fld), INDURTDB_CFG_ERR_FLAGS);
+    EXPECT_EQ(fld, INDURTDB_CFG_FLD_FLAGS);
+}
+
+/* reserved[4..7] 非零 → 拒绝 */
+TEST(MetaTimeout, MetaTimeoutRejectsReservedTail) {
+    indurtdb_meta_t m{};
+    irt_meta_set_timeout_ms(&m, 1500);
+    m.reserved[4] = 1;
+    uint32_t fld = 0;
+    EXPECT_EQ(indurtdb_validate_point_meta(&m, &fld), INDURTDB_CFG_ERR_FLAGS);
+    EXPECT_EQ(fld, INDURTDB_CFG_FLD_FLAGS);
 }
 
 }  // namespace

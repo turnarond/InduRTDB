@@ -95,15 +95,16 @@ typedef struct {
     double   eur_min;     /* 0–7   : 工程量程下限 */
     double   eur_max;     /* 8–15  : 工程量程上限 */
     float    deadband;    /* 16–19 : 变化阈值（只存参数） */
-    uint32_t flags;       /* 20–23 : 是否启用量程 / 死区等（bit0=eur, bit1=deadband） */
-    uint8_t  reserved[8]; /* 24–31 : 保留（须为 0） */
+    uint32_t flags;       /* 20–23 : 是否启用量程 / 死区 / 超时（bit0=eur, bit1=deadband, bit2=deadband_pct, bit3=timeout） */
+    uint8_t  reserved[8]; /* 24–31 : bit3=timeout 时 reserved[0..3] 存 timeout_ms (LE)，reserved[4..7] 必须为 0 */
 } __attribute__((packed, aligned(32))) indurtdb_meta_t;
 
-/* 元数据 flags 位定义（v3.7 主题A：死区/RBE + EURange 生效）
+/* 元数据 flags 位定义（v3.7 主题A：死区/RBE + EURange 生效；v3.10：per-point 超时）
  * 仅新增位，结构体布局不变（仍 32B）。 */
 #define INDURTDB_META_FLAG_EUR          (1u << 0)  /* 启用量程检查（EURange → 量程位） */
 #define INDURTDB_META_FLAG_DEADBAND     (1u << 1)  /* 启用绝对死区 */
 #define INDURTDB_META_FLAG_DEADBAND_PCT (1u << 2)  /* 死区为百分比模式（相对 eur 量程） */
+#define INDURTDB_META_FLAG_TIMEOUT      (1u << 3)  /* 启用每点位超时（reserved[0..3] 存 timeout_ms） */
 
 /* ---- 质量位（quality）分层布局 ----
  *   bit 0–3 : 基础质量码（16 种，现有 0–3 取值不变）

@@ -15,6 +15,7 @@
 #include "core/irt_config.h"
 #include "core/irt_index.h"
 #include "core/irt_delta.h"
+#include "core/irt_meta_timeout.h"
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
@@ -447,6 +448,9 @@ int indurtdb_h_load_config(indurtdb_t* h, const char* config_path) {
             m.eur_max  = pm->eur_max;
             m.deadband = pm->deadband;
             m.flags    = pm->flags;
+            if (pm->timeout_ms > 0) {
+                irt_meta_set_timeout_ms(&m, pm->timeout_ms);
+            }
             if (irt_meta_set(&h->shm, pm->id, &m) != INDURTDB_OK)
                 overall_rc = INDURTDB_ERR_BUSY;
         }
@@ -823,10 +827,10 @@ int indurtdb_self_check(void) {
 
 /* ==== v3.7 主题B B3：配置校验（纯函数 + 遍历，不改写任何状态） ==== */
 
-/* 元数据 flags 已知位掩码（主题A 定义的三个位） */
+/* 元数据 flags 已知位掩码（主题A 定义的三个位 + v3.10 timeout） */
 #define IRT_META_FLAG_KNOWN                                             \
     ((uint32_t)(INDURTDB_META_FLAG_EUR | INDURTDB_META_FLAG_DEADBAND | \
-                INDURTDB_META_FLAG_DEADBAND_PCT))
+                INDURTDB_META_FLAG_DEADBAND_PCT | INDURTDB_META_FLAG_TIMEOUT))
 
 int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field)
 {
@@ -865,6 +869,30 @@ int indurtdb_validate_point_meta(const indurtdb_meta_t* m, uint32_t* err_field)
     if ((m->flags & INDURTDB_META_FLAG_DEADBAND_PCT) && !(m->deadband <= 100.0f)) {
         if (err_field) *err_field = INDURTDB_CFG_FLD_DEADBAND;
         return INDURTDB_CFG_ERR_DEADBAND_PCT;
+    }
+
+    /* v3.10: per-point timeout 校验
+     * - flag 置位 ⇔ timeout_ms > 0（二者必须一致）
+     * - reserved[4..7] 必须为 0 */
+    if (m->flags & INDURTDB_META_FLAG_TIMEOUT) {
+        uint32_t timeout_ms = 0;
+        memcpy(&timeout_ms, m->reserved, sizeof(timeout_ms));
+        if (timeout_ms == 0) {
+            if (err_field) *err_field = INDURTDB_CFG_FLD_FLAGS;
+            return INDURTDB_CFG_ERR_FLAGS;
+        }
+    } else {
+        uint32_t timeout_ms = 0;
+        memcpy(&timeout_ms, m->reserved, sizeof(timeout_ms));
+        if (timeout_ms != 0) {
+            if (err_field) *err_field = INDURTDB_CFG_FLD_FLAGS;
+            return INDURTDB_CFG_ERR_FLAGS;
+        }
+    }
+    if (m->reserved[4] != 0 || m->reserved[5] != 0 ||
+        m->reserved[6] != 0 || m->reserved[7] != 0) {
+        if (err_field) *err_field = INDURTDB_CFG_FLD_FLAGS;
+        return INDURTDB_CFG_ERR_FLAGS;
     }
 
     return INDURTDB_CFG_OK;

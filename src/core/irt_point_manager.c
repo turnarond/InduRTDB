@@ -11,6 +11,7 @@
 #include <internal/irt_seqlock.h>
 #include <string.h>
 #include <stdio.h>
+#include "core/irt_meta_timeout.h"
 
 void irt_pm_init(irt_pm_t* pm, irt_shm_t* shm) {
     if (!pm || !shm) return;
@@ -202,11 +203,12 @@ uint64_t irt_pm_write_count(const irt_pm_t* pm) {
 }
 
 int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
-    if (!pm || timeout_ns == 0) return 0;
+    if (!pm) return 0;
 
     irt_header_t*      hdr = irt_shm_header(pm->shm);
     indurtdb_point_t*  pts = irt_shm_points(pm->shm);
-    if (!hdr || !pts) return 0;
+    indurtdb_meta_t*   metas = irt_shm_meta(pm->shm);
+    if (!hdr || !pts || !metas) return 0;
 
     /* 必须与写入 timestamp_ns 使用同一时钟（REALTIME），否则跨时钟相减无意义。 */
     uint64_t now = irt_time_realtime_ns();
@@ -235,11 +237,19 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
         if (ts == 0) continue;
         if (q == INDURTDB_QUALITY_TIMEOUT) continue;
 
+        /* v3.10: 计算有效超时（纳秒）。
+         * - 点位启用 per-point 且 timeout_ms > 0 时用其值；
+         * - 否则用全局 timeout_ns；
+         * - 有效超时为 0 时跳过（不检测该点）。 */
+        uint32_t pt_timeout_ms = irt_meta_timeout_ms(&metas[id]);
+        uint64_t effective_ns = (pt_timeout_ms > 0) ? (uint64_t)pt_timeout_ms * 1000000ULL : timeout_ns;
+        if (effective_ns == 0) continue;
+
         /* 超时检测: ts > now 表示扫描期间被并发写入更新过, 跳过;
-         * 使用 now - ts <= timeout_ns 而非 ts + timeout_ns >= now,
-         * 避免 ts + timeout_ns 在极端超时值下溢出. */
+         * 使用 now - ts <= effective_ns 而非 ts + effective_ns >= now,
+         * 避免 ts + effective_ns 在极端超时值下溢出. */
         if (ts >= now) continue;
-        if (now - ts <= timeout_ns) continue;
+        if (now - ts <= effective_ns) continue;
 
         /* 获取写锁, 标记 TIMEOUT */
         uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
@@ -254,7 +264,7 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
         if (p->timestamp_ns == 0
             || p->timestamp_ns >= now
             || p->quality == INDURTDB_QUALITY_TIMEOUT
-            || now - p->timestamp_ns <= timeout_ns) {
+            || now - p->timestamp_ns <= effective_ns) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             continue;
         }

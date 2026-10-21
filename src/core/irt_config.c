@@ -233,6 +233,11 @@ int irt_point_config_parse_yaml(const char* path, irt_point_meta_batch_t* out) {
             cur.has_meta = 1;
             if (parse_u32(val, 0, &f) != 0) cur.bad_value = 1;
             cur.flags = f;
+        } else if (strcmp(key, "timeout_ms") == 0) {
+            uint32_t t = 0;
+            cur.has_meta = 1;
+            if (parse_u32(val, 0, &t) != 0) cur.bad_value = 1;
+            cur.timeout_ms = t;
         }
     }
 

@@ -41,6 +41,7 @@ typedef struct {
     double   eur_max;
     float    deadband;
     uint32_t flags;
+    uint32_t timeout_ms;   /* v3.10: 可选每点位超时（毫秒），0 = 不启用 */
     uint8_t  has_meta;
     /* 某一可选字段的值无法解析（非数字 / 溢出 / NaN）→ 置 1。
      * 调用方须据此把配置判为非法（fail-fast），

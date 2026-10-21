@@ -6,11 +6,14 @@
 
 #include <gtest/gtest.h>
 #include <cstring>
+#include <chrono>
+#include <thread>
 
 extern "C" {
 #include "osal/irt_osal.h"
 #include "core/irt_shm.h"
 #include "core/irt_point_manager.h"
+#include "core/irt_meta_timeout.h"
 }
 
 class CPmTest : public ::testing::Test {
@@ -90,4 +93,80 @@ TEST_F(CPmTest, WriteCountIncrements) {
     irt_pm_write_int32(&pm_, 11, 1);
     uint64_t c1 = irt_pm_write_count(&pm_);
     EXPECT_EQ(c1, c0 + 2);
+}
+
+/* ============================================================
+ * v3.10: per-point timeout check_timeouts 语义
+ * ============================================================ */
+
+namespace {
+
+std::string unique_instance(const char* tag) {
+    static int seq = 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "irt_pm_%s_%d_%d", tag, (int)getpid(), ++seq);
+    return std::string(buf);
+}
+
+void write_point_and_meta(irt_shm_t* shm, irt_pm_t* pm, uint32_t id, uint32_t timeout_ms) {
+    ASSERT_EQ(irt_pm_write_double(pm, id, 1.0), 0);
+    if (timeout_ms > 0) {
+        indurtdb_meta_t m{};
+        irt_meta_set_timeout_ms(&m, timeout_ms);
+        ASSERT_EQ(irt_meta_set(shm, id, &m), 0);
+    }
+}
+
+} // namespace
+
+/* 全局 1000 ms，点位 10 ms；写后睡 50 ms → check_timeouts(0) 命中 */
+TEST_F(CPmTest, CheckTimeoutsUsesPerPoint)
+{
+    write_point_and_meta(&shm_, &pm_, 10, 10);  // per-point 10 ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    int detected = irt_pm_check_timeouts(&pm_, 1000 * 1000000ULL);  // global 1000 ms
+    EXPECT_GT(detected, 0);
+
+    indurtdb_point_t p{};
+    ASSERT_EQ(irt_pm_read(&pm_, 10, &p), 0);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_TIMEOUT);
+}
+
+/* 全局 0，点位 10 ms；写后睡 50 ms → check_timeouts(0) 仍命中 */
+TEST_F(CPmTest, CheckTimeoutsZeroStillScans)
+{
+    write_point_and_meta(&shm_, &pm_, 11, 10);  // per-point 10 ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    int detected = irt_pm_check_timeouts(&pm_, 0);  // global 0
+    EXPECT_GT(detected, 0);
+
+    indurtdb_point_t p{};
+    ASSERT_EQ(irt_pm_read(&pm_, 11, &p), 0);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_TIMEOUT);
+}
+
+/* 点位 500 ms，全局 10 ms；写后睡 50 ms → 不命中（per-point 优先） */
+TEST_F(CPmTest, CheckTimeoutsPerPointOverridesGlobal)
+{
+    write_point_and_meta(&shm_, &pm_, 12, 500);  // per-point 500 ms
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    int detected = irt_pm_check_timeouts(&pm_, 10 * 1000000ULL);  // global 10 ms
+    EXPECT_EQ(detected, 0);
+
+    indurtdb_point_t p{};
+    ASSERT_EQ(irt_pm_read(&pm_, 12, &p), 0);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_GOOD);
+}
+
+/* 未配置点位，全局 10 ms；写后睡 50 ms → 命中 */
+TEST_F(CPmTest, CheckTimeoutsGlobalStillWorks)
+{
+    write_point_and_meta(&shm_, &pm_, 13, 0);  // no per-point
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    int detected = irt_pm_check_timeouts(&pm_, 10 * 1000000ULL);  // global 10 ms
+    EXPECT_GT(detected, 0);
+
+    indurtdb_point_t p{};
+    ASSERT_EQ(irt_pm_read(&pm_, 13, &p), 0);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_TIMEOUT);
 }

@@ -22,6 +22,9 @@
 
 extern "C" {
 #include "core/irt_config.h"
+#include "core/irt_meta_timeout.h"
+#include "core/irt_shm.h"
+#include "internal/irt_seqlock.h"
 }
 
 /* ---- v3.1.0 原有：配置加载器 ---- */
@@ -307,6 +310,160 @@ TEST(ConfigYamlInt64, ParsedPointsSurvive)
     EXPECT_EQ(batch.points[0].type, INDURTDB_TYPE_STRING);
     EXPECT_EQ(batch.points[1].type, INDURTDB_TYPE_INT64);
     EXPECT_EQ(batch.points[2].type, INDURTDB_TYPE_UINT32);
+
+    irt_point_config_free(&batch);
+}
+
+/* ============================================================
+ * v3.10: timeout_ms YAML 解析与元数据写入
+ * ============================================================ */
+
+namespace {
+
+std::string unique_instance(const char* tag) {
+    static int seq = 0;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "irt_cfg_%s_%d_%d", tag, (int)getpid(), ++seq);
+    return std::string(buf);
+}
+
+void init_shm_and_point(irt_shm_t* shm, const std::string& inst, uint32_t id, const char* name, int type) {
+    ASSERT_EQ(irt_shm_init(shm, inst.c_str(), 64, 0), 0);
+    indurtdb_point_t* pts = irt_shm_points(shm);
+    ASSERT_NE(pts, nullptr);
+    memset(pts, 0, 64 * sizeof(indurtdb_point_t));
+    irt_header_t* hdr = irt_shm_header(shm);
+    uint64_t seq0 = irt_seqlock_write_begin(&hdr->write_seq);
+    pts[id].type = (uint8_t)type;
+    pts[id].access = INDURTDB_ACCESS_READ_WRITE;
+    strncpy(pts[id].name, name, sizeof(pts[id].name) - 1);
+    pts[id].name[sizeof(pts[id].name) - 1] = '\0';
+    irt_seqlock_write_end(&hdr->write_seq, seq0);
+}
+
+} // namespace
+
+/* YAML timeout_ms: 1500 → bit3 置位，值 1500 */
+TEST(ConfigTimeout, ConfigParsesTimeoutMs)
+{
+    const std::string inst = unique_instance("timeout");
+    const char* path = "/tmp/indurtdb_test_timeout.yaml";
+    FILE* f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fputs("points:\n"
+          "  - id: 5\n"
+          "    name: \"temp\"\n"
+          "    type: double\n"
+          "    timeout_ms: 1500\n", f);
+    fclose(f);
+
+    irt_shm_t shm{};
+    init_shm_and_point(&shm, inst, 5, "temp", INDURTDB_TYPE_DOUBLE);
+
+    irt_point_meta_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    int n = irt_point_config_parse_yaml(path, &batch);
+    ASSERT_GT(n, 0);
+
+    /* 模拟 load_config 的写入逻辑 */
+    for (int i = 0; i < n; ++i) {
+        const irt_point_meta_t* pm = &batch.points[i];
+        if (pm->has_meta && pm->id < 64) {
+            indurtdb_meta_t m;
+            memset(&m, 0, sizeof(m));
+            m.eur_min  = pm->eur_min;
+            m.eur_max  = pm->eur_max;
+            m.deadband = pm->deadband;
+            m.flags    = pm->flags;
+            if (pm->timeout_ms > 0) {
+                irt_meta_set_timeout_ms(&m, pm->timeout_ms);
+            }
+            ASSERT_EQ(irt_meta_set(&shm, pm->id, &m), 0);
+        }
+    }
+    irt_point_config_free(&batch);
+    remove(path);
+
+    /* 读回验证 */
+    indurtdb_meta_t m{};
+    ASSERT_EQ(irt_meta_get(&shm, 5, &m), 0);
+    EXPECT_EQ(m.flags & INDURTDB_META_FLAG_TIMEOUT, INDURTDB_META_FLAG_TIMEOUT);
+    EXPECT_EQ(irt_meta_timeout_ms(&m), 1500u);
+
+    irt_shm_shutdown(&shm);
+    ::unlink(("/dev/shm/indurtdb_" + inst).c_str());
+}
+
+/* YAML timeout_ms: 0 → bit3 清除，值 0 */
+TEST(ConfigTimeout, ConfigZeroTimeoutClearsFlag)
+{
+    const std::string inst = unique_instance("timeout0");
+    const char* path = "/tmp/indurtdb_test_timeout0.yaml";
+    FILE* f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fputs("points:\n"
+          "  - id: 6\n"
+          "    name: \"pressure\"\n"
+          "    type: double\n"
+          "    timeout_ms: 0\n", f);
+    fclose(f);
+
+    irt_shm_t shm{};
+    init_shm_and_point(&shm, inst, 6, "pressure", INDURTDB_TYPE_DOUBLE);
+
+    irt_point_meta_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    int n = irt_point_config_parse_yaml(path, &batch);
+    ASSERT_GT(n, 0);
+
+    for (int i = 0; i < n; ++i) {
+        const irt_point_meta_t* pm = &batch.points[i];
+        if (pm->has_meta && pm->id < 64) {
+            indurtdb_meta_t m;
+            memset(&m, 0, sizeof(m));
+            m.eur_min  = pm->eur_min;
+            m.eur_max  = pm->eur_max;
+            m.deadband = pm->deadband;
+            m.flags    = pm->flags;
+            if (pm->timeout_ms > 0) {
+                irt_meta_set_timeout_ms(&m, pm->timeout_ms);
+            }
+            ASSERT_EQ(irt_meta_set(&shm, pm->id, &m), 0);
+        }
+    }
+    irt_point_config_free(&batch);
+    remove(path);
+
+    indurtdb_meta_t m{};
+    ASSERT_EQ(irt_meta_get(&shm, 6, &m), 0);
+    EXPECT_EQ(m.flags & INDURTDB_META_FLAG_TIMEOUT, 0u);
+    EXPECT_EQ(irt_meta_timeout_ms(&m), 0u);
+
+    irt_shm_shutdown(&shm);
+    ::unlink(("/dev/shm/indurtdb_" + inst).c_str());
+}
+
+/* YAML timeout_ms: abc → 解析失败，bad_value=1，load_config 应判为非法 */
+TEST(ConfigTimeout, ConfigRejectsBadTimeout)
+{
+    const char* path = "/tmp/indurtdb_test_bad_timeout.yaml";
+    FILE* f = fopen(path, "w");
+    ASSERT_NE(f, nullptr);
+    fputs("points:\n"
+          "  - id: 7\n"
+          "    name: \"bad\"\n"
+          "    type: double\n"
+          "    timeout_ms: abc\n", f);
+    fclose(f);
+
+    irt_point_meta_batch_t batch;
+    memset(&batch, 0, sizeof(batch));
+    int n = irt_point_config_parse_yaml(path, &batch);
+    remove(path);
+
+    ASSERT_GT(n, 0);
+    EXPECT_EQ(batch.points[0].bad_value, 1u);
+    EXPECT_EQ(batch.points[0].timeout_ms, 0u);
 
     irt_point_config_free(&batch);
 }
