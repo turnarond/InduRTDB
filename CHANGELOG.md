@@ -4,6 +4,51 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.10.0] — 2026-10-21「单站规模化：批量订阅、质量推送与分页监控」
+
+单站目标：**20,000 点位 × 1 Hz × 50 客户端 × 每客户端 500 订阅**。协议主版本仍为 2，
+共享内存段版本仍为 3，点位布局与 128B 大小不变；但 rtdbd 的段内订阅者槽位固定为
+`RTDBD_MAX_CLIENTS=128`，**旧版本创建的段（`max_subscribers=32`）不能直接 attach**。
+
+### Added
+- **`SET_SUBS`（opcode 18）批量整组订阅**：payload 为 `u32 count + u32 ids[count]`，
+  单次最多 1024 点；先全量校验（存在性、分区、策略、数量），通过后一次性替换订阅集；
+  失败保持旧订阅不变。成功后软清空该连接出站队列（**不计 `notify_drop`**），
+  按 id 升序推送当前点位快照，便于首屏一次收齐。
+- **NOTIFY 携带质量**：快照与广播帧的 `reserved[0]` 写入 `quality`，字符串点快照
+  `value_bits=0`；前端不再伪造 Good。
+- **点位超时**：rtdbd 新增 `--timeout-ms` 全局默认，点位 YAML 新增 `timeout_ms`
+  覆盖（优先级：点位 `timeout_ms` > `--timeout-ms` > 0=不启用）；1 Hz 扫描，
+  仅在 Good→TIMEOUT 跃迁时推送一次，写路径恢复 Good；单次扫描最多 50,000 点。
+- **监控台服务端分页**：`GET /api/points` 支持 `partition/offset/limit/q/type/access`，
+  返回 `{points,total,offset,limit,has_more}`；无分页参数时保持旧数组响应。
+- **每 WS 独立订阅**：每个 WebSocket 一个 `NotifyListener`（最多 32 个连接），
+  两个页面互不覆盖订阅；连接建立时先订阅前 32 点，前端随后用 `set_subs` 整组替换。
+- **前端按页订阅**：默认 50 点/页，翻页/过滤只订阅当前页（≤500 点）；质量列显示
+  Good / Bad / Timeout / Uncertain / Comm Failure，字符串点仍按需走 REST。
+- **旧服务端降级**：新监控台探测不到 `SET_SUBS` 时自动退回 32 点/页，并用
+  `UNSUBSCRIBE` + `SUBSCRIBE` 模拟整组替换；`legacy` 提示条明确告警。
+- **负载脚本**：`scripts/run_station_load.py` / `run_station_load.sh`，生成 20k 点配置、
+  启动 rtdbd、8 写线程 × 50 读客户端 × 500 订阅，输出每客户端帧数、写 ACK P99、
+  `notify_drop`、RSS/CPU，并对 `notify_drop == 0` 与断链做硬断言。
+
+### Changed
+- `--max-subs` 语义从“段内订阅者槽位上限”改为“**每连接**订阅点位上限”，默认
+  **1024**，范围 `1..1024`；段内订阅者槽位固定为 128，不再由该参数决定。
+- 每连接出站队列由 64 帧扩至 **1024 帧**，连接表上限 128；`notify_drop` 仍表示
+  队列满丢最旧、连接关闭未发完、flush 失败和停机排空超时的通知丢弃。
+- 监控台默认每页 50 点；2 万点不再一次性经 REST/WS 传输。
+
+### Upgrade Notes
+- 从 v3.9.x 升级：先停 `rtdbd`（正常 SIGTERM 会删除旧段），确认
+  `/dev/shm/indurtdb_<instance>` 不存在后再启动 v3.10；若旧段残留，必须手动删除。
+- 停机会丢失共享内存中的当前值，启动后由 `--config` 重新加载；运行时 CRUD 点位
+  需继续使用 `--delta-file` 持久化。
+- 旧监控台连新 rtdbd：逐点 `SUBSCRIBE` 仍可用；新监控台连旧 rtdbd：自动降级
+  32 点/页，无 `SET_SUBS` 与批量快照。
+
+---
+
 ## [3.9.1] — 2026-10-20「监控台实时链路与时间戳修复」
 
 Web 管理台（`tools/rtdb-monitor`）实测暴露的缺陷修复；无协议、段格式与 API 变更。
