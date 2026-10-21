@@ -774,6 +774,114 @@ TEST(RtdbdNotify, SetSubsReplaceDoesNotCountDrop)
     close(ctl);
 }
 
+/* 12. 超时只通知一次：timeout_ms=50，1 Hz 扫描后收到 1 帧 TIMEOUT */
+TEST(RtdbdNotify, TimeoutTransitionNotifiesOnce)
+{
+    Proc p;
+    const std::string cfg =
+        "points:\n"
+        "  - id: 10\n"
+        "    name: \"T_Once\"\n"
+        "    type: int32\n"
+        "    access: 3\n"
+        "    timeout_ms: 50\n";
+    ASSERT_TRUE(p.start_cfg("timeout_once", policy_for_self_range(10), 64, 16, cfg));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    EXPECT_EQ(set_subs(sub, {10}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt));       /* 快照 */
+    EXPECT_EQ(nt.point_id, 10u);
+
+    ASSERT_TRUE(write_int32(ctl, 10, 123));   /* 建立时间戳 */
+    ASSERT_TRUE(recv_notify(sub, &nt));       /* 写入通知 GOOD */
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(nt.reserved[0]), INDURTDB_QUALITY_GOOD);
+
+    ASSERT_TRUE(recv_notify(sub, &nt, 3500)) << "应在一个扫描周期内收到 TIMEOUT";
+    EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(nt.reserved[0]), INDURTDB_QUALITY_TIMEOUT);
+
+    /* 同一超时状态不重复推送 */
+    EXPECT_FALSE(recv_notify(sub, &nt, 1500)) << "TIMEOUT 状态不应重复通知";
+
+    close(sub);
+    close(ctl);
+}
+
+/* 13. 写路径恢复：TIMEOUT 后写入，立即收到 GOOD 通知 */
+TEST(RtdbdNotify, WriteRecoversTimeout)
+{
+    Proc p;
+    const std::string cfg =
+        "points:\n"
+        "  - id: 10\n"
+        "    name: \"T_Recover\"\n"
+        "    type: int32\n"
+        "    access: 3\n"
+        "    timeout_ms: 50\n";
+    ASSERT_TRUE(p.start_cfg("timeout_recover", policy_for_self_range(10), 64, 16, cfg));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    EXPECT_EQ(set_subs(sub, {10}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt));
+    ASSERT_TRUE(write_int32(ctl, 10, 1));
+    ASSERT_TRUE(recv_notify(sub, &nt));       /* GOOD */
+    ASSERT_TRUE(recv_notify(sub, &nt, 3500)); /* TIMEOUT */
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(nt.reserved[0]), INDURTDB_QUALITY_TIMEOUT);
+
+    ASSERT_TRUE(write_int32(ctl, 10, 2));     /* 恢复写 */
+    ASSERT_TRUE(recv_notify(sub, &nt));       /* GOOD */
+    EXPECT_EQ(nt.point_id, 10u);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(nt.reserved[0]), INDURTDB_QUALITY_GOOD);
+    EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 2);
+
+    close(sub);
+    close(ctl);
+}
+
+/* 14. 超时只通知订阅者：未订阅连接收不到 */
+TEST(RtdbdNotify, TimeoutNotifiesOnlySubscribers)
+{
+    Proc p;
+    const std::string cfg =
+        "points:\n"
+        "  - id: 10\n"
+        "    name: \"T_OnlySub\"\n"
+        "    type: int32\n"
+        "    access: 3\n"
+        "    timeout_ms: 50\n";
+    ASSERT_TRUE(p.start_cfg("timeout_onlysub", policy_for_self_range(10), 64, 16, cfg));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    int other = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+    ASSERT_GE(other, 0);
+
+    EXPECT_EQ(set_subs(sub, {10}), RTDBD_ST_OK);
+    rtdbd_notify_t nt;
+    ASSERT_TRUE(recv_notify(sub, &nt));
+    ASSERT_TRUE(write_int32(ctl, 10, 5));
+    ASSERT_TRUE(recv_notify(sub, &nt));       /* GOOD */
+    ASSERT_TRUE(recv_notify(sub, &nt, 3500)); /* TIMEOUT */
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(nt.reserved[0]), INDURTDB_QUALITY_TIMEOUT);
+    EXPECT_FALSE(recv_notify(other, &nt, 1000)) << "未订阅连接不应收到超时通知";
+
+    close(other);
+    close(sub);
+    close(ctl);
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);

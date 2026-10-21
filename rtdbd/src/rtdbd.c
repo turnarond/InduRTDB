@@ -75,6 +75,24 @@ static rtdbd_log_entry_t g_log_out[RTDBD_LOG_CAPACITY];
 /* SET_SUBS 读取 id 数组的静态缓冲（BSS，单线程串行处理，无并发） */
 static uint32_t g_set_subs_ids[RTDBD_SUB_MAX];
 
+/* v3.10 T5：1 Hz 超时扫描状态。g_quality 记录上一轮质量，只有
+ * “非 TIMEOUT → TIMEOUT”才推送，避免每个扫描周期重复通知。 */
+#define RTDBD_TIMEOUT_MAX_POINTS 50000u
+#define RTDBD_TIMEOUT_SCAN_PERIOD_NS 1000000000ULL
+static uint8_t  g_quality[RTDBD_TIMEOUT_MAX_POINTS];
+static bool     g_timeout_disabled = false;
+static uint64_t g_last_scan_mono_ns = 0;
+
+/* 单调时钟纳秒；仅用于 1 Hz 扫描节拍（点位超时本身用 REALTIME，
+ * 与写入 timestamp_ns 保持同一时钟）。 */
+static uint64_t mono_now_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+
 static void on_signal(int sig)
 {
     /* 信号处理器只置 volatile sig_atomic_t 标志（信号安全：不做 IO、不格式化） */
@@ -312,6 +330,9 @@ static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* conns, int n,
     indurtdb_point_t pt;
     if (indurtdb_h_read_point(h, w->point_id, &pt) == 0) {
         nt.timestamp_ns = pt.timestamp_ns;
+        /* 写路径可能把 TIMEOUT 恢复为 GOOD；通知必须携带当前质量。
+         * 读点而不是假设 GOOD，可保留量程位。 */
+        nt.reserved[0] = pt.quality;
     }
 
     /* 当前值（double）用于 RBE 死区比较 */
@@ -326,6 +347,76 @@ static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* conns, int n,
         if (!rtdbd_subtab_decide(&c->sub, w->point_id, v, meta)) continue;
 
         outq_push(c, &nt);
+    }
+}
+
+/* 质量跃迁通知：跳过 RBE，保证 TIMEOUT 一定送达（RBE 只用于值变化门控）。 */
+static void notify_quality_transition(rtdbd_conn_t* conns, int n, uint32_t point_id)
+{
+    indurtdb_point_t pt;
+    if (indurtdb_h_read_point(g_h, point_id, &pt) != 0) return;
+    if (pt.name[0] == '\0') return;
+
+    rtdbd_notify_t nt;
+    memset(&nt, 0, sizeof(nt));
+    nt.point_id    = point_id;
+    nt.type        = pt.type;
+    nt.reserved[0] = pt.quality;
+    if (pt.type != RTDBD_TYPE_STRING)
+        memcpy(&nt.value_bits, &pt.value, sizeof(nt.value_bits));
+    nt.timestamp_ns   = pt.timestamp_ns;
+    nt.source_ts_ns   = pt.source_timestamp_ns;
+
+    for (int i = 0; i < n; ++i) {
+        rtdbd_conn_t* c = &conns[i];
+        if (c->fd < 0) continue;
+        if (!conn_has_sub(c, point_id)) continue;
+        outq_push(c, &nt);
+    }
+}
+
+/* 1 Hz 扫描：标记超时并只对“非 TIMEOUT → TIMEOUT”的跃迁推送。
+ * 恢复方向不在此推送；写路径的 notify_broadcast 已带 GOOD。 */
+static void scan_timeouts(rtdbd_conn_t* conns, int n, uint64_t timeout_ns)
+{
+    if (g_timeout_disabled) return;
+
+    uint64_t now = mono_now_ns();
+    if (now == 0) return;
+    if (g_last_scan_mono_ns != 0 &&
+        now - g_last_scan_mono_ns < RTDBD_TIMEOUT_SCAN_PERIOD_NS) return;
+    g_last_scan_mono_ns = now;
+
+    (void)indurtdb_h_check_timeouts(g_h, timeout_ns);
+
+    for (uint32_t id = 0; id < g_max_points; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_h_read_point(g_h, id, &pt) != 0) continue;
+        uint8_t q = pt.quality;
+        if (g_quality[id] != INDURTDB_QUALITY_TIMEOUT &&
+            q == INDURTDB_QUALITY_TIMEOUT) {
+            notify_quality_transition(conns, n, id);
+        }
+        g_quality[id] = q;
+    }
+}
+
+/* 启动时建立质量基线；超过扫描上限则整体禁用并只告警一次。 */
+static void init_timeout_scan(void)
+{
+    g_last_scan_mono_ns = mono_now_ns();
+    if (g_max_points > RTDBD_TIMEOUT_MAX_POINTS) {
+        g_timeout_disabled = true;
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_WARN,
+                        "rtdbd: max_points=%u 超过超时扫描上限 %u，超时扫描已禁用",
+                        (unsigned)g_max_points,
+                        (unsigned)RTDBD_TIMEOUT_MAX_POINTS);
+        return;
+    }
+    for (uint32_t id = 0; id < g_max_points; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_h_read_point(g_h, id, &pt) == 0)
+            g_quality[id] = pt.quality;
     }
 }
 
@@ -1713,6 +1804,8 @@ int main(int argc, char** argv)
         return RTDBD_EXIT_SELFCHECK;   /* 保留段（不 close，避免 unlink） */
     }
 
+    init_timeout_scan();
+
     unlink(sock_path);
 
     int listen_fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1761,6 +1854,9 @@ int main(int argc, char** argv)
             if (errno == EINTR) continue;
             break;
         }
+
+        /* v3.10 T5：每轮检查 1 Hz 节拍；poll 超时（500ms）也会触发。 */
+        scan_timeouts(conns, RTDBD_MAX_CLIENTS, timeout_ns);
 
         /* SIGUSR1：dump 运行统计到 g_stats_file（含连接摘要）。
          * 在主循环内执行（非信号上下文），自检后落盘。 */

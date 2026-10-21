@@ -348,6 +348,35 @@ TEST(Health, RejectsBadPayload)
     p.stop();
 }
 
+/* 5. 无超时点的 1 Hz 扫描不改变 health / notify_drop */
+TEST(Health, TimeoutScanDoesNotChangeHealth)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("timeoutscan", policy_allow(), kConfig));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_resp_hdr_t resp;
+    ASSERT_TRUE(write_point(fd, 10, 7, &resp));
+    ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+    rtdbd_health_t before;
+    ASSERT_TRUE(query_health(fd, &before));
+
+    usleep(1500000);   /* 至少跨过一个 1 Hz 扫描周期 */
+
+    rtdbd_health_t after;
+    ASSERT_TRUE(query_health(fd, &after));
+    EXPECT_EQ(after.health, before.health);
+    EXPECT_EQ(after.n_writes, before.n_writes);
+    EXPECT_EQ(after.n_notifies, before.n_notifies);
+    EXPECT_EQ(after.notify_drop, before.notify_drop);
+
+    close(fd);
+    p.stop();
+}
+
 int main(int argc, char** argv)
 {
     ::testing::InitGoogleTest(&argc, argv);
