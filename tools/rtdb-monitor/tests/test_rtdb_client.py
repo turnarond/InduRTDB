@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 """rtdb_client 协议编解码单测（不依赖 rtdbd 进程，纯结构校验）。"""
+import socket
 import struct
 import sys
 import os
+import tempfile
+import threading
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -12,7 +15,8 @@ from rtdb_client import (  # noqa: E402
     CREATE_REQ, DELETE_REQ, RENAME_REQ,
     LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
     OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
-    RTDBD_PROTO_VERSION, PARTITION_ALL,
+    OP_SET_SUBS, RTDBD_MAGIC, RTDBD_PROTO_VERSION, PARTITION_ALL,
+    RtdbClient, NotifyListener, probe_set_subs,
     RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
@@ -180,6 +184,129 @@ def test_point_info_roundtrip():
     assert len(b) == 76
     pid, ptype, access, name, part = POINT_INFO.unpack(b)
     assert pid == 11 and access == 3 and part == 0 and name.rstrip(b"\x00") == b"Pump.Start"
+
+
+
+def _recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise RuntimeError("closed")
+        buf += chunk
+    return bytes(buf)
+
+
+def _mock_server(status=0):
+    """返回 (path, captured, thread)。服务端处理一次请求后回 RESP_HDR。"""
+    td = tempfile.mkdtemp(prefix="rtdb_client_")
+    path = os.path.join(td, "s.sock")
+    captured = {}
+    srv = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    srv.bind(path)
+    srv.listen(1)
+
+    def run():
+        conn, _ = srv.accept()
+        try:
+            hdr = _recv_exact(conn, REQ_HDR.size)
+            magic, version, opcode, plen = REQ_HDR.unpack(hdr)
+            payload = _recv_exact(conn, plen) if plen else b""
+            captured.update(magic=magic, version=version, opcode=opcode, payload=payload)
+            conn.sendall(RESP_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, status, 0))
+        finally:
+            conn.close()
+            srv.close()
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    return path, captured, t
+
+
+def test_set_subs_roundtrip():
+    path, captured, t = _mock_server()
+    with RtdbClient(path) as c:
+        c.set_subs([3, 1, 2])
+    t.join(2)
+    assert captured["opcode"] == OP_SET_SUBS == 18
+    assert captured["version"] == RTDBD_PROTO_VERSION
+    count = struct.unpack("<I", captured["payload"][:4])[0]
+    ids = struct.unpack("<3I", captured["payload"][4:])
+    assert count == 3 and ids == (3, 1, 2)
+
+
+def test_set_subs_empty_payload():
+    path, captured, t = _mock_server()
+    with RtdbClient(path) as c:
+        c.set_subs([])
+    t.join(2)
+    assert captured["opcode"] == OP_SET_SUBS
+    assert captured["payload"] == struct.pack("<I", 0)
+
+
+def test_set_subs_error_status():
+    path, _captured, t = _mock_server(status=1)
+    with RtdbClient(path) as c:
+        try:
+            c.set_subs([1])
+            raise AssertionError("BAD_REQUEST should raise RtdbError")
+        except RtdbError:
+            pass
+    t.join(2)
+
+
+def test_probe_falls_back_on_error():
+    class OldClient:
+        def set_subs(self, ids):
+            raise RtdbError("unknown opcode")
+
+    assert probe_set_subs(OldClient()) is False
+
+    path, _captured, t = _mock_server(status=1)
+    with RtdbClient(path) as c:
+        assert probe_set_subs(c) is False
+    t.join(2)
+
+
+def test_notify_quality_unpack():
+    got = {}
+    ev = threading.Event()
+
+    def on_notify(pid, info):
+        got["pid"] = pid
+        got.update(info)
+        ev.set()
+
+    l = NotifyListener("/tmp/unused-notify.sock", on_notify)
+    server, client = socket.socketpair()
+    l._sock = client
+    t = threading.Thread(target=l._loop, daemon=True)
+    t.start()
+    body = NOTIFY.pack(7, TYPE_INT32, 2, 42, 111, 222)
+    server.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, 6, len(body)) + body)
+    assert ev.wait(2)
+    assert got["pid"] == 7
+    assert got["quality"] == 2
+    assert got["value"] == 42
+    l.stop()
+    server.close()
+    t.join(2)
+
+
+def test_listener_set_subs_replaces_subscription():
+    l = NotifyListener("/tmp/unused-notify.sock", lambda pid, info: None)
+    server, client = socket.socketpair()
+    l._sock = client
+    l.set_subs([5, 6])
+    hdr = _recv_exact(server, REQ_HDR.size)
+    magic, version, opcode, plen = REQ_HDR.unpack(hdr)
+    payload = _recv_exact(server, plen)
+    assert (magic, version, opcode) == (RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_SET_SUBS)
+    assert struct.unpack("<I", payload[:4])[0] == 2
+    assert struct.unpack("<2I", payload[4:]) == (5, 6)
+    assert l._subscribed == {5, 6}
+    l.stop()
+    server.close()
 
 
 if __name__ == "__main__":

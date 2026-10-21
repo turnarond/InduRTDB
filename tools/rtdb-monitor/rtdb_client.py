@@ -43,6 +43,7 @@ OP_CREATE_POINT = 12
 OP_DELETE_POINT = 13
 OP_RENAME_POINT = 14
 OP_GET_LOG = 15
+OP_SET_SUBS = 18
 
 # 状态码
 ST_OK = 0
@@ -69,7 +70,7 @@ GET_REQ = struct.Struct("<I")             # point_id
 GET_RESP = struct.Struct("<IBB2xQ32sQQ")  # point_id, type, quality, reserved[2], value_bits, value_str[32], ts, source_ts
 LIST_REQ = struct.Struct("<III")          # max, offset, partition（v3）
 POINT_INFO = struct.Struct("<IBB2x64sI")  # point_id, type, access, reserved[2], name[64], partition（v3，76B）
-NOTIFY = struct.Struct("<IB3xQQQ")        # point_id, type, reserved[3], value_bits, ts, source_ts
+NOTIFY = struct.Struct("<IBB2xQQQ")      # point_id, type, quality, reserved[2], value_bits, ts, source_ts
 FIND_REQ = struct.Struct("<64sI")         # name[64], partition（v3，68B）
 FIND_RESP = struct.Struct("<I")           # point_id
 META_REQ = struct.Struct("<I")            # point_id
@@ -248,6 +249,14 @@ class RtdbClient:
         vbits = _encode_value(value, ptype)
         self._ok(OP_WRITE, WRITE_REQ.pack(point_id, ptype, vbits, source_ts_ns))
 
+    def set_subs(self, point_ids: list[int]) -> None:
+        """v3.10：连接级批量订阅（整组替换），响应为空负载。"""
+        ids = [int(pid) for pid in point_ids]
+        payload = struct.pack("<I", len(ids))
+        if ids:
+            payload += struct.pack(f"<{len(ids)}I", *ids)
+        self._ok(OP_SET_SUBS, payload)
+
     def find_by_name(self, name: str, partition: int = 0) -> int:
         body = self._ok(OP_FIND_BY_NAME, FIND_REQ.pack(
             name.encode("utf-8")[:64].ljust(64, b"\x00"), int(partition)))
@@ -347,6 +356,20 @@ class NotifyListener:
                 )
                 self._subscribed.add(pid)
 
+    def set_subs(self, point_ids: list[int]) -> None:
+        """v3.10：整组替换订阅。响应由监听线程按普通 RESP_HDR 忽略。"""
+        sock = self._sock
+        if not sock:
+            raise RtdbError("listener not started")
+        ids = [int(pid) for pid in point_ids]
+        payload = struct.pack("<I", len(ids))
+        if ids:
+            payload += struct.pack(f"<{len(ids)}I", *ids)
+        with self._send_lock:
+            sock.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION,
+                                      OP_SET_SUBS, len(payload)) + payload)
+            self._subscribed = set(ids)
+
     def _loop(self) -> None:
         assert self._sock is not None
         while not self._stop.is_set():
@@ -368,10 +391,11 @@ class NotifyListener:
             except (OSError, RtdbError):
                 break
             if kind == OP_NOTIFY and plen == NOTIFY.size:
-                pid, ptype, vbits, ts, sts = NOTIFY.unpack(body)
+                pid, ptype, quality, vbits, ts, sts = NOTIFY.unpack(body)
                 self.on_notify(pid, {
                     "id": pid, "type": ptype,
                     "typeName": TYPE_NAME.get(ptype, str(ptype)),
+                    "quality": quality,
                     "value": _decode_value(vbits, b"", ptype),
                     "ts": ts, "sourceTs": sts,
                 })
@@ -403,6 +427,15 @@ class NotifyListener:
                 self._sock.close()
             finally:
                 self._sock = None
+
+
+def probe_set_subs(client) -> bool:
+    """探测服务端是否支持 SET_SUBS；旧服务端返回错误/断链时返回 False。"""
+    try:
+        client.set_subs([])
+        return True
+    except (RtdbError, OSError):
+        return False
 
 
 if __name__ == "__main__":
