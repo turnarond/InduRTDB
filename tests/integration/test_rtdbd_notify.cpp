@@ -16,6 +16,7 @@
 #include <dirent.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -40,6 +41,7 @@ struct Proc {
     {
         sock     = "/tmp/indurtdb_notify_" + tag + ".sock";
         instance = "notify_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
         policy   = "/tmp/notify_policy_" + tag + ".txt";
 
         FILE* f = fopen(policy.c_str(), "w");

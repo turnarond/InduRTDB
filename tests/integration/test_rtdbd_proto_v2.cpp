@@ -17,6 +17,7 @@
 
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -59,6 +60,7 @@ struct RtdbdProc {
     {
         sock     = "/tmp/indurtdb_proto2_" + tag + ".sock";
         instance = "proto2_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
         policy_path = make_tmp_file("proto2_policy_" + tag + ".txt", policy_body);
         config_path = make_tmp_file("proto2_cfg_" + tag + ".yaml", config_body);
 

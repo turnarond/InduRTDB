@@ -41,6 +41,7 @@ struct SupProc {
     {
         sock     = "/tmp/indurtdb_rec_" + tag + ".sock";
         instance = "rec_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
         policy   = "/tmp/rec_policy_" + tag + ".txt";
         pidfile  = "/tmp/rec_worker_" + tag + ".pid";
 

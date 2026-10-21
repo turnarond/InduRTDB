@@ -17,6 +17,7 @@
 #include <string>
 
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -52,6 +53,7 @@ struct Proc {
     {
         sock     = "/tmp/indurtdb_irtcli_" + tag + ".sock";
         instance = "irtcli_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
         policy   = "/tmp/irtcli_policy_" + tag + ".txt";
 
         FILE* f = fopen(policy.c_str(), "w");

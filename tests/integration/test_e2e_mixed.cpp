@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -52,6 +53,7 @@ struct Proc {
     {
         sock     = "/tmp/indurtdb_e2e_" + tag + ".sock";
         instance = "e2e_test_" + tag;
+        shm_unlink(("/indurtdb_" + instance).c_str());
         policy   = "/tmp/e2e_policy_" + tag + ".txt";
         config   = "/tmp/e2e_config_" + tag + ".yaml";
 

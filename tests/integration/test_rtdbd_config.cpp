@@ -202,6 +202,7 @@ TEST(RtdbdConfig, ValidConfigStarts)
     std::string sock = "/tmp/indurtdb_cfg_valid.sock";
     std::string cfg  = make_tmp_file("cfg_valid.yaml", kValidConfig);
     unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_valid");
 
     pid_t pid = fork();
     ASSERT_GE(pid, 0);
@@ -295,6 +296,7 @@ TEST(RtdbdConfig, PercentWithoutRangeStillStarts)
     std::string cfg  = make_tmp_file("cfg_pctwarn.yaml", kBadPctConfig);
     std::string sock = "/tmp/indurtdb_cfg_pctwarn.sock";
     unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_pctwarn");
 
     pid_t pid = fork();
     ASSERT_GE(pid, 0);
@@ -344,6 +346,7 @@ TEST(RtdbdConfig, SetMetaRejectsInvalid)
     std::string sock = "/tmp/indurtdb_cfg_setmeta.sock";
     std::string cfg  = make_tmp_file("cfg_setmeta.yaml", kValidConfig);
     unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_setmeta");
 
     pid_t pid = fork();
     ASSERT_GE(pid, 0);
