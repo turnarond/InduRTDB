@@ -66,13 +66,21 @@
  * 成功即把本连接后续请求的默认分区设为该值（连接断开即复位，不持久化）。 */
 #define RTDBD_OP_SELECT      17u /* 请求：uint32 partition；响应：空负载 */
 
+/* v3.10 T4：连接级批量订阅（整组替换 + 当前值快照）。
+ * 请求：uint32 count; uint32 ids[count]；响应：空负载。
+ * 本任务只预留 opcode 常量，处理器与快照在任务 4 落地。 */
+#define RTDBD_OP_SET_SUBS    18u
+
 /* OP_LIST 的分区哨兵：请求 partition == 该值时列出**全部**分区点位。
  * 取 uint32 最大值（真实分区号几乎不可能用到该值；分区无表、任意值合法，
  * 但该哨兵是显式的“不过滤”语义，非普通分区）。 */
 #define RTDBD_PARTITION_ALL  0xFFFFFFFFu
 
-/* 单连接最大订阅点数 */
-#define RTDBD_SUB_MAX 32u
+/* 单连接最大订阅点数（v3.10：32 → 1024，服务端按 --max-subs 再收紧） */
+#define RTDBD_SUB_MAX_PER_CONN 1024u
+#define RTDBD_SUB_MAX          RTDBD_SUB_MAX_PER_CONN   /* 兼容旧引用 */
+/* SET_SUBS 单次整组替换的 id 上限（与每连接上限一致） */
+#define RTDBD_SET_SUBS_MAX     RTDBD_SUB_MAX_PER_CONN
 
 /* ---- 状态码 ---- */
 #define RTDBD_ST_OK               0u
@@ -140,7 +148,7 @@ typedef struct {
 typedef struct {
     uint32_t point_id;
     uint8_t  type;
-    uint8_t  reserved[3];
+    uint8_t  reserved[3];    /* [0] = quality（v3.10 T5）；[1..2] 保留，须为 0 */
     uint64_t value_bits;
     uint64_t timestamp_ns;   /* 入库时刻 */
     uint64_t source_ts_ns;   /* 采集时刻 */
@@ -167,7 +175,7 @@ typedef struct {
     double   eur_max;    /* 8–15  : 工程量程上限 */
     float    deadband;   /* 16–19 : 变化阈值（只存参数） */
     uint32_t flags;      /* 20–23 : 是否启用量程 / 死区等 */
-    uint8_t  reserved[8];/* 24–31 : 保留（须为 0） */
+    uint8_t  reserved[8];/* 24–31 : [0..3] = timeout_ms（小端）；[4..7] 须为 0 */
 } rtdbd_meta_payload_t;
 
 /* GET_META 请求负载 4B */

@@ -35,7 +35,7 @@
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
                "rtdbd_meta_payload_t must match indurtdb_meta_t size");
 
-#define RTDBD_MAX_CLIENTS 32
+#define RTDBD_MAX_CLIENTS 128
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
 /* --max-points 的硬上限（B3 参数校验）：点位区按 128B/点计算，
@@ -122,7 +122,7 @@ static uint64_t now_ns(void)
 
 /* 每连接出站通知队列容量（v3.7 主题B B2 背压）。
  * 定长环形队列：队列满时丢最旧（保序），绝不无限增长拖垮服务端。 */
-#define RTDBD_OUTQ_CAP 64u
+#define RTDBD_OUTQ_CAP 1024u
 
 typedef struct {
     int      fd;
@@ -145,8 +145,9 @@ typedef struct {
 #define RTDBD_NOTIFY_FRAME_LEN (sizeof(rtdbd_req_hdr_t) + sizeof(rtdbd_notify_t))
 
 /* 全局连接表：放文件域（.bss）而非 main 栈帧。
- * B2 给每连接加了 64×32B 的 outq，32 连接约 64KB；若留在栈上，
- * 嵌入式（SylixOS，小栈配置）上是隐患。零堆、零栈压力。 */
+ * v3.10：每连接 subs[1024] + subtab(2048×16B) + outq(1024×32B) ≈ 68KB，
+ * 128 连接约 8.5MB；留在栈上对嵌入式（SylixOS，小栈配置）不可行。
+ * 零堆、零栈压力。 */
 static rtdbd_conn_t g_conns[RTDBD_MAX_CLIENTS];
 
 static void conn_init(rtdbd_conn_t* c)
@@ -166,10 +167,10 @@ static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
     return rtdbd_subtab_has(&c->sub, point_id);
 }
 
-static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id)
+static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id, uint32_t max_subs)
 {
     if (conn_has_sub(c, point_id)) return 0;
-    if (c->nsubs >= RTDBD_SUB_MAX) return -1;
+    if (c->nsubs >= max_subs || c->nsubs >= RTDBD_SUB_MAX) return -1;
     /* subtab 插入失败（表满）时不写 subs[]，保持两套视图一致。 */
     if (!rtdbd_subtab_insert(&c->sub, point_id)) return -1;
     c->subs[c->nsubs++] = point_id;
@@ -486,6 +487,8 @@ typedef struct {
     rtdbd_conn_t*          conns;   /* 连接表（广播/健康用） */
     int                    nconns;
     const rtdbd_conf_t*    conf;    /* v3.9 分区白名单（可为空配置） */
+    uint32_t               max_subs;   /* v3.10：每连接订阅上限（--max-subs） */
+    uint64_t               timeout_ns; /* v3.10：全局默认超时（--timeout-ms 换算） */
     const rtdbd_req_hdr_t* req;     /* 本次请求头（生命周期 = handle_request 栈） */
     rtdbd_resp_hdr_t       resp;    /* 本次响应头（magic/version 已置） */
 } rtdbd_ctx_t;
@@ -585,7 +588,7 @@ static int op_subscribe(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
     int rc = (cx->req->opcode == RTDBD_OP_SUBSCRIBE)
-                 ? conn_add_sub(cx->conn, s.point_id)
+                 ? conn_add_sub(cx->conn, s.point_id, cx->max_subs)
                  : (conn_del_sub(cx->conn, s.point_id), 0);
 
     cx->resp.status      = (rc == 0) ? RTDBD_ST_OK : RTDBD_ST_INTERNAL;
@@ -1218,6 +1221,25 @@ static int parse_u32_cli(const char* s, uint32_t* out)
     return 0;
 }
 
+static void usage(FILE* out, const char* prog)
+{
+    fprintf(out,
+            "Usage: %s [options]\n"
+            "  -s, --socket PATH          UDS 监听路径（默认 /run/indurtdb/default.sock）\n"
+            "  -i, --instance ID          实例 ID（共享内存段 /indurtdb_<ID>）\n"
+            "  -p, --policy PATH          策略文件\n"
+            "  -c, --config PATH          点位/分区配置 YAML\n"
+            "  -m, --max-points N         点位容量（默认 10000）\n"
+            "  -b, --max-subs N           每连接订阅上限（默认 1024，范围 1..1024）\n"
+            "  -t, --timeout-ms N         全局默认点位超时毫秒（默认 0，0 = 不给全局默认）\n"
+            "  -S, --supervise            以 supervisor 模式运行\n"
+            "  -P, --pidfile PATH         supervisor 写入 worker pid 的文件\n"
+            "  -F, --stats-file PATH      统计 dump 输出路径（默认 /tmp/rtdbd.stats）\n"
+            "  -D, --delta-file PATH      运行时变更 delta 日志\n"
+            "  -h, --help                 显示本帮助\n",
+            prog ? prog : "rtdbd");
+}
+
 int main(int argc, char** argv)
 {
     const char* sock_path  = "/run/indurtdb/default.sock";
@@ -1225,7 +1247,8 @@ int main(int argc, char** argv)
     const char* policy_path = NULL;
     const char* config_path = NULL;
     uint32_t    max_points = 10000;
-    uint32_t    max_subs   = 32;
+    uint32_t    max_subs   = RTDBD_SUB_MAX_PER_CONN;
+    uint32_t    timeout_ms = 0;
     bool        supervise  = false;
     const char* pidfile    = NULL;
     /* v3.7 B4：运行时变更 delta 日志。**默认关闭**（未指定则不启用），
@@ -1239,15 +1262,17 @@ int main(int argc, char** argv)
         {"config",     required_argument, 0, 'c'},
         {"max-points", required_argument, 0, 'm'},
         {"max-subs",   required_argument, 0, 'b'},
+        {"timeout-ms", required_argument, 0, 't'},
         {"supervise",  no_argument,       0, 'S'},
         {"pidfile",    required_argument, 0, 'P'},
         {"stats-file", required_argument, 0, 'F'},
         {"delta-file", required_argument, 0, 'D'},
+        {"help",       no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int c;
-    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:SP:F:D:", long_opts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "s:i:p:c:m:b:t:SP:F:D:h", long_opts, NULL)) != -1) {
         switch (c) {
         case 's': sock_path = optarg; break;
         case 'i': instance = optarg; break;
@@ -1265,17 +1290,27 @@ int main(int argc, char** argv)
                 return RTDBD_EXIT_ERROR;
             }
             break;
+        case 't':
+            if (parse_u32_cli(optarg, &timeout_ms) != 0) {
+                fprintf(stderr, "rtdbd: invalid --timeout-ms '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            break;
         case 'S': supervise = true; break;
         case 'P': pidfile = optarg; break;
         case 'F':
             snprintf(g_stats_file, sizeof(g_stats_file), "%s", optarg);
             break;
         case 'D': delta_path = optarg; break;
+        case 'h':
+            usage(stdout, argv[0]);
+            return RTDBD_EXIT_OK;
         default: break;
         }
     }
 
     g_max_points = max_points; /* 供监控 LIST 遍历点位表使用 */
+    const uint64_t timeout_ns = (uint64_t)timeout_ms * 1000000ULL;
     irt_logbuf_init(&g_logbuf);
     rtdbd_stats_mark_start();   /* v3.7 B1：记录启动时刻，供 uptime 计算 */
 
@@ -1304,10 +1339,10 @@ int main(int argc, char** argv)
                 (unsigned)RTDBD_MAX_POINTS_LIMIT);
         return RTDBD_EXIT_ERROR;
     }
-    if (max_subs == 0 || max_subs > RTDBD_SUB_MAX) {
+    if (max_subs == 0 || max_subs > RTDBD_SUB_MAX_PER_CONN) {
         fprintf(stderr, "rtdbd: invalid --max-subs (must be in [1,%u])\n",
-                (unsigned)RTDBD_SUB_MAX);
-        return RTDBD_EXIT_ERROR;
+                (unsigned)RTDBD_SUB_MAX_PER_CONN);
+        return RTDBD_EXIT_CONFIG;
     }
     if (!sock_path || sock_path[0] == '\0' ||
         strlen(sock_path) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
@@ -1367,7 +1402,8 @@ int main(int argc, char** argv)
     /* v3.9 T5：改用句柄 API 打开实例（分区感知 API 只存在于句柄层）。 */
     indurtdb_cfg_t cfg;
     cfg.max_points      = max_points;
-    cfg.max_subscribers = max_subs;
+    /* v3.10 D7：段订阅者槽位固定 RTDBD_MAX_CLIENTS，与 --max-subs（每连接上限）无关。 */
+    cfg.max_subscribers = RTDBD_MAX_CLIENTS;
     if (indurtdb_h_open(&g_h, instance, &cfg) != 0) {
         irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
                         "rtdbd: indurtdb_h_open failed: %s", indurtdb_get_last_error());
@@ -1567,14 +1603,16 @@ int main(int argc, char** argv)
             if (!(fds[i].revents & POLLIN)) continue;
 
             rtdbd_ctx_t cx;
-            cx.h       = g_h;
-            cx.policy  = &policy;
-            cx.audit   = &audit;
-            cx.conn    = conn;
-            cx.conns   = conns;
-            cx.nconns  = RTDBD_MAX_CLIENTS;
-            cx.conf    = &conf;
-            cx.req     = NULL;
+            cx.h          = g_h;
+            cx.policy     = &policy;
+            cx.audit      = &audit;
+            cx.conn       = conn;
+            cx.conns      = conns;
+            cx.nconns     = RTDBD_MAX_CLIENTS;
+            cx.conf       = &conf;
+            cx.max_subs   = max_subs;
+            cx.timeout_ns = timeout_ns;
+            cx.req        = NULL;
             memset(&cx.resp, 0, sizeof(cx.resp));
 
             if (handle_request(fds[i].fd, &cx) != 0) {

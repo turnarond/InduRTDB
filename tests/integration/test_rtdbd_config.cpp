@@ -11,7 +11,7 @@
  *   - PolicyMalformedExits2      非法 policy 行 → 退出码 2（v3.9 T3，不静默跳过）
  *   - BadInstanceExits1           非法 --instance 字符 → 退出码 1
  *   - ZeroMaxPointsExits1         --max-points 0 → 退出码 1
- *   - OversizeMaxSubsExits1      --max-subs 超上限 → 退出码 1
+ *   - OversizeMaxSubsExits2      --max-subs 超上限 → 退出码 2（配置错误）
  *
  * 注：非法点位语义经 YAML 可选字段（eur_min/eur_max/deadband/flags）表达，
  *     由 indurtdb_load_config 写入元数据区，再由启动校验拦下。
@@ -492,8 +492,8 @@ TEST(RtdbdConfig, ZeroMaxPointsExits1)
     EXPECT_NE(err.find("invalid --max-points"), std::string::npos) << err;
 }
 
-/* 8. --max-subs 超上限 → 退出码 1 */
-TEST(RtdbdConfig, OversizeMaxSubsExits1)
+/* 8. --max-subs 超上限 → 退出码 2（配置错误，supervisor 不 respawn） */
+TEST(RtdbdConfig, OversizeMaxSubsExits2)
 {
     std::string err;
     int code = run_rtdbd({
@@ -502,7 +502,7 @@ TEST(RtdbdConfig, OversizeMaxSubsExits1)
         "--max-points", "64",
         "--max-subs", "9999"
     }, &err);
-    EXPECT_EQ(code, 1) << err;
+    EXPECT_EQ(code, 2) << err;
     EXPECT_NE(err.find("invalid --max-subs"), std::string::npos) << err;
 }
 

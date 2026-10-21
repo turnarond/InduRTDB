@@ -39,6 +39,12 @@ struct Proc {
 
     bool start(const std::string& tag, const std::string& policy_body)
     {
+        return start_with(tag, policy_body, 64, 4);
+    }
+
+    bool start_with(const std::string& tag, const std::string& policy_body,
+                    uint32_t max_points, uint32_t max_subs)
+    {
         sock     = "/tmp/indurtdb_notify_" + tag + ".sock";
         instance = "notify_test_" + tag;
         shm_unlink(("/indurtdb_" + instance).c_str());
@@ -51,12 +57,14 @@ struct Proc {
         pid = fork();
         if (pid < 0) return false;
         if (pid == 0) {
+            const std::string mp = std::to_string(max_points);
+            const std::string ms = std::to_string(max_subs);
             execl(RTDBD_BIN, "rtdbd",
                   "--socket", sock.c_str(),
                   "--instance", instance.c_str(),
                   "--policy", policy.c_str(),
-                  "--max-points", "64",
-                  "--max-subs", "4",
+                  "--max-points", mp.c_str(),
+                  "--max-subs", ms.c_str(),
                   (char*)NULL);
             _exit(127);
         }
@@ -155,11 +163,31 @@ bool write_int32(int fd, uint32_t point_id, int32_t value)
     return r.status == RTDBD_ST_OK;
 }
 
-std::string policy_for_self()
+bool create_point(int fd, uint32_t point_id, const char* name)
+{
+    rtdbd_create_req_t c;
+    memset(&c, 0, sizeof(c));
+    c.point_id  = point_id;
+    c.type      = RTDBD_TYPE_INT32;
+    c.access    = 3;
+    c.partition = 0;
+    snprintf(c.name, sizeof(c.name), "%s", name);
+    if (!send_req(fd, RTDBD_OP_CREATE_POINT, &c, sizeof(c))) return false;
+    rtdbd_resp_hdr_t r;
+    if (!recv_resp(fd, &r)) return false;
+    return r.status == RTDBD_ST_OK;
+}
+
+std::string policy_for_self_range(uint32_t last_id)
 {
     char buf[128];
-    snprintf(buf, sizeof(buf), "%lu:*:0:63\n", (unsigned long)getuid());
+    snprintf(buf, sizeof(buf), "%lu:*:0:%u\n", (unsigned long)getuid(), last_id);
     return std::string(buf);
+}
+
+std::string policy_for_self()
+{
+    return policy_for_self_range(63);
 }
 
 int count_fds(pid_t pid)
@@ -240,6 +268,58 @@ TEST(RtdbdNotify, NoFdLeakUnderChurn)
     ASSERT_GT(after, 0);
     printf("[FD] before=%d after=%d\n", before, after);
     EXPECT_LE(after, before + 8) << "反复订阅/退订不应累积 fd";
+}
+
+/* 3. 每连接最多 1024 个订阅（v3.10 容量提升） */
+TEST(RtdbdNotify, SubscribeUpTo1024)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("sub1024", policy_for_self_range(RTDBD_SUB_MAX_PER_CONN - 1),
+                             1024, 1024));
+
+    int ctl = connect_to(p.sock);
+    int sub = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(sub, 0);
+
+    char name[32];
+    for (uint32_t i = 0; i < RTDBD_SUB_MAX_PER_CONN; ++i) {
+        snprintf(name, sizeof(name), "Scale_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+    }
+
+    for (uint32_t i = 0; i < RTDBD_SUB_MAX_PER_CONN; ++i) {
+        ASSERT_TRUE(subscribe(sub, i)) << "subscribe " << i;
+    }
+
+    close(sub);
+    close(ctl);
+}
+
+/* 4. --max-subs 按连接生效：--max-subs 4 时第 5 个订阅被拒 */
+TEST(RtdbdNotify, MaxSubsPerConnectionEnforced)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("maxsubs4", policy_for_self(), 64, 4));
+
+    int ctl = connect_to(p.sock);
+    int fd  = connect_to(p.sock);
+    ASSERT_GE(ctl, 0);
+    ASSERT_GE(fd, 0);
+
+    /* v3.10 T4 起 SUBSCRIBE 会校验“已注册”，故先注册 0..4。 */
+    char name[32];
+    for (uint32_t i = 0; i < 5; ++i) {
+        snprintf(name, sizeof(name), "MaxSubs_%u", i);
+        ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
+    }
+    for (uint32_t i = 0; i < 4; ++i) {
+        EXPECT_TRUE(subscribe(fd, i)) << "subscribe " << i;
+    }
+    EXPECT_FALSE(subscribe(fd, 4)) << "5th subscription must exceed --max-subs 4";
+
+    close(fd);
+    close(ctl);
 }
 
 int main(int argc, char** argv)

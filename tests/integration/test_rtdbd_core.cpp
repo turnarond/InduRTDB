@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <indurtdb/indurtdb.h>
@@ -294,7 +295,38 @@ TEST(RtdbdCore, ProtocolVersionMismatchRejected)
     p.stop();
 }
 
-/* 6. 写入携带采集时刻（SourceTimestamp）—— rtdbd 须将其写入 shm */
+/* 6. --max-subs 超过每连接硬上限（1024）→ 配置错误退出码 2 */
+TEST(RtdbdCore, RejectsMaxSubsOverLimit)
+{
+    const std::string sock = "/tmp/indurtdb_rtdbd_bigsubs.sock";
+    unlink(sock.c_str());
+
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        execl(RTDBD_BIN, "rtdbd",
+              "--socket", sock.c_str(),
+              "--instance", "rtdbd_test_bigsubs",
+              "--max-points", "64",
+              "--max-subs", "1025",
+              (char*)NULL);
+        _exit(127);
+    }
+
+    int status = 0, reaped = 0;
+    for (int i = 0; i < 500; ++i) {
+        if (waitpid(pid, &status, WNOHANG) == pid) { reaped = 1; break; }
+        usleep(10000);
+    }
+    if (!reaped) { kill(pid, SIGKILL); waitpid(pid, &status, 0); }
+
+    ASSERT_TRUE(reaped) << "rtdbd should reject --max-subs 1025 immediately";
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 2) << "RTDBD_EXIT_CONFIG";
+    unlink(sock.c_str());
+}
+
+/* 7. 写入携带采集时刻（SourceTimestamp）—— rtdbd 须将其写入 shm */
 TEST(RtdbdCore, WriteCarriesSourceTimestamp)
 {
     RtdbdProc p;
