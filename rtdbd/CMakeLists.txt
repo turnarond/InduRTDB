@@ -9,7 +9,7 @@ add_executable(rtdbd
     src/policy.c
     src/audit.c
     src/logbuf.c
-    src/rbe.c
+    src/subtab.c
     src/stats.c
 )
 

@@ -27,7 +27,7 @@
 #include "policy.h"
 #include "rtdbd_conf.h"
 #include "logbuf.h"
-#include "rbe.h"
+#include "subtab.h"
 #include "stats.h"
 
 /* 线结构 rtdbd_meta_payload_t 与库结构 indurtdb_meta_t 必须逐字节同尺寸，
@@ -129,7 +129,7 @@ typedef struct {
     uint32_t partition;   /* v3.9 T5：连接级默认分区（OP_SELECT 设置，初值 0） */
     uint32_t subs[RTDBD_SUB_MAX];
     uint32_t nsubs;
-    rbe_state_t rbe;   /* 每连接 RBE 状态（v3.7 主题A T1） */
+    rtdbd_subtab_t sub;   /* v3.10：订阅成员 + RBE 状态合并表 */
     /* 出站通知环形队列（B2 背压）：写成功只入队，由主循环 POLLOUT 时 flush。
      * 慢消费者 socket 缓冲满 → POLLOUT 不就绪 → 不 flush（不阻塞他人），
      * 队列填满则丢最旧并计 notify_drop。
@@ -154,7 +154,7 @@ static void conn_init(rtdbd_conn_t* c)
     c->fd = -1;
     c->partition = 0;   /* v3.9 T5：连接默认分区复位（断开/复用槽位时清） */
     c->nsubs = 0;
-    rbe_state_init(&c->rbe);
+    rtdbd_subtab_init(&c->sub);
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_count = 0;
@@ -163,23 +163,23 @@ static void conn_init(rtdbd_conn_t* c)
 
 static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
 {
-    for (uint32_t i = 0; i < c->nsubs; ++i) {
-        if (c->subs[i] == point_id) return true;
-    }
-    return false;
+    return rtdbd_subtab_has(&c->sub, point_id);
 }
 
 static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id)
 {
     if (conn_has_sub(c, point_id)) return 0;
     if (c->nsubs >= RTDBD_SUB_MAX) return -1;
+    /* subtab 插入失败（表满）时不写 subs[]，保持两套视图一致。 */
+    if (!rtdbd_subtab_insert(&c->sub, point_id)) return -1;
     c->subs[c->nsubs++] = point_id;
     return 0;
 }
 
 static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
 {
-    rbe_clear(&c->rbe, point_id); /* 退订同步清 RBE 状态（重新订阅首值必发） */
+    /* 退订同步清 RBE 状态（重新订阅首值必发）。 */
+    rtdbd_subtab_remove(&c->sub, point_id);
     for (uint32_t i = 0; i < c->nsubs; ++i) {
         if (c->subs[i] != point_id) continue;
         c->subs[i] = c->subs[c->nsubs - 1];
@@ -308,7 +308,7 @@ static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* conns, int n,
         if (!conn_has_sub(c, w->point_id)) continue;
 
         /* RBE 门控：死区未越过则抑制本次通知 */
-        if (!rbe_decide(&c->rbe, w->point_id, v, meta)) continue;
+        if (!rtdbd_subtab_decide(&c->sub, w->point_id, v, meta)) continue;
 
         outq_push(c, &nt);
     }

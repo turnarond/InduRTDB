@@ -8,7 +8,7 @@
  * - 信号处理器只置 volatile sig_atomic_t 标志，绝不直接 dump（见 rtdbd.c on_signal）
  *
  * 注：本文件位于 rtdbd/src/ 而非计划书所写的 rtdbd/include/rtdbd/，
- *     以与同批次的 rbe.h 保持一致（rtdbd 内部私有头统一放 src/）。
+ *     以与同批次的其它私有头保持一致（rtdbd 内部私有头统一放 src/）。
  */
 #ifndef RTDBD_STATS_H_
 #define RTDBD_STATS_H_

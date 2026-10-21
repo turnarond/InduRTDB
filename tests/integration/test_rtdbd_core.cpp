@@ -26,6 +26,8 @@
 #include <indurtdb/indurtdb.h>
 #include <rtdbd/protocol.h>
 
+#include "subtab.h"
+
 #ifndef RTDBD_BIN
 #define RTDBD_BIN ""
 #endif
@@ -324,6 +326,85 @@ TEST(RtdbdCore, WriteCarriesSourceTimestamp)
     indurtdb_shutdown();
 
     p.stop();
+}
+
+/* ---- v3.10 T2: 订阅成员 + RBE 合并哈希表（纯逻辑） ---- */
+
+TEST(Subtab, InsertHasRemove)
+{
+    rtdbd_subtab_t t;
+    rtdbd_subtab_init(&t);
+
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 10));
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 11));
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 12));
+    EXPECT_EQ(t.count, 3u);
+
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 10));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 11));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 12));
+
+    rtdbd_subtab_remove(&t, 11);
+
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 10));
+    EXPECT_FALSE(rtdbd_subtab_has(&t, 11));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 12));
+    EXPECT_EQ(t.count, 2u);
+}
+
+TEST(Subtab, Collision)
+{
+    rtdbd_subtab_t t;
+    rtdbd_subtab_init(&t);
+
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 1));
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 1u + RTDBD_SUBTAB_CAP));
+
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 1));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 1u + RTDBD_SUBTAB_CAP));
+    EXPECT_EQ(t.count, 2u);
+}
+
+TEST(Subtab, PointIdZero)
+{
+    rtdbd_subtab_t t;
+    rtdbd_subtab_init(&t);
+
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 0));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 0));
+    EXPECT_TRUE(rtdbd_subtab_decide(&t, 0, 42.0, NULL));
+}
+
+TEST(Subtab, Clear)
+{
+    rtdbd_subtab_t t;
+    rtdbd_subtab_init(&t);
+
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 7));
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 8));
+    rtdbd_subtab_clear(&t);
+
+    EXPECT_EQ(t.count, 0u);
+    EXPECT_FALSE(rtdbd_subtab_has(&t, 7));
+    EXPECT_FALSE(rtdbd_subtab_has(&t, 8));
+}
+
+TEST(Subtab, FirstValueAndDeadband)
+{
+    rtdbd_subtab_t t;
+    rtdbd_subtab_init(&t);
+
+    indurtdb_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    meta.eur_min  = 0.0;
+    meta.eur_max  = 100.0;
+    meta.deadband = 1.0f;
+    meta.flags    = INDURTDB_META_FLAG_DEADBAND;
+
+    EXPECT_TRUE(rtdbd_subtab_decide(&t, 7, 10.0, &meta));   /* 首值必发 */
+    EXPECT_FALSE(rtdbd_subtab_decide(&t, 7, 10.0, &meta));  /* 死区内抑制 */
+    EXPECT_FALSE(rtdbd_subtab_decide(&t, 7, 10.5, &meta));
+    EXPECT_TRUE(rtdbd_subtab_decide(&t, 7, 12.0, &meta));   /* 越过死区 */
 }
 
 int main(int argc, char** argv)

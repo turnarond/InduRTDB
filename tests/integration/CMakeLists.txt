@@ -18,12 +18,14 @@ add_test(NAME test_c_multi_process COMMAND test_c_multi_process)
 
 # ---- rtdbd 骨架集成测试（v3.3 T1） ----
 if(TARGET rtdbd)
-    add_executable(test_rtdbd_core test_rtdbd_core.cpp)
+    add_executable(test_rtdbd_core test_rtdbd_core.cpp
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
     target_link_libraries(test_rtdbd_core PRIVATE
         GTest::gtest GTest::gtest_main indurtdb)
     target_include_directories(test_rtdbd_core PRIVATE
         ${PROJECT_SOURCE_DIR}/include
-        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src)
     target_compile_definitions(test_rtdbd_core PRIVATE
         _GNU_SOURCE
         RTDBD_BIN="$<TARGET_FILE:rtdbd>")
