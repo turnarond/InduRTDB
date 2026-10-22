@@ -1819,7 +1819,11 @@ int main(int argc, char** argv)
     addr.sun_family = AF_UNIX;
     strncpy(addr.sun_path, sock_path, sizeof(addr.sun_path) - 1);
 
-    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(listen_fd, 8) < 0) {
+    /* 50 个读客户端会同时建连；backlog=8 会在连接风暴下拒绝/丢弃部分
+     * 握手（SO_ACCEPTCONN 队列溢出），导致负载端误判为客户端故障。
+     * 与连接表容量对齐，避免 accept 队列成为并发上限。 */
+    if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
+        listen(listen_fd, RTDBD_MAX_CLIENTS) < 0) {
         perror("bind/listen");
         close(listen_fd);
         return RTDBD_EXIT_ERROR;

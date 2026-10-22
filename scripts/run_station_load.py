@@ -2,8 +2,12 @@
 """v3.10 单站规模化负载：20k 点 × 1 Hz 写 × 50 客户端 × 500 订阅。
 
 被测目标：`rtdbd --max-points 20000 --max-subs 1024`，50 个读连接各自
-`SET_SUBS` 500 点，8 个写线程按每点约 1 次/秒轮转写入；持续读 NOTIFY 并统计
+`SET_SUBS` 500 点，8 个写进程按每点约 1 次/秒轮转写入；持续读 NOTIFY 并统计
 每客户端帧数、写 ACK P99、health.notify_drop 与 rtdbd 进程 RSS/CPU。
+
+写端与读端均使用独立进程：同一 Python 进程内的 8 写线程 + 50 读线程会被
+GIL 串行化，测得的是负载生成器上限而非 rtdbd 上限；独立进程各自持有连接，
+才能把 20k/s 写负载真正压到服务端。
 
 纯标准库；协议客户端复用 tools/rtdb-monitor/rtdb_client.py。
 用法：
@@ -14,13 +18,13 @@ from __future__ import annotations
 
 import argparse
 import array
+import multiprocessing as mp
 import os
+import queue
 import random
 import statistics
 import sys
-import threading
 import time
-from dataclasses import dataclass, field
 from typing import Optional
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -31,13 +35,6 @@ sys.path.insert(0, HERE)
 
 from rtdb_client import NotifyListener, RtdbClient, TYPE_INT32  # noqa: E402
 from check_rtdbd_health import fetch as fetch_health  # noqa: E402
-
-
-@dataclass
-class WriterStats:
-    writes: int = 0
-    errors: int = 0
-    lat_ns: array.array = field(default_factory=lambda: array.array("Q"))
 
 
 class LatencySampler:
@@ -65,101 +62,106 @@ class LatencySampler:
         return vals[idx] / 1000.0
 
 
-class Writer(threading.Thread):
-    def __init__(self, sock: str, ids: list[int], index: int, workers: int,
-                 rate: float, stop: threading.Event, deadline: float,
-                 timeout: float):
-        super().__init__(name=f"writer-{index}", daemon=True)
-        self.sock = sock
-        self.ids = ids
-        self.index = index
-        self.workers = workers
-        self.rate = rate
-        self.stop = stop
-        self.deadline = deadline
-        self.timeout = timeout
-        self.stats = WriterStats()
-        self.lat = LatencySampler()
-        self.fatal: Optional[str] = None
+def _writer_worker(sock: str, ids: list[int], index: int, workers: int,
+                   rate: float, duration: float, timeout: float,
+                   start: mp.synchronize.Event,
+                   ready_q: mp.Queue, result_q: mp.Queue) -> None:
+    assigned = ids[index::workers]
+    result = {
+        "kind": "writer",
+        "index": index,
+        "writes": 0,
+        "errors": 0,
+        "fatal": None,
+        "p99_us": 0.0,
+    }
+    if not assigned:
+        ready_q.put((index, True))
+        result_q.put(result)
+        return
 
-    def run(self) -> None:
-        assigned = self.ids[self.index::self.workers]
-        if not assigned:
-            return
-        period_ns = max(1, int(1e9 / self.rate))
-        next_ns = time.perf_counter_ns()
-        cycle = 0
-        try:
-            client = RtdbClient(self.sock, timeout=self.timeout).connect()
-        except Exception as e:  # noqa: BLE001
-            self.fatal = f"connect: {e}"
-            return
-        try:
-            while not self.stop.is_set() and time.monotonic() < self.deadline:
-                for pid in assigned:
-                    if self.stop.is_set() or time.monotonic() >= self.deadline:
-                        break
-                    now = time.perf_counter_ns()
-                    if next_ns > now:
-                        time.sleep((next_ns - now) / 1e9)
-                    value = (cycle * 100_000 + pid) & 0x7FFFFFFF
-                    t0 = time.perf_counter_ns()
-                    try:
-                        client.write_point(pid, TYPE_INT32, value)
-                        self.stats.writes += 1
-                        self.lat.add(time.perf_counter_ns() - t0)
-                    except Exception as e:  # noqa: BLE001
-                        self.stats.errors += 1
-                        if self.stats.errors <= 3:
-                            self.fatal = f"write {pid}: {e}"
-                    next_ns += period_ns
-                    # 严重落后时不要无限追赶，避免突发把队列打满。
-                    if next_ns < time.perf_counter_ns() - 1_000_000_000:
-                        next_ns = time.perf_counter_ns()
-                cycle += 1
-        finally:
-            client.close()
+    try:
+        client = RtdbClient(sock, timeout=timeout).connect()
+    except Exception as e:  # noqa: BLE001
+        result["fatal"] = f"connect: {e}"
+        ready_q.put((index, False))
+        result_q.put(result)
+        return
+
+    ready_q.put((index, True))
+    if not start.wait(timeout=60):
+        result["fatal"] = "start timeout"
+        client.close()
+        result_q.put(result)
+        return
+
+    lat = LatencySampler()
+    period_ns = max(1, int(1e9 / rate))
+    next_ns = time.perf_counter_ns()
+    deadline = time.monotonic() + duration
+    cycle = 0
+    try:
+        while time.monotonic() < deadline:
+            for pid in assigned:
+                if time.monotonic() >= deadline:
+                    break
+                now = time.perf_counter_ns()
+                if next_ns > now:
+                    time.sleep((next_ns - now) / 1e9)
+                value = (cycle * 100_000 + pid) & 0x7FFFFFFF
+                t0 = time.perf_counter_ns()
+                try:
+                    client.write_point(pid, TYPE_INT32, value)
+                    result["writes"] += 1
+                    lat.add(time.perf_counter_ns() - t0)
+                except Exception as e:  # noqa: BLE001
+                    result["errors"] += 1
+                    if result["errors"] <= 3:
+                        result["fatal"] = f"write {pid}: {e}"
+                next_ns += period_ns
+                if next_ns < time.perf_counter_ns() - 1_000_000_000:
+                    next_ns = time.perf_counter_ns()
+            cycle += 1
+    finally:
+        client.close()
+        result["p99_us"] = lat.p99()
+        result_q.put(result)
 
 
-@dataclass
-class ReaderStats:
-    frames: int = 0
-    errors: list[str] = field(default_factory=list)
-    alive: bool = False
+def _reader_worker(sock: str, ids: list[int], index: int, duration: float,
+                   timeout: float, start: mp.synchronize.Event,
+                   ready_q: mp.Queue, result_q: mp.Queue) -> None:
+    frames = 0
+    errors: list[str] = []
 
+    def on_notify(_pid: int, _info: dict) -> None:
+        nonlocal frames
+        frames += 1
 
-class Reader:
-    def __init__(self, sock: str, ids: list[int], index: int, timeout: float):
-        self.sock = sock
-        self.ids = ids
-        self.index = index
-        self.timeout = timeout
-        self.stats = ReaderStats()
-        self.listener: Optional[NotifyListener] = None
-        self._lock = threading.Lock()
+    listener = NotifyListener(sock, on_notify=on_notify, timeout=timeout)
+    try:
+        listener.start()
+        listener.set_subs(ids)
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"start/set_subs: {e}")
+        ready_q.put((index, False))
+        listener.stop()
+        result_q.put({"kind": "reader", "index": index, "frames": frames,
+                      "errors": errors})
+        return
 
-    def _on_notify(self, _pid: int, _info: dict) -> None:
-        with self._lock:
-            self.stats.frames += 1
-
-    def start(self) -> None:
-        self.listener = NotifyListener(self.sock, on_notify=self._on_notify,
-                                       timeout=self.timeout)
-        try:
-            self.listener.start()
-            self.listener.set_subs(self.ids)
-        except Exception as e:  # noqa: BLE001
-            self.stats.errors.append(f"start/set_subs: {e}")
-        self.stats.alive = True
-
-    def check(self) -> None:
-        if self.listener and self.listener._thread is not None:
-            if not self.listener._thread.is_alive():
-                self.stats.errors.append("listener thread exited")
-
-    def stop(self) -> None:
-        if self.listener:
-            self.listener.stop()
+    ready_q.put((index, True))
+    try:
+        if not start.wait(timeout=60):
+            errors.append("start timeout")
+        else:
+            time.sleep(duration + 1.0)
+            if listener._thread is not None and not listener._thread.is_alive():
+                errors.append("listener thread exited")
+    finally:
+        listener.stop()
+        result_q.put({"kind": "reader", "index": index, "frames": frames,
+                      "errors": errors})
 
 
 def _proc_stat(pid: Optional[int]) -> Optional[dict]:
@@ -181,6 +183,20 @@ def _proc_stat(pid: Optional[int]) -> Optional[dict]:
         return None
 
 
+def _collect_results(result_q: mp.Queue, expected: int) -> list[dict]:
+    out: list[dict] = []
+    deadline = time.monotonic() + 15
+    while len(out) < expected:
+        remain = deadline - time.monotonic()
+        if remain <= 0:
+            break
+        try:
+            out.append(result_q.get(timeout=remain))
+        except queue.Empty:
+            break
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="InduRTDB v3.10 单站规模化负载")
     ap.add_argument("--socket", required=True, help="rtdbd UDS socket")
@@ -189,7 +205,7 @@ def main() -> int:
     ap.add_argument("--subs", type=int, default=500, help="每客户端订阅数（默认 500）")
     ap.add_argument("--duration", type=float, default=600.0, help="持续秒数（默认 600）")
     ap.add_argument("--write-rate", type=int, default=20000, help="总写速率（默认 20000/s）")
-    ap.add_argument("--workers", type=int, default=8, help="写线程数（默认 8）")
+    ap.add_argument("--workers", type=int, default=8, help="写进程数（默认 8）")
     ap.add_argument("--timeout", type=float, default=5.0, help="UDS 客户端超时秒")
     ap.add_argument("--pid", type=int, help="rtdbd PID（用于 RSS/CPU）")
     args = ap.parse_args()
@@ -200,6 +216,9 @@ def main() -> int:
     if args.points <= 0 or args.subs > args.points:
         print("points 必须 > 0 且 subs <= points", file=sys.stderr)
         return 2
+    if args.workers <= 0:
+        print("workers 必须 > 0", file=sys.stderr)
+        return 2
 
     with RtdbClient(args.socket, timeout=args.timeout) as c:
         listed = c.list_points()
@@ -209,50 +228,81 @@ def main() -> int:
         return 2
 
     print(f"station-load: points={len(ids)} clients={args.clients} "
-          f"subs/client={args.subs} write-rate={args.write_rate}/s duration={args.duration}s")
+          f"subs/client={args.subs} write-rate={args.write_rate}/s "
+          f"workers={args.workers} duration={args.duration}s")
 
     before = _proc_stat(args.pid)
     health_before = fetch_health(args.socket, args.timeout)
 
-    # 50 个读客户端：窗口尽量错开，覆盖全库；50×500 超过 20k 时允许重叠。
+    ctx = mp.get_context()
+    start = ctx.Event()
+    ready_q: mp.Queue = ctx.Queue()
+    result_q: mp.Queue = ctx.Queue()
+
     stride = max(1, len(ids) // args.clients)
-    readers: list[Reader] = []
+    readers = []
     for i in range(args.clients):
-        start = (i * stride) % len(ids)
-        sub_ids = [ids[(start + j) % len(ids)] for j in range(args.subs)]
-        r = Reader(args.socket, sub_ids, i, args.timeout)
-        r.start()
-        readers.append(r)
+        first = (i * stride) % len(ids)
+        sub_ids = [ids[(first + j) % len(ids)] for j in range(args.subs)]
+        p = ctx.Process(target=_reader_worker,
+                        args=(args.socket, sub_ids, i, args.duration,
+                              args.timeout, start, ready_q, result_q))
+        p.start()
+        readers.append(p)
 
-    # 给快照留出进入队列/被消费的时间，快照本身不计入写速率。
-    time.sleep(0.5)
-
-    stop = threading.Event()
-    deadline = time.monotonic() + args.duration
     per_worker = args.write_rate / args.workers
-    writers = [Writer(args.socket, ids, i, args.workers, per_worker,
-                      stop, deadline, args.timeout) for i in range(args.workers)]
+    writers = []
+    for i in range(args.workers):
+        p = ctx.Process(target=_writer_worker,
+                        args=(args.socket, ids, i, args.workers, per_worker,
+                              args.duration, args.timeout, start, ready_q, result_q))
+        p.start()
+        writers.append(p)
+
+    ready_ok = 0
+    ready_failed = 0
+    ready_deadline = time.monotonic() + 60
+    for _ in range(args.clients + args.workers):
+        remain = ready_deadline - time.monotonic()
+        if remain <= 0:
+            break
+        try:
+            _index, ok = ready_q.get(timeout=remain)
+        except queue.Empty:
+            break
+        if ok:
+            ready_ok += 1
+        else:
+            ready_failed += 1
+
+    # SET_SUBS 请求发出到服务端生效之间留出窗口，避免首批写通知落空。
+    time.sleep(0.5)
     t_start = time.monotonic()
-    for w in writers:
-        w.start()
-    for w in writers:
-        w.join(timeout=args.duration + 30)
-    stop.set()
+    start.set()
+
+    for p in writers:
+        p.join(timeout=args.duration + 30)
     elapsed = max(1e-9, time.monotonic() - t_start)
 
-    # 先取 health，再停 reader；避免关闭连接时的 outq 丢弃污染被测窗口。
     health_after = fetch_health(args.socket, args.timeout)
-    for r in readers:
-        r.check()
-    for r in readers:
-        r.stop()
+    for p in readers:
+        p.join(timeout=10)
+
+    alive = [p for p in writers + readers if p.is_alive()]
+    for p in alive:
+        p.terminate()
+        p.join(timeout=5)
+
+    results = _collect_results(result_q, args.clients + args.workers)
+    writer_results = [r for r in results if r["kind"] == "writer"]
+    reader_results = [r for r in results if r["kind"] == "reader"]
     after = _proc_stat(args.pid)
 
-    total_writes = sum(w.stats.writes for w in writers)
-    errors = sum(w.stats.errors for w in writers)
-    p99 = max((w.lat.p99() for w in writers), default=0.0)
-    reader_errors = [e for r in readers for e in r.stats.errors]
-    frames = [r.stats.frames for r in readers]
+    total_writes = sum(r["writes"] for r in writer_results)
+    errors = sum(r["errors"] for r in writer_results)
+    p99 = max((r["p99_us"] for r in writer_results), default=0.0)
+    reader_errors = [e for r in reader_results for e in r["errors"]]
+    frames = [r["frames"] for r in reader_results]
     drops = health_after["notify_drop"] - health_before["notify_drop"]
     notifies = health_after["n_notifies"] - health_before["n_notifies"]
     min_expected = int(args.subs * max(1.0, args.duration) * 0.5)
@@ -273,10 +323,19 @@ def main() -> int:
         print(f"rtdbd pid {args.pid}: /proc 不可读")
 
     failures: list[str] = []
+    if ready_failed or ready_ok < args.clients + args.workers:
+        failures.append(f"worker ready {ready_ok}/{args.clients + args.workers}"
+                        f" failed={ready_failed}")
+    if alive:
+        failures.append(f"workers still alive after deadline: {len(alive)}")
     if errors:
         failures.append(f"writer errors={errors}")
     if reader_errors:
         failures.append(f"reader errors={len(reader_errors)}: {reader_errors[:3]}")
+    if len(writer_results) != args.workers:
+        failures.append(f"writer results {len(writer_results)}/{args.workers}")
+    if len(reader_results) != args.clients:
+        failures.append(f"reader results {len(reader_results)}/{args.clients}")
     if drops != 0:
         failures.append(f"notify_drop={drops}（必须为 0）")
     if frames and min(frames) < min_expected:

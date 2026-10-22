@@ -29,8 +29,10 @@ All notable changes to InduRTDB.
 - **旧服务端降级**：新监控台探测不到 `SET_SUBS` 时自动退回 32 点/页，并用
   `UNSUBSCRIBE` + `SUBSCRIBE` 模拟整组替换；`legacy` 提示条明确告警。
 - **负载脚本**：`scripts/run_station_load.py` / `run_station_load.sh`，生成 20k 点配置、
-  启动 rtdbd、8 写线程 × 50 读客户端 × 500 订阅，输出每客户端帧数、写 ACK P99、
+  启动 rtdbd、8 写进程 × 50 读进程 × 500 订阅，输出每客户端帧数、写 ACK P99、
   `notify_drop`、RSS/CPU，并对 `notify_drop == 0` 与断链做硬断言。
+  使用进程而非线程：单解释器内 8 写线程 + 50 读线程受 GIL 限制，只能产生约
+  1.5k 写/s，会把负载生成器上限误判为 rtdbd 上限。
 
 ### Changed
 - `--max-subs` 语义从“段内订阅者槽位上限”改为“**每连接**订阅点位上限”，默认
@@ -38,6 +40,11 @@ All notable changes to InduRTDB.
 - 每连接出站队列由 64 帧扩至 **1024 帧**，连接表上限 128；`notify_drop` 仍表示
   队列满丢最旧、连接关闭未发完、flush 失败和停机排空超时的通知丢弃。
 - 监控台默认每页 50 点；2 万点不再一次性经 REST/WS 传输。
+
+### Fixed
+- **50 客户端并发建连丢握手**：`rtdbd` 的 `listen()` backlog 原为 8，50 个读客户端
+  同时连接时 accept 队列溢出，负载端出现连接失败/零帧。现与连接表容量对齐为
+  `RTDBD_MAX_CLIENTS`（128）。
 
 ### Upgrade Notes
 - 从 v3.9.x 升级：先停 `rtdbd`（正常 SIGTERM 会删除旧段），确认
