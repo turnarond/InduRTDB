@@ -170,3 +170,22 @@ TEST_F(CPmTest, CheckTimeoutsGlobalStillWorks)
     ASSERT_EQ(irt_pm_read(&pm_, 13, &p), 0);
     EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_TIMEOUT);
 }
+
+TEST_F(CPmTest, CheckTimeoutsPreservesLimitAndDoesNotRepeat)
+{
+    write_point_and_meta(&shm_, &pm_, 14, 10);
+    ASSERT_EQ(irt_pm_set_quality(
+                  &pm_, 14,
+                  INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_GOOD, INDURTDB_LIMIT_HIGH)),
+              0);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    EXPECT_EQ(irt_pm_check_timeouts(&pm_, 0), 1);
+
+    indurtdb_point_t p{};
+    ASSERT_EQ(irt_pm_read(&pm_, 14, &p), 0);
+    EXPECT_EQ(INDURTDB_QUALITY_BASE(p.quality), INDURTDB_QUALITY_TIMEOUT);
+    EXPECT_EQ(INDURTDB_QUALITY_LIMIT(p.quality), INDURTDB_LIMIT_HIGH);
+
+    EXPECT_EQ(irt_pm_check_timeouts(&pm_, 0), 0);
+}

@@ -233,9 +233,10 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
             } while (s0 != s1);
         }
 
-        /* 跳过从未写入或已经标记为 TIMEOUT 的点 */
+        /* 跳过从未写入或已经标记为 TIMEOUT 的点。
+         * 按基础码比较：超时保留量程位，TIMEOUT|LIMIT 仍是 TIMEOUT。 */
         if (ts == 0) continue;
-        if (q == INDURTDB_QUALITY_TIMEOUT) continue;
+        if (INDURTDB_QUALITY_BASE(q) == INDURTDB_QUALITY_TIMEOUT) continue;
 
         /* v3.10: 计算有效超时（纳秒）。
          * - 点位启用 per-point 且 timeout_ms > 0 时用其值；
@@ -263,7 +264,7 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
         /* 二次确认: 可能在等待写锁期间被其它线程更新了 */
         if (p->timestamp_ns == 0
             || p->timestamp_ns >= now
-            || p->quality == INDURTDB_QUALITY_TIMEOUT
+            || INDURTDB_QUALITY_BASE(p->quality) == INDURTDB_QUALITY_TIMEOUT
             || now - p->timestamp_ns <= effective_ns) {
             irt_seqlock_write_end(&hdr->write_seq, seq0);
             continue;

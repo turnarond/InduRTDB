@@ -393,8 +393,8 @@ static void scan_timeouts(rtdbd_conn_t* conns, int n, uint64_t timeout_ns)
         indurtdb_point_t pt;
         if (indurtdb_h_read_point(g_h, id, &pt) != 0) continue;
         uint8_t q = pt.quality;
-        if (g_quality[id] != INDURTDB_QUALITY_TIMEOUT &&
-            q == INDURTDB_QUALITY_TIMEOUT) {
+        if (INDURTDB_QUALITY_BASE(g_quality[id]) != INDURTDB_QUALITY_TIMEOUT &&
+            INDURTDB_QUALITY_BASE(q) == INDURTDB_QUALITY_TIMEOUT) {
             notify_quality_transition(conns, n, id);
         }
         g_quality[id] = q;
