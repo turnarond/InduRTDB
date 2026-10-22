@@ -16,7 +16,7 @@ from rtdb_client import (  # noqa: E402
     LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
     OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
     OP_SET_SUBS, RTDBD_MAGIC, RTDBD_PROTO_VERSION, PARTITION_ALL,
-    RtdbClient, NotifyListener, probe_set_subs,
+    RTDBD_SET_SUBS_MAX, RtdbClient, NotifyListener, probe_set_subs,
     RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
@@ -233,6 +233,15 @@ def test_set_subs_roundtrip():
     count = struct.unpack("<I", captured["payload"][:4])[0]
     ids = struct.unpack("<3I", captured["payload"][4:])
     assert count == 3 and ids == (3, 1, 2)
+
+
+def test_set_subs_caps_at_server_limit():
+    path, captured, t = _mock_server()
+    with RtdbClient(path) as c:
+        c.set_subs(list(range(RTDBD_SET_SUBS_MAX + 1)))
+    t.join(2)
+    count = struct.unpack("<I", captured["payload"][:4])[0]
+    assert count == RTDBD_SET_SUBS_MAX
 
 
 def test_set_subs_empty_payload():

@@ -44,6 +44,7 @@ OP_DELETE_POINT = 13
 OP_RENAME_POINT = 14
 OP_GET_LOG = 15
 OP_SET_SUBS = 18
+RTDBD_SET_SUBS_MAX = 1024
 
 # 状态码
 ST_OK = 0
@@ -158,6 +159,10 @@ class RtdbClient:
             finally:
                 self._sock = None
 
+    @property
+    def connected(self) -> bool:
+        return self._sock is not None
+
     def __enter__(self):
         return self.connect()
 
@@ -251,7 +256,7 @@ class RtdbClient:
 
     def set_subs(self, point_ids: list[int]) -> None:
         """v3.10：连接级批量订阅（整组替换），响应为空负载。"""
-        ids = [int(pid) for pid in point_ids]
+        ids = [int(pid) for pid in point_ids][:RTDBD_SET_SUBS_MAX]
         payload = struct.pack("<I", len(ids))
         if ids:
             payload += struct.pack(f"<{len(ids)}I", *ids)
@@ -361,7 +366,7 @@ class NotifyListener:
         sock = self._sock
         if not sock:
             raise RtdbError("listener not started")
-        ids = [int(pid) for pid in point_ids]
+        ids = [int(pid) for pid in point_ids][:RTDBD_SET_SUBS_MAX]
         payload = struct.pack("<I", len(ids))
         if ids:
             payload += struct.pack(f"<{len(ids)}I", *ids)

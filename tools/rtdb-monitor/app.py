@@ -31,7 +31,8 @@ from fastapi import FastAPI, Query, Header, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from rtdb_client import RtdbClient, NotifyListener, probe_set_subs
+from rtdb_client import (RtdbClient, NotifyListener, probe_set_subs,
+                         RTDBD_SET_SUBS_MAX)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -92,32 +93,46 @@ async def _safe_send(ws: WebSocket, msg: dict) -> None:
         ws_clients.discard(ws)
 
 
+def _connect_and_probe() -> bool:
+    global api_client, supports_set_subs
+    candidate = RtdbClient(SOCK)
+    try:
+        candidate.connect()
+        supported = probe_set_subs(candidate)
+        if not supported:
+            candidate.close()
+            candidate = RtdbClient(SOCK).connect()
+    except Exception:  # noqa: BLE001
+        candidate.close()
+        return False
+    old = api_client
+    api_client = candidate
+    supports_set_subs = supported
+    if old is not None:
+        old.close()
+    return True
+
+
 async def _registry_retry() -> None:
     """rtdbd 未就绪时后台重试；不阻塞 Web 启动。"""
-    for _ in range(50):
+    for _ in range(300):
         await asyncio.sleep(0.2)
+        if api_client is None or not api_client.connected:
+            if not _connect_and_probe():
+                continue
         if _refresh_registry():
             return
+        if api_client is not None:
+            api_client.close()
 
 
 @app.on_event("startup")
 async def _startup() -> None:
-    global api_client, loop, supports_set_subs
+    global loop
     loop = asyncio.get_running_loop()
-    api_client = RtdbClient(SOCK)
-    try:
-        api_client.connect()
-    except Exception as e:  # noqa: BLE001
-        print(f"[warn] rtdb-monitor: 初始连接 rtdb 失败（{e}），API 暂不可用", flush=True)
-    else:
-        supports_set_subs = probe_set_subs(api_client)
-        if not supports_set_subs:
-            # 探测失败可能已让旧服务端关闭连接；重连后走逐点 SUBSCRIBE 降级。
-            try:
-                api_client.close()
-                api_client = RtdbClient(SOCK).connect()
-            except Exception:  # noqa: BLE001
-                pass
+    if not _connect_and_probe():
+        print(f"[warn] rtdb-monitor: 初始连接 rtdb 失败（{SOCK}），API 暂不可用",
+              flush=True)
     if not _refresh_registry():
         asyncio.create_task(_registry_retry())
 
@@ -489,7 +504,9 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
             elif op == "set":
                 await _ws_set(ws, msg)
             elif op == "set_subs":
-                ids = _resolve_ws_ids(msg.get("ids") or msg.get("pointIds") or [])
+                ids = _resolve_ws_ids(
+                    msg.get("ids") or msg.get("pointIds") or []
+                )[:RTDBD_SET_SUBS_MAX]
                 if supports_set_subs:
                     ws_listener.set_subs(ids)
                 else:
@@ -498,9 +515,11 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
                                         "ids": ids})
                 await ws.send_json({"op": "subscribed", "ids": ids})
             elif op == "subscribe":
-                ids = _resolve_ws_ids(msg.get("ids") or msg.get("pointIds") or [])
+                ids = _resolve_ws_ids(
+                    msg.get("ids") or msg.get("pointIds") or []
+                )[:RTDBD_SET_SUBS_MAX]
                 if supports_set_subs:
-                    ws_listener.subscribe(ids[:1024])
+                    ws_listener.subscribe(ids)
                 else:
                     ids = ws_listener.replace_subs_legacy(ids)
                     await ws.send_json({"type": "legacy", "page_size": 32,
