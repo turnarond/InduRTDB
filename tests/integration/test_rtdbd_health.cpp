@@ -268,6 +268,29 @@ TEST(Health, Sigusr1DumpWritesFile)
     ASSERT_TRUE(write_point(fd, 10, 42, &resp));
     ASSERT_EQ(resp.status, RTDBD_ST_OK);
 
+    /* v3.11：制造一次 BATCH_READ / BATCH_WRITE，确认新计数器进入 dump。 */
+    {
+        uint32_t payload[2] = {1, 10};
+        std::vector<uint8_t> body;
+        ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_BATCH_READ, payload,
+                                 sizeof(payload), &resp, &body));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+
+        uint8_t wpayload[4 + sizeof(rtdbd_write_req_t)];
+        uint32_t count = 1;
+        memcpy(wpayload, &count, 4);
+        rtdbd_write_req_t w;
+        memset(&w, 0, sizeof(w));
+        w.point_id = 10;
+        w.type = RTDBD_TYPE_INT32;
+        w.value_bits = 43;
+        memcpy(wpayload + 4, &w, sizeof(w));
+        body.clear();
+        ASSERT_TRUE(raw_exchange(fd, RTDBD_OP_BATCH_WRITE, wpayload,
+                                 sizeof(wpayload), &resp, &body));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
     /* 触发 dump：SIGUSR1 → 主循环写文件 */
     ASSERT_EQ(kill(p.pid, SIGUSR1), 0);
 
@@ -289,6 +312,12 @@ TEST(Health, Sigusr1DumpWritesFile)
     EXPECT_NE(content.find("write_rejected"), std::string::npos) << content;
     EXPECT_NE(content.find("health"), std::string::npos) << content;
     EXPECT_NE(content.find("n_conns"), std::string::npos) << content;
+    EXPECT_NE(content.find("n_batch_read_reqs"), std::string::npos) << content;
+    EXPECT_NE(content.find("n_batch_write_reqs"), std::string::npos) << content;
+    EXPECT_NE(content.find("notify_drop_live"), std::string::npos) << content;
+    EXPECT_NE(content.find("notify_drop_snapshot"), std::string::npos) << content;
+    EXPECT_NE(content.find("conn_alloc_fail"), std::string::npos) << content;
+    EXPECT_NE(content.find("subs_alloc_fail"), std::string::npos) << content;
 
     close(fd);
     p.stop();

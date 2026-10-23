@@ -585,3 +585,23 @@ emit("DIAG_HDR_SCAN_SKIPPED", d["scan_skipped"])
                   << std::endl;
     }
 }
+
+TEST(Mirror, V311ProtocolLayout)
+{
+    EXPECT_EQ(RTDBD_OP_BATCH_READ, 19u);
+    EXPECT_EQ(RTDBD_OP_BATCH_WRITE, 20u);
+    EXPECT_EQ(RTDBD_OP_CAPS, 21u);
+    EXPECT_EQ(RTDBD_OP_SNAPSHOT_DONE, 22u);
+    EXPECT_EQ(RTDBD_ST_NO_MEM, 5u);
+    EXPECT_EQ(RTDBD_SUB_MAX_PER_CONN, 10000u);
+    EXPECT_EQ(RTDBD_BATCH_MAX, 1024u);
+    EXPECT_EQ(RTDBD_NOTIFY_F_SNAPSHOT, 0x01u);
+    EXPECT_EQ(RTDBD_CAPS_F_BATCH_READ, 0x01u);
+    EXPECT_EQ(RTDBD_CAPS_F_BATCH_WRITE, 0x02u);
+    EXPECT_EQ(RTDBD_CAPS_F_SNAPSHOT_DONE, 0x04u);
+    EXPECT_EQ(RTDBD_SNAPSHOT_DONE_F_COMPLETE, 0x01u);
+    EXPECT_EQ(sizeof(rtdbd_caps_t), 32u);
+    EXPECT_EQ(sizeof(rtdbd_batch_read_item_t), 72u);
+    EXPECT_EQ(sizeof(rtdbd_batch_write_item_t), 8u);
+    EXPECT_EQ(sizeof(rtdbd_snapshot_done_t), 8u);
+}

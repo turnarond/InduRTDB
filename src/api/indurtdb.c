@@ -136,9 +136,10 @@ static int h_translate_write_rc(int rc) {
     }
 }
 
-/* 写入成功后通知订阅者 (用栈变量读, 避免 _Thread_local 缓冲被回调重入覆盖) */
+/* 写入成功后通知库内回调订阅者 (用栈变量读, 避免 _Thread_local 缓冲被回调重入覆盖)。
+ * 无回调订阅时跳过读点：rtdbd 使用自有订阅表，此处热路径不应多付一次 128B 拷贝。 */
 static int h_write_and_notify(indurtdb_t* h, int rc, uint32_t id) {
-    if (rc == 0) {
+    if (rc == 0 && h->sub.slot_count != 0) {
         indurtdb_point_t pt;
         if (irt_pm_read(&h->pm, id, &pt) == 0)
             irt_sub_notify(&h->sub, id, &pt);

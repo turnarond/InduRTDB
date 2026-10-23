@@ -156,6 +156,62 @@ bool raw_exchange(int fd, uint16_t op, const void* payload, uint32_t plen,
     return true;
 }
 
+/* 构造 SET_SUBS 请求：count + ids[1..count]（点位不存在时用于探测上限）。 */
+bool set_subs_exchange(int fd, uint32_t count, rtdbd_resp_hdr_t* resp,
+                       std::vector<uint8_t>* body)
+{
+    std::vector<uint8_t> payload(4u + count * 4u);
+    memcpy(payload.data(), &count, sizeof(count));
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t id = i + 1u;
+        memcpy(payload.data() + 4u + i * 4u, &id, sizeof(id));
+    }
+    return raw_exchange(fd, RTDBD_OP_SET_SUBS, payload.data(),
+                        (uint32_t)payload.size(), resp, body);
+}
+
+pid_t spawn_rtdbd(const std::vector<std::string>& args)
+{
+    pid_t pid = fork();
+    if (pid != 0) return pid;
+
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(RTDBD_BIN));
+    for (const std::string& a : args) argv.push_back(const_cast<char*>(a.c_str()));
+    argv.push_back(nullptr);
+    execv(RTDBD_BIN, argv.data());
+    _exit(127);
+}
+
+bool wait_for_rtdbd(pid_t pid, const std::string& sock)
+{
+    for (int i = 0; i < 300; ++i) {
+        int st = 0;
+        if (waitpid(pid, &st, WNOHANG) == pid) return false;
+        struct stat sb;
+        if (stat(sock.c_str(), &sb) == 0) return true;
+        usleep(10000);
+    }
+    return false;
+}
+
+void stop_rtdbd(pid_t pid, const std::string& sock)
+{
+    if (pid > 0) {
+        kill(pid, SIGTERM);
+        int st = 0;
+        for (int i = 0; i < 500; ++i) {
+            if (waitpid(pid, &st, WNOHANG) == pid) { pid = -1; break; }
+            usleep(10000);
+        }
+        if (pid > 0) {
+            kill(pid, SIGKILL);
+            waitpid(pid, &st, 0);
+        }
+    }
+    unlink(sock.c_str());
+}
+
 const char* kValidConfig =
     "points:\n"
     "  - id: 10\n"
@@ -166,6 +222,20 @@ const char* kValidConfig =
     "    eur_max: 100\n"
     "    deadband: 1\n"
     "    flags: 3\n";
+
+/* v3.11：容量配置块在所有点位键之前；CapsFromYaml 用于验证段内键被读取。 */
+const char* kCapsConfig =
+    "rtdbd:\n"
+    "  max_clients: 8\n"
+    "  initial_clients: 4\n"
+    "  max_subs_per_conn: 4\n"
+    "  initial_subs_per_conn: 4\n"
+    "  max_batch: 16\n"
+    "points:\n"
+    "  - id: 10\n"
+    "    name: \"Cfg_Caps\"\n"
+    "    type: int32\n"
+    "    access: 3\n";
 
 const char* kBadEurConfig =
     "points:\n"
@@ -500,10 +570,197 @@ TEST(RtdbdConfig, OversizeMaxSubsExits2)
         "--socket", "/tmp/indurtdb_cfg_bigsub.sock",
         "--instance", "cfg_bigsub",
         "--max-points", "64",
-        "--max-subs", "9999"
+        "--max-subs", "10001"
     }, &err);
     EXPECT_EQ(code, 2) << err;
     EXPECT_NE(err.find("invalid --max-subs"), std::string::npos) << err;
+}
+
+/* v3.11 Phase 5：YAML 容量键生效（通过 SET_SUBS 上限观测 max_subs）。 */
+TEST(RtdbdConfig, CapsFromYaml)
+{
+    std::string sock = "/tmp/indurtdb_cfg_caps.sock";
+    std::string cfg  = make_tmp_file("cfg_caps.yaml", kCapsConfig);
+    unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_caps");
+
+    pid_t pid = spawn_rtdbd({
+        "--socket", sock,
+        "--instance", "cfg_caps",
+        "--config", cfg,
+        "--max-points", "64"
+    });
+    ASSERT_GT(pid, 0);
+    if (!wait_for_rtdbd(pid, sock)) {
+        stop_rtdbd(pid, sock);
+        FAIL() << "rtdbd did not start with caps config";
+    }
+
+    int fd = connect_to(sock);
+    if (fd < 0) { stop_rtdbd(pid, sock); FAIL() << "connect failed"; }
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(set_subs_exchange(fd, 5, &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_BAD_REQUEST)
+        << "YAML max_subs_per_conn=4 must reject 5 subscriptions";
+
+    close(fd);
+    stop_rtdbd(pid, sock);
+    drop_segment("cfg_caps");
+}
+
+/* v3.11 Phase 5：CLI 覆盖 YAML（4 -> 5）后，5 个订阅通过上限检查。 */
+TEST(RtdbdConfig, CliOverridesYaml)
+{
+    std::string sock = "/tmp/indurtdb_cfg_override.sock";
+    std::string cfg  = make_tmp_file("cfg_override.yaml", kCapsConfig);
+    unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_override");
+
+    pid_t pid = spawn_rtdbd({
+        "--socket", sock,
+        "--instance", "cfg_override",
+        "--config", cfg,
+        "--max-points", "64",
+        "--max-subs", "5"
+    });
+    ASSERT_GT(pid, 0);
+    if (!wait_for_rtdbd(pid, sock)) {
+        stop_rtdbd(pid, sock);
+        FAIL() << "rtdbd did not start with CLI override";
+    }
+
+    int fd = connect_to(sock);
+    if (fd < 0) { stop_rtdbd(pid, sock); FAIL() << "connect failed"; }
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(set_subs_exchange(fd, 5, &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND)
+        << "CLI --max-subs 5 must override YAML max_subs_per_conn=4";
+
+    close(fd);
+    stop_rtdbd(pid, sock);
+    drop_segment("cfg_override");
+}
+
+/* v3.11 Phase 5：旧的 --max-subs 4 仍有效；未显式给 initial_subs 时自动收敛。 */
+TEST(RtdbdConfig, LegacyMaxSubsStillWorks)
+{
+    std::string sock = "/tmp/indurtdb_cfg_legacy.sock";
+    unlink(sock.c_str());
+    shm_unlink("/indurtdb_cfg_legacy");
+
+    pid_t pid = spawn_rtdbd({
+        "--socket", sock,
+        "--instance", "cfg_legacy",
+        "--max-points", "64",
+        "--max-subs", "4"
+    });
+    ASSERT_GT(pid, 0);
+    if (!wait_for_rtdbd(pid, sock)) {
+        stop_rtdbd(pid, sock);
+        FAIL() << "legacy --max-subs 4 must still start";
+    }
+
+    int fd = connect_to(sock);
+    if (fd < 0) { stop_rtdbd(pid, sock); FAIL() << "connect failed"; }
+
+    rtdbd_resp_hdr_t resp;
+    std::vector<uint8_t> body;
+    ASSERT_TRUE(set_subs_exchange(fd, 5, &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_BAD_REQUEST);
+    ASSERT_TRUE(set_subs_exchange(fd, 4, &resp, &body));
+    EXPECT_EQ(resp.status, RTDBD_ST_NOT_FOUND)
+        << "count=4 must pass the limit and reach point validation";
+
+    close(fd);
+    stop_rtdbd(pid, sock);
+    drop_segment("cfg_legacy");
+}
+
+TEST(RtdbdConfig, InitialClientsGtMaxExits2)
+{
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_initcli.sock",
+        "--instance", "cfg_initcli",
+        "--max-points", "64",
+        "--max-clients", "4",
+        "--initial-clients", "5"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("initial_clients"), std::string::npos) << err;
+}
+
+TEST(RtdbdConfig, InitialSubsGtMaxExits2)
+{
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_initsub.sock",
+        "--instance", "cfg_initsub",
+        "--max-points", "64",
+        "--max-subs", "4",
+        "--initial-subs", "5"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("initial_subs_per_conn"), std::string::npos) << err;
+}
+
+TEST(RtdbdConfig, MaxClientsOver128Exits2)
+{
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_maxcli.sock",
+        "--instance", "cfg_maxcli",
+        "--max-points", "64",
+        "--max-clients", "129"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("max_clients"), std::string::npos) << err;
+}
+
+TEST(RtdbdConfig, MaxBatchOver1024Exits2)
+{
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_maxbatch.sock",
+        "--instance", "cfg_maxbatch",
+        "--max-points", "64",
+        "--max-batch", "1025"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("max_batch"), std::string::npos) << err;
+}
+
+TEST(RtdbdConfig, ZeroMaxBatchExits2)
+{
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_zerobatch.sock",
+        "--instance", "cfg_zerobatch",
+        "--max-points", "64",
+        "--max-batch", "0"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("max_batch"), std::string::npos) << err;
+}
+
+TEST(RtdbdConfig, UnknownRtdbdKeyExits2)
+{
+    std::string cfg = make_tmp_file("cfg_unknown_key.yaml",
+                                    "rtdbd:\n  bogus_key: 1\n");
+    std::string err;
+    int code = run_rtdbd({
+        "--socket", "/tmp/indurtdb_cfg_unknown.sock",
+        "--instance", "cfg_unknown",
+        "--config", cfg,
+        "--max-points", "64"
+    }, &err);
+    EXPECT_EQ(code, 2) << err;
+    EXPECT_NE(err.find("invalid config"), std::string::npos) << err;
+    EXPECT_NE(err.find("line 2"), std::string::npos) << err;
 }
 
 int main(int argc, char** argv)

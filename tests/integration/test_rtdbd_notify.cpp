@@ -221,6 +221,52 @@ bool recv_notify(int fd, rtdbd_notify_t* out, int timeout_ms = 2000)
     return true;
 }
 
+bool recv_payload(int fd, void* out, uint32_t len)
+{
+    return recv(fd, out, len, MSG_WAITALL) == (ssize_t)len;
+}
+
+/* OP_CAPS：读 32B 能力结构；成功要求状态 OK 且负载长度精确匹配。 */
+bool caps_exchange(int fd, rtdbd_caps_t* out)
+{
+    if (!send_req(fd, RTDBD_OP_CAPS, NULL, 0)) return false;
+    rtdbd_resp_hdr_t r;
+    if (!recv_resp(fd, &r)) return false;
+    if (r.status != RTDBD_ST_OK || r.payload_len != sizeof(*out)) return false;
+    return recv_payload(fd, out, sizeof(*out));
+}
+
+/* 接收一帧 SNAPSHOT_DONE（服务端→客户端控制帧）。 */
+bool recv_done(int fd, rtdbd_snapshot_done_t* out, int timeout_ms = 5000)
+{
+    struct pollfd pfd;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    if (poll(&pfd, 1, timeout_ms) <= 0) return false;
+
+    rtdbd_req_hdr_t h;
+    if (recv(fd, &h, sizeof(h), MSG_WAITALL) != (ssize_t)sizeof(h)) return false;
+    if (h.magic != RTDBD_MAGIC || h.opcode != RTDBD_OP_SNAPSHOT_DONE) return false;
+    if (h.payload_len != sizeof(*out)) return false;
+    return recv_payload(fd, out, sizeof(*out));
+}
+
+std::string yaml_points(uint32_t n)
+{
+    std::string out = "points:\n";
+    char line[160];
+    for (uint32_t i = 0; i < n; ++i) {
+        snprintf(line, sizeof(line),
+                 "  - id: %u\n"
+                 "    name: \"P%u\"\n"
+                 "    type: int32\n"
+                 "    access: 3\n",
+                 i, i);
+        out += line;
+    }
+    return out;
+}
+
 bool write_int32(int fd, uint32_t point_id, int32_t value)
 {
     rtdbd_write_req_t w;
@@ -355,11 +401,11 @@ TEST(RtdbdNotify, NoFdLeakUnderChurn)
     EXPECT_LE(after, before + 8) << "反复订阅/退订不应累积 fd";
 }
 
-/* 3. 每连接最多 1024 个订阅（v3.10 容量提升） */
+/* 3. 每连接最多 1024 个订阅（v3.10 容量提升；v3.11 默认上限为 10000） */
 TEST(RtdbdNotify, SubscribeUpTo1024)
 {
     Proc p;
-    ASSERT_TRUE(p.start_with("sub1024", policy_for_self_range(RTDBD_SUB_MAX_PER_CONN - 1),
+    ASSERT_TRUE(p.start_with("sub1024", policy_for_self_range(1023),
                              1024, 1024));
 
     int ctl = connect_to(p.sock);
@@ -368,12 +414,12 @@ TEST(RtdbdNotify, SubscribeUpTo1024)
     ASSERT_GE(sub, 0);
 
     char name[32];
-    for (uint32_t i = 0; i < RTDBD_SUB_MAX_PER_CONN; ++i) {
+    for (uint32_t i = 0; i < 1024; ++i) {
         snprintf(name, sizeof(name), "Scale_%u", i);
         ASSERT_TRUE(create_point(ctl, i, name)) << "create point " << i;
     }
 
-    for (uint32_t i = 0; i < RTDBD_SUB_MAX_PER_CONN; ++i) {
+    for (uint32_t i = 0; i < 1024; ++i) {
         ASSERT_TRUE(subscribe(sub, i)) << "subscribe " << i;
     }
 
@@ -880,6 +926,122 @@ TEST(RtdbdNotify, TimeoutNotifiesOnlySubscribers)
     close(other);
     close(sub);
     close(ctl);
+}
+
+/* 13. CAPS 上报 v3.11 容量：默认 128/32/10000/1024/1024。 */
+TEST(RtdbdNotify, CapsReportsCapacity)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("caps_defaults", policy_for_self(), 64, 10000));
+
+    int fd = connect_to(p.sock);
+    ASSERT_GE(fd, 0);
+
+    rtdbd_caps_t caps;
+    ASSERT_TRUE(caps_exchange(fd, &caps));
+    EXPECT_EQ(caps.proto_version, RTDBD_PROTO_VERSION);
+    EXPECT_EQ(caps.max_clients, 128u);
+    EXPECT_EQ(caps.initial_clients, 32u);
+    EXPECT_EQ(caps.max_subs_per_conn, 10000u);
+    EXPECT_EQ(caps.initial_subs_per_conn, 1024u);
+    EXPECT_EQ(caps.max_batch, 1024u);
+    EXPECT_EQ(caps.flags & (RTDBD_CAPS_F_BATCH_READ |
+                            RTDBD_CAPS_F_BATCH_WRITE |
+                            RTDBD_CAPS_F_SNAPSHOT_DONE),
+              (RTDBD_CAPS_F_BATCH_READ |
+               RTDBD_CAPS_F_BATCH_WRITE |
+               RTDBD_CAPS_F_SNAPSHOT_DONE));
+
+    /* 重复协商幂等。 */
+    rtdbd_caps_t again;
+    ASSERT_TRUE(caps_exchange(fd, &again));
+    EXPECT_EQ(again.max_subs_per_conn, caps.max_subs_per_conn);
+
+    close(fd);
+}
+
+/* 14. 10,000 订阅：全部快照后收到 SNAPSHOT_DONE，count 精确。 */
+TEST(RtdbdNotify, SetSubsSnapshotDoneTenThousand)
+{
+    const uint32_t N = 10000;
+    Proc p;
+    ASSERT_TRUE(p.start_cfg("setsubs_10k", policy_for_self_range(N),
+                            N, N, yaml_points(N)));
+
+    int sub = connect_to(p.sock);
+    ASSERT_GE(sub, 0);
+
+    rtdbd_caps_t caps;
+    ASSERT_TRUE(caps_exchange(sub, &caps));
+    EXPECT_EQ(caps.max_subs_per_conn, N);
+
+    std::vector<uint32_t> ids;
+    ids.reserve(N);
+    for (uint32_t i = 0; i < N; ++i) ids.push_back(i);
+
+    EXPECT_EQ(set_subs(sub, ids), RTDBD_ST_OK);
+
+    rtdbd_notify_t nt;
+    for (uint32_t i = 0; i < N; ++i) {
+        ASSERT_TRUE(recv_notify(sub, &nt, 5000)) << "snapshot frame " << i;
+        EXPECT_EQ(nt.point_id, i);
+        EXPECT_EQ((int32_t)(int64_t)nt.value_bits, 0);
+        EXPECT_NE(nt.reserved[1] & RTDBD_NOTIFY_F_SNAPSHOT, 0u);
+    }
+
+    rtdbd_snapshot_done_t done;
+    ASSERT_TRUE(recv_done(sub, &done, 5000));
+    EXPECT_EQ(done.flags, RTDBD_SNAPSHOT_DONE_F_COMPLETE);
+    EXPECT_EQ(done.count, N);
+
+    close(sub);
+}
+
+/* 15. 未协商 CAPS 的旧客户端：收快照，但不收 SNAPSHOT_DONE。 */
+TEST(RtdbdNotify, LegacyClientNeverGetsSnapshotDone)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_cfg("legacy_nodone", policy_for_self_range(3),
+                            64, 10000, yaml_points(3)));
+
+    int sub = connect_to(p.sock);
+    ASSERT_GE(sub, 0);
+
+    EXPECT_EQ(set_subs(sub, {0, 1, 2}), RTDBD_ST_OK);
+
+    rtdbd_notify_t nt;
+    for (uint32_t i = 0; i < 3; ++i) {
+        ASSERT_TRUE(recv_notify(sub, &nt, 5000));
+        EXPECT_EQ(nt.point_id, i);
+    }
+
+    struct pollfd pfd;
+    pfd.fd = sub;
+    pfd.events = POLLIN;
+    EXPECT_EQ(poll(&pfd, 1, 300), 0) << "legacy client must not receive SNAPSHOT_DONE";
+
+    close(sub);
+}
+
+/* 16. 空订阅集也发 SNAPSHOT_DONE(count=0)，用于监控台建立空快照屏障。 */
+TEST(RtdbdNotify, EmptySetSubsSendsSnapshotDone)
+{
+    Proc p;
+    ASSERT_TRUE(p.start_with("setsubs_empty_done", policy_for_self(), 64, 10000));
+
+    int sub = connect_to(p.sock);
+    ASSERT_GE(sub, 0);
+
+    rtdbd_caps_t caps;
+    ASSERT_TRUE(caps_exchange(sub, &caps));
+    EXPECT_EQ(set_subs(sub, {}), RTDBD_ST_OK);
+
+    rtdbd_snapshot_done_t done;
+    ASSERT_TRUE(recv_done(sub, &done, 2000));
+    EXPECT_EQ(done.flags, RTDBD_SNAPSHOT_DONE_F_COMPLETE);
+    EXPECT_EQ(done.count, 0u);
+
+    close(sub);
 }
 
 int main(int argc, char** argv)

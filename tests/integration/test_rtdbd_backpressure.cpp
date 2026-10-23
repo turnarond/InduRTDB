@@ -9,6 +9,8 @@
  */
 #include <gtest/gtest.h>
 
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -231,6 +233,32 @@ bool query_health(int fd, rtdbd_health_t* out)
     return true;
 }
 
+uint64_t stats_value(RtdbdProc* p, const char* key)
+{
+    unlink(p->stats_path.c_str());
+    if (kill(p->pid, SIGUSR1) != 0) return UINT64_MAX;
+
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        FILE* f = fopen(p->stats_path.c_str(), "r");
+        if (f) {
+            char line[256];
+            uint64_t value = UINT64_MAX;
+            size_t key_len = strlen(key);
+            while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, key, key_len) != 0) continue;
+                const char* eq = strchr(line, '=');
+                if (!eq) continue;
+                value = strtoull(eq + 1, nullptr, 10);
+                break;
+            }
+            fclose(f);
+            if (value != UINT64_MAX) return value;
+        }
+        usleep(10000);
+    }
+    return UINT64_MAX;
+}
+
 } // namespace
 
 /* 1. 慢消费者（订阅但不读）→ 队列填满 → 丢最旧，notify_drop > 0 */
@@ -395,6 +423,42 @@ TEST(Backpressure, FramesStayIntactUnderBackpressure)
 
     EXPECT_GT(frames, 0) << "should have received some frames";
     EXPECT_EQ(bad, 0) << "no mixed/corrupt frames allowed under backpressure";
+
+    close(fd_slow);
+    close(fd_w);
+    p.stop();
+}
+
+/* 4. 实时帧丢弃分类：队列压力只累加 notify_drop/notify_drop_live，
+ *    快照丢弃计数保持 0（快照帧不受实时淘汰策略影响）。 */
+TEST(Backpressure, LiveDropCounted)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("counted", policy_allow(), kConfig));
+
+    int fd_slow = connect_to(p.sock);
+    ASSERT_GE(fd_slow, 0);
+    int rcvbuf = 1024;
+    setsockopt(fd_slow, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    ASSERT_TRUE(subscribe(fd_slow, 10));
+
+    int fd_w = connect_to(p.sock);
+    ASSERT_GE(fd_w, 0);
+    for (int i = 1; i <= 4000; ++i) {
+        rtdbd_resp_hdr_t resp;
+        ASSERT_TRUE(write_point(fd_w, 10, i, &resp));
+        ASSERT_EQ(resp.status, RTDBD_ST_OK);
+    }
+
+    uint64_t drop = stats_value(&p, "notify_drop");
+    uint64_t drop_live = stats_value(&p, "notify_drop_live");
+    uint64_t drop_snapshot = stats_value(&p, "notify_drop_snapshot");
+    ASSERT_NE(drop, UINT64_MAX);
+    ASSERT_NE(drop_live, UINT64_MAX);
+    ASSERT_NE(drop_snapshot, UINT64_MAX);
+    EXPECT_GT(drop, 0u);
+    EXPECT_GT(drop_live, 0u);
+    EXPECT_EQ(drop_snapshot, 0u);
 
     close(fd_slow);
     close(fd_w);

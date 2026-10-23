@@ -14,6 +14,7 @@
 #include <cerrno>
 #include <cstring>
 #include <string>
+#include <vector>
 
 #include <poll.h>
 #include <signal.h>
@@ -295,7 +296,7 @@ TEST(RtdbdCore, ProtocolVersionMismatchRejected)
     p.stop();
 }
 
-/* 6. --max-subs 超过每连接硬上限（1024）→ 配置错误退出码 2 */
+/* 6. --max-subs 超过每连接硬上限（10000）→ 配置错误退出码 2 */
 TEST(RtdbdCore, RejectsMaxSubsOverLimit)
 {
     const std::string sock = "/tmp/indurtdb_rtdbd_bigsubs.sock";
@@ -308,7 +309,7 @@ TEST(RtdbdCore, RejectsMaxSubsOverLimit)
               "--socket", sock.c_str(),
               "--instance", "rtdbd_test_bigsubs",
               "--max-points", "64",
-              "--max-subs", "1025",
+              "--max-subs", "10001",
               (char*)NULL);
         _exit(127);
     }
@@ -320,7 +321,7 @@ TEST(RtdbdCore, RejectsMaxSubsOverLimit)
     }
     if (!reaped) { kill(pid, SIGKILL); waitpid(pid, &status, 0); }
 
-    ASSERT_TRUE(reaped) << "rtdbd should reject --max-subs 1025 immediately";
+    ASSERT_TRUE(reaped) << "rtdbd should reject --max-subs 10001 immediately";
     ASSERT_TRUE(WIFEXITED(status));
     EXPECT_EQ(WEXITSTATUS(status), 2) << "RTDBD_EXIT_CONFIG";
     unlink(sock.c_str());
@@ -360,12 +361,36 @@ TEST(RtdbdCore, WriteCarriesSourceTimestamp)
     p.stop();
 }
 
+/* 8. 连接表 32 预分配 + 96 按需扩容：128 个并发连接均可 PING */
+TEST(RtdbdCore, Accepts128ConcurrentClients)
+{
+    RtdbdProc p;
+    ASSERT_TRUE(p.start("maxconn", policy_for_uid((unsigned long)getuid())));
+
+    std::vector<int> fds;
+    fds.reserve(128);
+    for (int i = 0; i < 128; ++i) {
+        int fd = connect_to(p.sock);
+        ASSERT_GE(fd, 0) << "connect " << i;
+        fds.push_back(fd);
+    }
+
+    for (int i = 0; i < 128; ++i) {
+        ASSERT_TRUE(send_req(fds[i], RTDBD_OP_PING, NULL, 0)) << "ping " << i;
+        rtdbd_resp_hdr_t resp;
+        ASSERT_TRUE(recv_resp(fds[i], &resp)) << "response " << i;
+        EXPECT_EQ(resp.status, RTDBD_ST_OK) << "ping " << i;
+    }
+
+    for (int fd : fds) close(fd);
+}
+
 /* ---- v3.10 T2: 订阅成员 + RBE 合并哈希表（纯逻辑） ---- */
 
 TEST(Subtab, InsertHasRemove)
 {
     rtdbd_subtab_t t;
-    rtdbd_subtab_init(&t);
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
 
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 10));
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 11));
@@ -387,20 +412,74 @@ TEST(Subtab, InsertHasRemove)
 TEST(Subtab, Collision)
 {
     rtdbd_subtab_t t;
-    rtdbd_subtab_init(&t);
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
 
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 1));
-    EXPECT_TRUE(rtdbd_subtab_insert(&t, 1u + RTDBD_SUBTAB_CAP));
+    EXPECT_TRUE(rtdbd_subtab_insert(&t, 1u + RTDBD_SUBTAB_MIN_CAP));
 
     EXPECT_TRUE(rtdbd_subtab_has(&t, 1));
-    EXPECT_TRUE(rtdbd_subtab_has(&t, 1u + RTDBD_SUBTAB_CAP));
+    EXPECT_TRUE(rtdbd_subtab_has(&t, 1u + RTDBD_SUBTAB_MIN_CAP));
     EXPECT_EQ(t.count, 2u);
+}
+
+TEST(Subtab, GrowsToTenThousand)
+{
+    rtdbd_subtab_t t;
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
+    const uint32_t n = 10000;
+
+    for (uint32_t i = 0; i < n; ++i) {
+        ASSERT_TRUE(rtdbd_subtab_insert(&t, i)) << "insert " << i;
+    }
+
+    EXPECT_EQ(t.count, n);
+    EXPECT_GE(t.cap, 16384u);
+    EXPECT_LE(t.cap, RTDBD_SUBTAB_MAX_CAP);
+    for (uint32_t i = 0; i < n; i += 997) {
+        EXPECT_TRUE(rtdbd_subtab_has(&t, i)) << "missing " << i;
+    }
+    rtdbd_subtab_free(&t);
+}
+
+TEST(Subtab, GrowthPreservesRbeState)
+{
+    rtdbd_subtab_t t;
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
+
+    indurtdb_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    meta.deadband = 1.0f;
+    meta.flags    = INDURTDB_META_FLAG_DEADBAND;
+
+    EXPECT_TRUE(rtdbd_subtab_decide(&t, 7, 10.0, &meta));
+    for (uint32_t i = 1000; i < 3000; ++i) {
+        ASSERT_TRUE(rtdbd_subtab_insert(&t, i));
+    }
+    EXPECT_FALSE(rtdbd_subtab_decide(&t, 7, 10.5, &meta));
+    EXPECT_TRUE(rtdbd_subtab_decide(&t, 7, 12.0, &meta));
+    rtdbd_subtab_free(&t);
+}
+
+TEST(Subtab, ClearKeepsCapacity)
+{
+    rtdbd_subtab_t t;
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
+    for (uint32_t i = 0; i < 3000; ++i) {
+        ASSERT_TRUE(rtdbd_subtab_insert(&t, i));
+    }
+    uint32_t grown = t.cap;
+    rtdbd_subtab_clear(&t);
+
+    EXPECT_EQ(t.count, 0u);
+    EXPECT_EQ(t.cap, grown);
+    EXPECT_FALSE(rtdbd_subtab_has(&t, 1));
+    rtdbd_subtab_free(&t);
 }
 
 TEST(Subtab, PointIdZero)
 {
     rtdbd_subtab_t t;
-    rtdbd_subtab_init(&t);
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
 
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 0));
     EXPECT_TRUE(rtdbd_subtab_has(&t, 0));
@@ -410,7 +489,7 @@ TEST(Subtab, PointIdZero)
 TEST(Subtab, Clear)
 {
     rtdbd_subtab_t t;
-    rtdbd_subtab_init(&t);
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
 
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 7));
     EXPECT_TRUE(rtdbd_subtab_insert(&t, 8));
@@ -424,7 +503,7 @@ TEST(Subtab, Clear)
 TEST(Subtab, FirstValueAndDeadband)
 {
     rtdbd_subtab_t t;
-    rtdbd_subtab_init(&t);
+    ASSERT_TRUE(rtdbd_subtab_init(&t, RTDBD_SUBTAB_MIN_CAP));
 
     indurtdb_meta_t meta;
     memset(&meta, 0, sizeof(meta));
