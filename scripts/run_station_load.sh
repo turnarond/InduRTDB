@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# v3.10 单站规模化负载：构建 Release + 生成 20k 点配置 + 启动 rtdbd + 跑 50×500 订阅
+# v3.11 单站规模化负载：构建 Release + 生成 20k 点配置 + 启动 rtdbd + 跑 50×500 订阅
 #
 # 用法:
 #   bash scripts/run_station_load.sh
@@ -86,7 +86,7 @@ rm -f "/dev/shm/indurtdb_station_load"
 echo "== start rtdbd =="
 "$RTDBD" --instance station_load --socket "$SOCK" \
     --config "$CFG" --policy "$POL" \
-    --max-points "$POINTS" --max-subs 1024 --timeout-ms 0 \
+    --max-points "$POINTS" --max-subs 10000 --timeout-ms 0 \
     >"$LOG" 2>&1 &
 PID=$!
 

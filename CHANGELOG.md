@@ -4,6 +4,58 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.11.0] — 2026-10-22「单连接 1 万订阅与批量 I/O」
+
+协议主版本升到 **3**，共享内存段版本仍为 **3**，`indurtdb_point_t` 仍为 **128 B**，
+公开 C API 计数保持 **117**。目标：单连接 10,000 订阅、128 连接、批量读写与可观测扩容。
+
+### Added
+- **`BATCH_READ`（19）/ `BATCH_WRITE`（20）**：单请求最多 **1024** 点，逐项返回
+  `point_id + status + payload`；允许重复 id，部分失败不回滚；请求/响应大小有硬上限，
+  `count==0`、超限或长度不匹配直接 `BAD_REQUEST`。批量请求/响应分别计入
+  `n_batch_read_reqs` / `n_batch_write_reqs`。
+- **`CAPS`（21）**：返回 `proto_version/max_clients/initial_clients/max_subs_per_conn/
+  initial_subs_per_conn/max_batch/flags/reserved`；成功后本连接 `caps_negotiated=true`。
+- **`SNAPSHOT_DONE`（22）**：10k `SET_SUBS` 快照流完成后发送，带实际快照帧数与
+  `COMPLETE` 标志；**仅对发送过 `CAPS` 的连接发送**，旧客户端不受影响。
+- **10k 流式快照**：`SET_SUBS` 上限从 1024 提到 **10000**，先 `qsort` + 相邻去重，
+  再每轮最多 64 帧推进；快照帧在 `reserved[1]` 置 `NOTIFY_F_SNAPSHOT`。出站队列
+  仍为 1024 帧，其中 **767 快照 + 256 实时 + 1 控制**；快照/控制帧不丢，实时帧按
+  `notify_drop_live` 规则淘汰。
+- **动态订阅表**：`rtdbd_subtab_t` 由固定 1024 槽改为按需扩容（初始 2048，最大
+  32768，50% 负载增长）；扩容失败保留旧表并返回 `NO_MEM`。
+- **连接池 128 / 预创建 32**：新增 `--max-clients`、`--initial-clients`、
+  `--initial-subs`、`--max-batch`，并支持 `rtdbd:` YAML 段；CLI 覆盖 YAML，
+  容量非法启动即退出码 **2**。`--max-points` / `--instance` 仍只能 CLI。
+- **扩容统计**：`conn_alloc_fail`、`subs_alloc_fail`、`notify_drop_live`、
+  `notify_drop_snapshot` 进入 `rtdbd_stats_t` 与 SIGUSR1 dump；`OP_HEALTH` 线格式
+  仍为 72 B，未改公开 ABI。
+- **Python 客户端/监控台**：`probe_caps()` 协商上限，`NotifyListener` 识别快照标记
+  与 `SNAPSHOT_DONE`，新增 `batch_read()` / `batch_write()`；旧服务端探测失败后
+  重连并回退 1024、禁用批量。监控台订阅切片改用协商值。
+- **规模矩阵**：新增 `scripts/run_scale_matrix.py`（2k/20k/200k/500k/1M × 1/5/10 Hz，
+  JSON/CSV + 原始日志）；`run_station_load.sh` 改为 `--max-subs 10000`。
+
+### Changed
+- `--max-subs` 默认值与范围改为 **1..10000**（默认 10000）；段内订阅槽位仍固定
+  `RTDBD_MAX_CLIENTS=128`，不随该参数变化。
+- 出站队列槽从 32 B `rtdbd_notify_t` 改为 40 B 通用帧，以同时排队 NOTIFY 与控制帧；
+  主循环按 `POLLOUT`/`POLLIN` 门控，支持 `MSG_DONTWAIT` 部分发送与 `outq_sent` 续发。
+- `write_one` 抽出单点写路径；单点 `OP_WRITE` 仍保持“响应先、通知后”，批量写为
+  “通知先入队、响应直接写出”。
+
+### Upgrade Notes
+- **段兼容**：v3.10 / v3.11 段版本均为 3、`max_subscribers` 均为 128，可原地升级；
+  v3.9.x 及更早的 32 槽旧段仍需按 v3.10 升级步骤删除后重建。
+- **旧客户端 + 新 rtdbd**：≤1024 订阅、单点 GET/WRITE、NOTIFY 均可用；未发
+  `CAPS` 不会收到 `SNAPSHOT_DONE`，可忽略 `reserved[1]` 快照位。
+- **新客户端 + 旧 rtdbd**：`CAPS` 被拒绝/断连后重连，回退 `max_subs=1024`、禁用
+  批量与新帧；不要依赖 `NOT_IMPLEMENTED`。
+- 回退方式：显式 `--max-subs 1024 --max-clients 128 --max-batch 1024`，旧监控台/客户端
+  无需改动。
+
+---
+
 ## [3.10.0] — 2026-10-21「单站规模化：批量订阅、质量推送与分页监控」
 
 单站目标：**20,000 点位 × 1 Hz × 50 客户端 × 每客户端 500 订阅**。协议主版本仍为 2，

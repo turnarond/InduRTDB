@@ -98,16 +98,35 @@ systemd 部署需配套 `RestartPreventExitStatus=2 4`。
 
 ### 可观测性
 
-- `RTDBD_OP_HEALTH`（opcode 16）：运行时健康快照，**只读免鉴权**；协议主版本仍为 2。
+- `RTDBD_OP_HEALTH`（opcode 16）：运行时健康快照，**只读免鉴权**；v3.11 协议主版本为 **3**。
 - `kill -USR1 <pid>`：把运行统计写入 `--stats-file`（默认 `/tmp/rtdbd.stats`）。
 - 运行日志：`RTDBD_OP_GET_LOG`（128 条定长环形缓冲）。
 
 ### 背压
 
-每连接定长 **1024** 槽出站队列（零堆）：慢消费者队列满则**丢最旧（保序）**并计入 `notify_drop`，
-**不拖垮服务端**；值仍落库，GET 轮询可读到。`SET_SUBS` 整组替换会软清旧队列（不计 `notify_drop`）。
+每连接定长 **1024** 个 40B 通用出站帧（零堆）。v3.11 为 10k 快照预留
+**767 快照槽 + 256 实时槽 + 1 控制槽**：快照/`SNAPSHOT_DONE` 永不丢弃；实时帧满时优先
+淘汰未发送的队首实时帧，否则丢弃本次实时帧，均计入 `notify_drop` / `notify_drop_live`。
+值仍落库，GET/BATCH_READ 可读到。`SET_SUBS` 整组替换会软清旧队列（不计 `notify_drop`）。
 
 ## 版本
+
+**v3.11.0（开发中）** — 单连接 1 万订阅与批量 I/O：
+
+- **协议 v3**：新增 `BATCH_READ=19`、`BATCH_WRITE=20`、`CAPS=21`、`SNAPSHOT_DONE=22`；
+  `NO_MEM=5` 表示有界分配失败。旧主版本客户端仍可用 ≤1024 订阅与单点 GET/WRITE。
+- **容量**：单连接订阅上限 **10000**、连接池 **128**（默认预创建 32）、批量 **1024**；
+  `rtdbd:` YAML 或 CLI 配置，CLI 优先。`max_points` / `instance` 仍只能 CLI。
+- **10k 流式快照**：`SET_SUBS` 先排序去重，再按 767 帧/轮分批推送；每帧 `reserved[1]`
+  置 `NOTIFY_F_SNAPSHOT`；已发送 `CAPS` 的客户端在最后收到 `SNAPSHOT_DONE`。
+- **批量 I/O**：单请求最多 1024 点，逐项返回状态；允许重复 id，部分失败不回滚；
+  请求/响应大小有硬上限，不合法包直接 `BAD_REQUEST`。
+- **监控台/Python 客户端**：`probe_caps()` 协商 `max_subs`/`max_batch`；监听器识别快照
+  标记与 `SNAPSHOT_DONE`；`batch_read()` / `batch_write()` 可用。旧服务端自动回退 1024。
+- **规模矩阵**：`scripts/run_scale_matrix.py` 覆盖 2k/20k/200k/500k/1M × 1/5/10 Hz，
+  输出 JSON/CSV 与原始日志；`run_station_load.sh` 默认按 10000 订阅启动。
+- **升级注意**：v3.11 仍使用段版本 3，`indurtdb_point_t` 仍为 128B；旧 v3.9.x
+  （订阅槽位 32）段仍不能直接 attach。旧客户端不发送 `CAPS`，不会收到 `SNAPSHOT_DONE`。
 
 **v3.10.0** — 单站规模化：批量订阅、质量推送与分页监控：
 

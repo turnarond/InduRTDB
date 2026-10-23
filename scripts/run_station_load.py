@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""v3.10 单站规模化负载：20k 点 × 1 Hz 写 × 50 客户端 × 500 订阅。
+"""v3.11 单站规模化负载：20k 点 × 1 Hz 写 × 50 客户端 × 500 订阅。
 
-被测目标：`rtdbd --max-points 20000 --max-subs 1024`，50 个读连接各自
+被测目标：`rtdbd --max-points 20000 --max-subs 10000`，50 个读连接各自
 `SET_SUBS` 500 点，8 个写进程按每点约 1 次/秒轮转写入；持续读 NOTIFY 并统计
 每客户端帧数、写 ACK P99、health.notify_drop 与 rtdbd 进程 RSS/CPU。
 
@@ -198,7 +198,7 @@ def _collect_results(result_q: mp.Queue, expected: int) -> list[dict]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="InduRTDB v3.10 单站规模化负载")
+    ap = argparse.ArgumentParser(description="InduRTDB v3.11 单站规模化负载")
     ap.add_argument("--socket", required=True, help="rtdbd UDS socket")
     ap.add_argument("--points", type=int, default=20000, help="配置点位数（默认 20000）")
     ap.add_argument("--clients", type=int, default=50, help="读客户端数（默认 50）")
