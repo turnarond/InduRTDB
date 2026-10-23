@@ -44,7 +44,21 @@ OP_DELETE_POINT = 13
 OP_RENAME_POINT = 14
 OP_GET_LOG = 15
 OP_SET_SUBS = 18
-RTDBD_SET_SUBS_MAX = 1024
+OP_BATCH_READ = 19
+OP_BATCH_WRITE = 20
+OP_CAPS = 21
+OP_SNAPSHOT_DONE = 22
+
+# v3.11 协议上限；协商成功前按旧服务端 1024 保守回退。
+RTDBD_SET_SUBS_MAX = 10000
+RTDBD_LEGACY_SET_SUBS_MAX = 1024
+RTDBD_BATCH_MAX = 1024
+
+CAPS_F_BATCH_READ = 0x01
+CAPS_F_BATCH_WRITE = 0x02
+CAPS_F_SNAPSHOT_DONE = 0x04
+SNAPSHOT_DONE_F_COMPLETE = 0x01
+NOTIFY_F_SNAPSHOT = 0x01
 
 # 状态码
 ST_OK = 0
@@ -52,6 +66,7 @@ ST_BAD_REQUEST = 1
 ST_DENIED = 2
 ST_INTERNAL = 3
 ST_NOT_FOUND = 4
+ST_NO_MEM = 5
 ST_NOT_IMPLEMENTED = 9
 
 # 点位类型（与 indurtdb.h 一致）
@@ -81,6 +96,12 @@ DELETE_REQ = struct.Struct("<II")         # point_id, partition（v3，8B）
 RENAME_REQ = struct.Struct("<I64sI")      # point_id, name[64], partition（v3，72B）
 LOG_REQ = struct.Struct("<I")             # max
 LOG_ENTRY = struct.Struct("<QB3x116s")    # ts_ns, level, reserved[3], msg[116]
+
+# v3.11：CAPS 32B；批量读写逐项状态；SNAPSHOT_DONE 8B。
+CAPS = struct.Struct("<IIIIIIII")          # proto, max_clients, initial_clients, max_subs, initial_subs, max_batch, flags, reserved
+BATCH_READ_ITEM = struct.Struct("<IHH")    # point_id, status, reserved（后接 GET_RESP 64B）
+BATCH_WRITE_ITEM = struct.Struct("<IHH")   # point_id, status, reserved
+SNAPSHOT_DONE = struct.Struct("<II")       # count, flags
 
 # 日志级别（与 protocol.h 的 RTDBD_LOG_* 一致）
 LOG_INFO = 0
@@ -143,6 +164,9 @@ class RtdbClient:
         self.timeout = timeout
         self._sock: Optional[socket.socket] = None
         self._lock = threading.Lock()
+        self.caps_info: Optional[dict] = None
+        self.max_subs = RTDBD_LEGACY_SET_SUBS_MAX
+        self.max_batch = RTDBD_BATCH_MAX
 
     # ---- 连接 ----
     def connect(self) -> "RtdbClient":
@@ -254,9 +278,87 @@ class RtdbClient:
         vbits = _encode_value(value, ptype)
         self._ok(OP_WRITE, WRITE_REQ.pack(point_id, ptype, vbits, source_ts_ns))
 
+    def caps(self) -> dict:
+        """OP_CAPS：取服务端容量并缓存升级本连接的上限。"""
+        body = self._ok(OP_CAPS)
+        if len(body) != CAPS.size:
+            raise RtdbError(f"bad CAPS payload size {len(body)}")
+        (proto, max_clients, initial_clients, max_subs,
+         initial_subs, max_batch, flags, reserved) = CAPS.unpack(body)
+        self.caps_info = {
+            "proto_version": proto,
+            "max_clients": max_clients,
+            "initial_clients": initial_clients,
+            "max_subs_per_conn": max_subs,
+            "initial_subs_per_conn": initial_subs,
+            "max_batch": max_batch,
+            "flags": flags,
+            "reserved": reserved,
+        }
+        self.max_subs = max_subs or RTDBD_LEGACY_SET_SUBS_MAX
+        self.max_batch = max_batch or RTDBD_BATCH_MAX
+        return self.caps_info
+
+    def batch_read(self, point_ids: list[int]) -> list[dict]:
+        """BATCH_READ：逐项返回 id/status/value；单项失败不抛异常。"""
+        ids = [int(pid) for pid in point_ids]
+        if not ids or len(ids) > self.max_batch:
+            raise RtdbError(f"batch size must be in [1,{self.max_batch}]")
+        payload = struct.pack("<I", len(ids)) + struct.pack(f"<{len(ids)}I", *ids)
+        body = self._ok(OP_BATCH_READ, payload)
+        item_size = BATCH_READ_ITEM.size + GET_RESP.size
+        if len(body) != 4 + len(ids) * item_size:
+            raise RtdbError("bad BATCH_READ response size")
+        count = struct.unpack_from("<I", body, 0)[0]
+        if count != len(ids):
+            raise RtdbError("BATCH_READ count mismatch")
+        out: list[dict] = []
+        off = 4
+        for _ in range(count):
+            pid, status, _res = BATCH_READ_ITEM.unpack_from(body, off)
+            off += BATCH_READ_ITEM.size
+            rpid, ptype, quality, vbits, vstr, ts, sts = GET_RESP.unpack_from(body, off)
+            off += GET_RESP.size
+            item = {"id": pid, "status": status}
+            if status == ST_OK and rpid == pid:
+                item.update({
+                    "type": ptype,
+                    "typeName": TYPE_NAME.get(ptype, str(ptype)),
+                    "quality": quality,
+                    "value": _decode_value(vbits, vstr, ptype),
+                    "ts": ts,
+                    "sourceTs": sts,
+                })
+            out.append(item)
+        return out
+
+    def batch_write(self, writes: list[tuple]) -> list[dict]:
+        """BATCH_WRITE：每项 (point_id, type, value[, source_ts_ns])，逐项返回状态。"""
+        if not writes or len(writes) > self.max_batch:
+            raise RtdbError(f"batch size must be in [1,{self.max_batch}]")
+        chunks = []
+        for item in writes:
+            pid, ptype, value = int(item[0]), int(item[1]), item[2]
+            source_ts = int(item[3]) if len(item) > 3 else 0
+            chunks.append(WRITE_REQ.pack(pid, ptype, _encode_value(value, ptype), source_ts))
+        payload = struct.pack("<I", len(writes)) + b"".join(chunks)
+        body = self._ok(OP_BATCH_WRITE, payload)
+        if len(body) != 4 + len(writes) * BATCH_WRITE_ITEM.size:
+            raise RtdbError("bad BATCH_WRITE response size")
+        count = struct.unpack_from("<I", body, 0)[0]
+        if count != len(writes):
+            raise RtdbError("BATCH_WRITE count mismatch")
+        out: list[dict] = []
+        off = 4
+        for _ in range(count):
+            pid, status, _res = BATCH_WRITE_ITEM.unpack_from(body, off)
+            off += BATCH_WRITE_ITEM.size
+            out.append({"id": pid, "status": status})
+        return out
+
     def set_subs(self, point_ids: list[int]) -> None:
         """v3.10：连接级批量订阅（整组替换），响应为空负载。"""
-        ids = [int(pid) for pid in point_ids][:RTDBD_SET_SUBS_MAX]
+        ids = [int(pid) for pid in point_ids][:self.max_subs]
         payload = struct.pack("<I", len(ids))
         if ids:
             payload += struct.pack(f"<{len(ids)}I", *ids)
@@ -324,10 +426,17 @@ class NotifyListener:
     收到 NOTIFY 帧后回调 on_notify(point_id, info_dict)。
     """
 
-    def __init__(self, sock_path: str, on_notify: Callable[[int, dict], None], timeout: float = 2.0):
+    def __init__(self, sock_path: str, on_notify: Callable[[int, dict], None],
+                 timeout: float = 2.0,
+                 on_snapshot_done: Optional[Callable[[dict], None]] = None):
         self.sock_path = sock_path
         self.on_notify = on_notify
+        self.on_snapshot_done = on_snapshot_done
         self.timeout = timeout
+        self.caps_info: Optional[dict] = None
+        self.max_subs = RTDBD_LEGACY_SET_SUBS_MAX
+        self.max_batch = RTDBD_BATCH_MAX
+        self._caps_negotiated = False
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
@@ -336,13 +445,50 @@ class NotifyListener:
         # header/body 必须作为一整帧原子发送，否则会交错破坏协议帧。
         self._send_lock = threading.Lock()
 
-    def start(self) -> None:
+    def start(self, negotiate: bool = True) -> None:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(self.timeout)
         s.connect(self.sock_path)
+        if negotiate:
+            try:
+                self._negotiate(s)
+            except (RtdbError, OSError):
+                # 旧服务端：CAPS 可能返回错误并断链；重连后按 legacy 模式工作。
+                s.close()
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.settimeout(self.timeout)
+                s.connect(self.sock_path)
+        # 监听线程可能被调度延迟；放大内核接收缓冲吸收通知突发。
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
         self._sock = s
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
+
+    def _negotiate(self, sock: socket.socket) -> None:
+        """在监听线程启动前同步完成 CAPS 握手，避免与推送帧竞争。"""
+        sock.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_CAPS, 0))
+        hdr = _recv_exact_sock(sock, RESP_HDR.size)
+        magic, version, status, plen = RESP_HDR.unpack(hdr)
+        if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION or status != ST_OK:
+            raise RtdbError("CAPS rejected")
+        if plen != CAPS.size:
+            raise RtdbError("CAPS payload mismatch")
+        body = _recv_exact_sock(sock, plen)
+        (proto, max_clients, initial_clients, max_subs,
+         initial_subs, max_batch, flags, reserved) = CAPS.unpack(body)
+        self.caps_info = {
+            "proto_version": proto,
+            "max_clients": max_clients,
+            "initial_clients": initial_clients,
+            "max_subs_per_conn": max_subs,
+            "initial_subs_per_conn": initial_subs,
+            "max_batch": max_batch,
+            "flags": flags,
+            "reserved": reserved,
+        }
+        self.max_subs = max_subs or RTDBD_LEGACY_SET_SUBS_MAX
+        self.max_batch = max_batch or RTDBD_BATCH_MAX
+        self._caps_negotiated = True
 
     def subscribe(self, point_ids: list[int]) -> None:
         sock = self._sock
@@ -366,7 +512,7 @@ class NotifyListener:
         sock = self._sock
         if not sock:
             raise RtdbError("listener not started")
-        ids = [int(pid) for pid in point_ids][:RTDBD_SET_SUBS_MAX]
+        ids = [int(pid) for pid in point_ids][:self.max_subs]
         payload = struct.pack("<I", len(ids))
         if ids:
             payload += struct.pack(f"<{len(ids)}I", *ids)
@@ -406,53 +552,52 @@ class NotifyListener:
 
     def _loop(self) -> None:
         assert self._sock is not None
+        sock = self._sock
+        buf = bytearray()
         while not self._stop.is_set():
+            # 一次 recv 可能带回多帧；按帧长度切分，避免每帧两次 recv syscall。
+            try:
+                chunk = sock.recv(65536)
+            except (socket.timeout, TimeoutError):
+                # 空闲超时不是断链；帧内超时无法回退已读字节，只能断开。
+                if buf:
+                    break
+                continue
+            except OSError:
+                break
+            if not chunk:
+                break
+            buf += chunk
+
             # 订阅确认回的是 RESP_HDR，NOTIFY 推送回的是 REQ_HDR（opcode=OP_NOTIFY）；
             # 两者二进制布局相同（magic, version, kind, payload_len），故统一按 REQ_HDR 解。
-            try:
-                hdr = self._recv_exact(REQ_HDR.size)
-            except (socket.timeout, TimeoutError):
-                # v3.9.1：空闲超时不是连接断开。此前的实现把它当 OSError 吞掉，
-                # 导致监听线程在 2s 无数据后永久退出，实时推送整条链路静默失效。
-                continue
-            except (OSError, RtdbError):
-                break
-            magic, version, kind, plen = REQ_HDR.unpack(hdr)
-            if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION:
-                break
-            try:
-                body = self._recv_exact(plen) if plen else b""
-            except (OSError, RtdbError):
-                break
-            if kind == OP_NOTIFY and plen == NOTIFY.size:
-                pid, ptype, quality, vbits, ts, sts = NOTIFY.unpack(body)
-                self.on_notify(pid, {
-                    "id": pid, "type": ptype,
-                    "typeName": TYPE_NAME.get(ptype, str(ptype)),
-                    "quality": quality,
-                    "value": _decode_value(vbits, b"", ptype),
-                    "ts": ts, "sourceTs": sts,
-                })
-            # 其余（订阅确认等响应）忽略
-
-    def _recv_exact(self, n: int) -> bytes:
-        sock = self._sock
-        if sock is None:
-            raise RtdbError("listener stopped")
-        buf = bytearray()
-        while len(buf) < n:
-            try:
-                chunk = sock.recv(n - len(buf))
-            except socket.timeout:
-                # 只有「一个字节都没读到」才是帧边界空闲，可安全重试；
-                # 帧内超时已读走的字节无法放回内核缓冲，继续读会永久错帧。
-                if not buf:
-                    raise
-                raise RtdbError("timeout mid-frame")
-            if not chunk:
-                raise RtdbError("connection closed")
-            buf += chunk
-        return bytes(buf)
+            while len(buf) >= REQ_HDR.size:
+                magic, version, kind, plen = REQ_HDR.unpack_from(buf, 0)
+                if magic != RTDBD_MAGIC or version != RTDBD_PROTO_VERSION:
+                    return
+                if plen > 1_048_576:
+                    return
+                total = REQ_HDR.size + plen
+                if len(buf) < total:
+                    break
+                body = bytes(buf[REQ_HDR.size:total])
+                del buf[:total]
+                if kind == OP_NOTIFY and plen == NOTIFY.size:
+                    pid, ptype, quality, vbits, ts, sts = NOTIFY.unpack(body)
+                    self.on_notify(pid, {
+                        "id": pid, "type": ptype,
+                        "typeName": TYPE_NAME.get(ptype, str(ptype)),
+                        "quality": quality,
+                        "value": _decode_value(vbits, b"", ptype),
+                        "ts": ts, "sourceTs": sts,
+                        # reserved[1] 的快照标记（v3.11）
+                        "snapshot": bool(body[7] & NOTIFY_F_SNAPSHOT),
+                    })
+                elif kind == OP_SNAPSHOT_DONE and plen == SNAPSHOT_DONE.size:
+                    count, flags = SNAPSHOT_DONE.unpack(body)
+                    if self.on_snapshot_done:
+                        self.on_snapshot_done({"count": count, "flags": flags})
+                # 其余（订阅确认等响应）忽略
 
     def stop(self) -> None:
         self._stop.set()
@@ -461,6 +606,24 @@ class NotifyListener:
                 self._sock.close()
             finally:
                 self._sock = None
+
+
+def _recv_exact_sock(sock: socket.socket, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise RtdbError("connection closed")
+        buf += chunk
+    return bytes(buf)
+
+
+def probe_caps(client) -> Optional[dict]:
+    """探测 v3.11 CAPS；旧服务端返回 None。"""
+    try:
+        return client.caps()
+    except (RtdbError, OSError, AttributeError):
+        return None
 
 
 def probe_set_subs(client) -> bool:

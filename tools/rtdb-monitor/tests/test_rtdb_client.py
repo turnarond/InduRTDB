@@ -15,8 +15,14 @@ from rtdb_client import (  # noqa: E402
     CREATE_REQ, DELETE_REQ, RENAME_REQ,
     LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
     OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
-    OP_SET_SUBS, RTDBD_MAGIC, RTDBD_PROTO_VERSION, PARTITION_ALL,
-    RTDBD_SET_SUBS_MAX, RtdbClient, NotifyListener, probe_set_subs,
+    OP_SET_SUBS, OP_BATCH_READ, OP_BATCH_WRITE, OP_CAPS, OP_SNAPSHOT_DONE,
+    RTDBD_MAGIC, RTDBD_PROTO_VERSION, PARTITION_ALL,
+    RTDBD_SET_SUBS_MAX, RTDBD_LEGACY_SET_SUBS_MAX, RTDBD_BATCH_MAX,
+    RtdbClient, NotifyListener,
+    probe_set_subs, probe_caps,
+    CAPS, BATCH_READ_ITEM, BATCH_WRITE_ITEM, SNAPSHOT_DONE,
+    CAPS_F_BATCH_READ, CAPS_F_BATCH_WRITE, CAPS_F_SNAPSHOT_DONE,
+    SNAPSHOT_DONE_F_COMPLETE, NOTIFY_F_SNAPSHOT, ST_NO_MEM,
     RtdbError, NAME_TYPE,
     _decode_value, _encode_value, TYPE_INT32, TYPE_INT64, TYPE_UINT32,
     TYPE_FLOAT, TYPE_DOUBLE, TYPE_BOOL,
@@ -46,6 +52,24 @@ def test_struct_sizes_match_c_layout():
     # v3.6 运行日志
     assert LOG_REQ.size == 4
     assert LOG_ENTRY.size == 128
+    # v3.11 批量/能力协商/快照屏障
+    assert CAPS.size == 32
+    assert BATCH_READ_ITEM.size + GET_RESP.size == 72
+    assert BATCH_WRITE_ITEM.size == 8
+    assert SNAPSHOT_DONE.size == 8
+
+
+def test_v311_opcodes_and_flags():
+    assert (OP_BATCH_READ, OP_BATCH_WRITE, OP_CAPS, OP_SNAPSHOT_DONE) == (19, 20, 21, 22)
+    assert RTDBD_SET_SUBS_MAX == 10000
+    assert RTDBD_LEGACY_SET_SUBS_MAX == 1024
+    assert RTDBD_BATCH_MAX == 1024
+    assert ST_NO_MEM == 5
+    assert CAPS_F_BATCH_READ == 0x01
+    assert CAPS_F_BATCH_WRITE == 0x02
+    assert CAPS_F_SNAPSHOT_DONE == 0x04
+    assert SNAPSHOT_DONE_F_COMPLETE == 0x01
+    assert NOTIFY_F_SNAPSHOT == 0x01
 
 
 def test_crud_opcodes():
@@ -197,8 +221,8 @@ def _recv_exact(sock, n):
     return bytes(buf)
 
 
-def _mock_server(status=0):
-    """返回 (path, captured, thread)。服务端处理一次请求后回 RESP_HDR。"""
+def _mock_server(status=0, body=b""):
+    """返回 (path, captured, thread)。服务端处理一次请求后回 RESP_HDR + body。"""
     td = tempfile.mkdtemp(prefix="rtdb_client_")
     path = os.path.join(td, "s.sock")
     captured = {}
@@ -213,7 +237,7 @@ def _mock_server(status=0):
             magic, version, opcode, plen = REQ_HDR.unpack(hdr)
             payload = _recv_exact(conn, plen) if plen else b""
             captured.update(magic=magic, version=version, opcode=opcode, payload=payload)
-            conn.sendall(RESP_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, status, 0))
+            conn.sendall(RESP_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, status, len(body)) + body)
         finally:
             conn.close()
             srv.close()
@@ -235,9 +259,19 @@ def test_set_subs_roundtrip():
     assert count == 3 and ids == (3, 1, 2)
 
 
-def test_set_subs_caps_at_server_limit():
+def test_set_subs_legacy_cap():
     path, captured, t = _mock_server()
     with RtdbClient(path) as c:
+        c.set_subs(list(range(RTDBD_LEGACY_SET_SUBS_MAX + 1)))
+    t.join(2)
+    count = struct.unpack("<I", captured["payload"][:4])[0]
+    assert count == RTDBD_LEGACY_SET_SUBS_MAX
+
+
+def test_set_subs_negotiated_cap():
+    path, captured, t = _mock_server()
+    with RtdbClient(path) as c:
+        c.max_subs = RTDBD_SET_SUBS_MAX
         c.set_subs(list(range(RTDBD_SET_SUBS_MAX + 1)))
     t.join(2)
     count = struct.unpack("<I", captured["payload"][:4])[0]
@@ -277,6 +311,107 @@ def test_probe_falls_back_on_error():
     t.join(2)
 
 
+def test_caps_roundtrip_and_limits():
+    body = CAPS.pack(
+        RTDBD_PROTO_VERSION, 128, 32, 10000, 1024, 1024,
+        CAPS_F_BATCH_READ | CAPS_F_BATCH_WRITE | CAPS_F_SNAPSHOT_DONE, 0,
+    )
+    path, captured, t = _mock_server(body=body)
+    with RtdbClient(path) as c:
+        caps = c.caps()
+        assert caps["max_clients"] == 128
+        assert caps["max_subs_per_conn"] == 10000
+        assert caps["max_batch"] == 1024
+        assert c.max_subs == 10000
+        assert c.max_batch == 1024
+        # 协商后 SET_SUBS 不再按旧 1024 截断
+        c.max_subs = 10000
+        c._ok = lambda opcode, payload=b"": b""
+        c.set_subs(list(range(1500)))
+    t.join(2)
+    assert captured["opcode"] == OP_CAPS
+    assert captured["payload"] == b""
+
+
+def test_probe_caps_returns_none_on_old_server():
+    path, _captured, t = _mock_server(status=1)
+    with RtdbClient(path) as c:
+        assert probe_caps(c) is None
+    t.join(2)
+
+
+def test_batch_read_roundtrip():
+    item = BATCH_READ_ITEM.pack(10, 0, 0) + GET_RESP.pack(
+        10, TYPE_INT32, 2, 42, b"", 111, 222,
+    )
+    fail = BATCH_READ_ITEM.pack(11, 4, 0) + GET_RESP.pack(
+        0, TYPE_INT32, 0, 0, b"", 0, 0,
+    )
+    body = struct.pack("<I", 2) + item + fail
+    path, captured, t = _mock_server(body=body)
+    with RtdbClient(path) as c:
+        rows = c.batch_read([10, 11])
+    t.join(2)
+    assert captured["opcode"] == OP_BATCH_READ
+    assert struct.unpack("<I", captured["payload"][:4])[0] == 2
+    assert struct.unpack("<2I", captured["payload"][4:]) == (10, 11)
+    assert rows[0]["id"] == 10 and rows[0]["status"] == 0
+    assert rows[0]["value"] == 42 and rows[0]["quality"] == 2
+    assert rows[1]["id"] == 11 and rows[1]["status"] == 4
+
+
+def test_batch_write_roundtrip():
+    body = struct.pack("<I", 2) + BATCH_WRITE_ITEM.pack(5, 0, 0) + \
+        BATCH_WRITE_ITEM.pack(6, 4, 0)
+    path, captured, t = _mock_server(body=body)
+    with RtdbClient(path) as c:
+        rows = c.batch_write([(5, TYPE_INT32, 7), (6, TYPE_DOUBLE, 1.5)])
+    t.join(2)
+    assert captured["opcode"] == OP_BATCH_WRITE
+    assert struct.unpack("<I", captured["payload"][:4])[0] == 2
+    assert rows == [{"id": 5, "status": 0}, {"id": 6, "status": 4}]
+
+
+def test_batch_size_guard():
+    class Dummy:
+        max_batch = 2
+        def _ok(self, opcode, payload=b""):
+            raise AssertionError("must reject before sending")
+
+    for call in (lambda: RtdbClient.batch_read(Dummy(), []),
+                 lambda: RtdbClient.batch_read(Dummy(), [1, 2, 3]),
+                 lambda: RtdbClient.batch_write(Dummy(), []),
+                 lambda: RtdbClient.batch_write(Dummy(), [(1, TYPE_INT32, 1)] * 3)):
+        try:
+            call()
+            raise AssertionError("batch guard did not fire")
+        except RtdbError:
+            pass
+
+
+def test_notify_snapshot_flag_unpack():
+    got = {}
+    ev = threading.Event()
+
+    def on_notify(pid, info):
+        got.update(info)
+        ev.set()
+
+    l = NotifyListener("/tmp/unused-notify.sock", on_notify)
+    server, client = socket.socketpair()
+    l._sock = client
+    t = threading.Thread(target=l._loop, daemon=True)
+    t.start()
+    body = bytearray(NOTIFY.pack(8, TYPE_INT32, 0, 42, 111, 222))
+    body[7] = NOTIFY_F_SNAPSHOT
+    server.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, 6, len(body)) + body)
+    assert ev.wait(2)
+    assert got["id"] == 8 and got["snapshot"] is True
+    l.stop()
+    server.close()
+    t.join(2)
+
+
 def test_notify_quality_unpack():
     got = {}
     ev = threading.Event()
@@ -297,6 +432,30 @@ def test_notify_quality_unpack():
     assert got["pid"] == 7
     assert got["quality"] == 2
     assert got["value"] == 42
+    l.stop()
+    server.close()
+    t.join(2)
+
+
+def test_listener_snapshot_done_callback():
+    got = {}
+    ev = threading.Event()
+
+    def on_done(info):
+        got.update(info)
+        ev.set()
+
+    l = NotifyListener("/tmp/unused-notify.sock", lambda pid, info: None,
+                       on_snapshot_done=on_done)
+    server, client = socket.socketpair()
+    l._sock = client
+    t = threading.Thread(target=l._loop, daemon=True)
+    t.start()
+    body = SNAPSHOT_DONE.pack(3, SNAPSHOT_DONE_F_COMPLETE)
+    server.sendall(REQ_HDR.pack(RTDBD_MAGIC, RTDBD_PROTO_VERSION, OP_SNAPSHOT_DONE,
+                                len(body)) + body)
+    assert ev.wait(2)
+    assert got == {"count": 3, "flags": SNAPSHOT_DONE_F_COMPLETE}
     l.stop()
     server.close()
     t.join(2)

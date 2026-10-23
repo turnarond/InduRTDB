@@ -32,7 +32,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from rtdb_client import (RtdbClient, NotifyListener, probe_set_subs,
-                         RTDBD_SET_SUBS_MAX)
+                         probe_caps, RTDBD_LEGACY_SET_SUBS_MAX)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
@@ -48,6 +48,8 @@ name_by_id: dict[int, str] = {}  # id -> point name，用于 WS update.pointId �
 registry: list[dict] = []
 registry_lock = threading.Lock()
 supports_set_subs = False
+supports_caps = False
+max_subs = RTDBD_LEGACY_SET_SUBS_MAX
 
 
 def _authed(token: str | None, authorization: str | None = None) -> bool:
@@ -86,6 +88,17 @@ def _make_notify_callback(ws: WebSocket):
     return _on_notify
 
 
+def _make_snapshot_callback(ws: WebSocket):
+    """快照屏障回调：通知前端本轮 SET_SUBS 的全量快照已结束。"""
+    def _on_done(info: dict) -> None:
+        if loop is None:
+            return
+        msg = {"op": "snapshot_done", "count": info.get("count", 0),
+               "flags": info.get("flags", 0)}
+        asyncio.run_coroutine_threadsafe(_safe_send(ws, msg), loop)
+    return _on_done
+
+
 async def _safe_send(ws: WebSocket, msg: dict) -> None:
     try:
         await ws.send_json(msg)
@@ -94,11 +107,22 @@ async def _safe_send(ws: WebSocket, msg: dict) -> None:
 
 
 def _connect_and_probe() -> bool:
-    global api_client, supports_set_subs
+    global api_client, supports_set_subs, supports_caps, max_subs
     candidate = RtdbClient(SOCK)
     try:
         candidate.connect()
-        supported = probe_set_subs(candidate)
+        caps = probe_caps(candidate)
+        if caps is not None:
+            supports_caps = True
+            supported = True
+            max_subs = int(caps.get("max_subs_per_conn") or RTDBD_LEGACY_SET_SUBS_MAX)
+        else:
+            # CAPS 探测可能被旧服务端以 BAD_REQUEST + 断链拒绝；重连后再探 SET_SUBS。
+            supports_caps = False
+            candidate.close()
+            candidate = RtdbClient(SOCK).connect()
+            supported = probe_set_subs(candidate)
+            max_subs = RTDBD_LEGACY_SET_SUBS_MAX
         if not supported:
             candidate.close()
             candidate = RtdbClient(SOCK).connect()
@@ -478,10 +502,11 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
         return
 
     ws_clients.add(ws)
-    ws_listener = NotifyListener(SOCK, on_notify=_make_notify_callback(ws))
+    ws_listener = NotifyListener(SOCK, on_notify=_make_notify_callback(ws),
+                                 on_snapshot_done=_make_snapshot_callback(ws))
     ws_listeners[ws] = ws_listener
     try:
-        ws_listener.start()
+        ws_listener.start(negotiate=supports_caps)
         pts = _ensure_registry()
         await ws.send_json({"op": "list", "points": pts})
 
@@ -506,7 +531,7 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
             elif op == "set_subs":
                 ids = _resolve_ws_ids(
                     msg.get("ids") or msg.get("pointIds") or []
-                )[:RTDBD_SET_SUBS_MAX]
+                )[:ws_listener.max_subs]
                 if supports_set_subs:
                     ws_listener.set_subs(ids)
                 else:
@@ -517,7 +542,7 @@ async def ws_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
             elif op == "subscribe":
                 ids = _resolve_ws_ids(
                     msg.get("ids") or msg.get("pointIds") or []
-                )[:RTDBD_SET_SUBS_MAX]
+                )[:ws_listener.max_subs]
                 if supports_set_subs:
                     ws_listener.subscribe(ids)
                 else:
