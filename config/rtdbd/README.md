@@ -5,7 +5,7 @@ rtdbd 的配置样例，可直接复制为部署起点。
 | 文件 | 对应参数 | 格式 |
 |---|---|---|
 | `policy.conf` | `--policy` | 自定义 `uid:partition\|*:min_id:max_id` 逐行格式（**非 YAML**） |
-| `points.yaml` | `--config` | YAML 子集，仅 `points:` 之后被解析 |
+| `points.yaml` | `--config` | YAML 子集；`rtdbd:` / `partitions:` / `partition_alias:` 位于 `points:` 之前，点位段由核心解析器读取 |
 
 ## 用法
 
@@ -17,12 +17,23 @@ rtdbd --instance hvac_ahu01 \
       --socket /run/rtdbd/hvac_ahu01.sock \
       --policy /etc/rtdbd/policy.conf \
       --config /etc/rtdbd/points.yaml \
-      --max-points 10000 \
-      --max-subs 32
+      --max-points 10000
 ```
 
-⚠️ **`--instance` / `--max-points` / `--max-subs` 只能走命令行。**
-写在 `points.yaml` 里的同名键会被**静默忽略**（解析器只读 `points:` 之后的内容）。
+容量项可在 `points.yaml` 的 `rtdbd:` 块配置，命令行同名项优先：
+
+```yaml
+rtdbd:
+  max_clients: 128
+  initial_clients: 32
+  max_subs_per_conn: 10000
+  initial_subs_per_conn: 1024
+  max_batch: 1024
+```
+
+⚠️ **`--instance` / `--max-points` 只能走命令行。**
+`--max-subs` / `--max-clients` / `--initial-clients` / `--initial-subs` /
+`--max-batch` 可由 YAML 或 CLI 设置，CLI 覆盖 YAML。
 
 ⚠️ **`policy.conf` 不给等于关闭所有写。** 详见 [`02-启动与守护.md` §2](../../docs/07-部署运维/02-启动与守护.md)。
 

@@ -3,14 +3,14 @@
  * @brief rtdbd 订阅成员 + RBE 状态合并哈希表（v3.10 任务 2）
  *
  * 开放寻址 + 线性探测；FNV-1a 对 4 个 id 字节求哈希。
- * 删除采用 backward-shift（Knuth Algorithm R）：无墓碑、无探测链断裂，
- * 也不需要 48KB 的临时重建数组或静态 scratch（对重入/多连接更安全）。
+ * 删除采用 backward-shift（Knuth Algorithm R）：无墓碑、无探测链断裂。
+ * v3.11 起槽数组按需增长（2048 → 32768），增长失败时旧表保持不变。
  */
 #include "subtab.h"
 
 #include <stddef.h>
-
-#define RTDBD_SUBTAB_MASK (RTDBD_SUBTAB_CAP - 1u)
+#include <stdlib.h>
+#include <string.h>
 
 static uint32_t subtab_hash(uint32_t point_id)
 {
@@ -23,55 +23,100 @@ static uint32_t subtab_hash(uint32_t point_id)
     return h;
 }
 
-static uint32_t subtab_home(uint32_t point_id)
+static uint32_t subtab_next_pow2(uint32_t v)
 {
-    return subtab_hash(point_id) & RTDBD_SUBTAB_MASK;
+    uint32_t cap = RTDBD_SUBTAB_MIN_CAP;
+    while (cap < v && cap < RTDBD_SUBTAB_MAX_CAP) cap <<= 1u;
+    return cap;
+}
+
+static uint32_t subtab_home(const rtdbd_subtab_t* t, uint32_t point_id)
+{
+    return subtab_hash(point_id) & (t->cap - 1u);
 }
 
 static rtdbd_subtab_slot_t* subtab_lookup(rtdbd_subtab_t* t, uint32_t point_id)
 {
-    uint32_t idx = subtab_home(point_id);
-    for (uint32_t n = 0; n < RTDBD_SUBTAB_CAP; ++n) {
+    if (!t->slots || t->cap == 0) return NULL;
+    uint32_t idx = subtab_home(t, point_id);
+    for (uint32_t n = 0; n < t->cap; ++n) {
         rtdbd_subtab_slot_t* s = &t->slots[idx];
-        if (!s->used) return NULL;           /* 空槽 = 探测链终点 */
+        if (!s->used) return NULL;
         if (s->point_id == point_id) return s;
-        idx = (idx + 1u) & RTDBD_SUBTAB_MASK;
+        idx = (idx + 1u) & (t->cap - 1u);
     }
     return NULL;
 }
 
-void rtdbd_subtab_init(rtdbd_subtab_t* t)
+bool rtdbd_subtab_reserve(rtdbd_subtab_t* t, uint32_t min_cap)
 {
-    rtdbd_subtab_clear(t);
+    if (!t) return false;
+    if (min_cap <= t->cap) return true;
+
+    uint32_t cap = subtab_next_pow2(min_cap);
+    rtdbd_subtab_slot_t* slots = calloc(cap, sizeof(*slots));
+    if (!slots) return false;
+
+    for (uint32_t i = 0; i < t->cap; ++i) {
+        if (!t->slots || !t->slots[i].used) continue;
+        uint32_t idx = subtab_hash(t->slots[i].point_id) & (cap - 1u);
+        while (slots[idx].used) idx = (idx + 1u) & (cap - 1u);
+        slots[idx] = t->slots[i];
+    }
+
+    free(t->slots);
+    t->slots = slots;
+    t->cap = cap;
+    return true;
+}
+
+bool rtdbd_subtab_init(rtdbd_subtab_t* t, uint32_t initial_cap)
+{
+    t->slots = NULL;
+    t->cap = 0;
+    t->count = 0;
+    return rtdbd_subtab_reserve(t, initial_cap);
+}
+
+void rtdbd_subtab_free(rtdbd_subtab_t* t)
+{
+    free(t->slots);
+    t->slots = NULL;
+    t->cap = 0;
+    t->count = 0;
 }
 
 void rtdbd_subtab_clear(rtdbd_subtab_t* t)
 {
-    for (uint32_t i = 0; i < RTDBD_SUBTAB_CAP; ++i) {
-        t->slots[i].used = 0;
-        t->slots[i].valid = 0;
-        t->slots[i].point_id = 0;
-        t->slots[i].last_reported = 0.0;
+    if (t->slots && t->cap > 0) {
+        memset(t->slots, 0, (size_t)t->cap * sizeof(*t->slots));
     }
     t->count = 0;
 }
 
 bool rtdbd_subtab_has(const rtdbd_subtab_t* t, uint32_t point_id)
 {
-    uint32_t idx = subtab_home(point_id);
-    for (uint32_t n = 0; n < RTDBD_SUBTAB_CAP; ++n) {
+    if (!t->slots || t->cap == 0) return false;
+    uint32_t idx = subtab_home(t, point_id);
+    for (uint32_t n = 0; n < t->cap; ++n) {
         const rtdbd_subtab_slot_t* s = &t->slots[idx];
         if (!s->used) return false;
         if (s->point_id == point_id) return true;
-        idx = (idx + 1u) & RTDBD_SUBTAB_MASK;
+        idx = (idx + 1u) & (t->cap - 1u);
     }
     return false;
 }
 
 bool rtdbd_subtab_insert(rtdbd_subtab_t* t, uint32_t point_id)
 {
-    uint32_t idx = subtab_home(point_id);
-    for (uint32_t n = 0; n < RTDBD_SUBTAB_CAP; ++n) {
+    if (!t->slots && !rtdbd_subtab_init(t, RTDBD_SUBTAB_MIN_CAP)) return false;
+
+    if ((t->count + 1u) > t->cap / 2u && t->cap < RTDBD_SUBTAB_MAX_CAP) {
+        if (!rtdbd_subtab_reserve(t, t->cap * 2u)) return false;
+    }
+
+    uint32_t idx = subtab_home(t, point_id);
+    for (uint32_t n = 0; n < t->cap; ++n) {
         rtdbd_subtab_slot_t* s = &t->slots[idx];
         if (!s->used) {
             s->point_id = point_id;
@@ -83,29 +128,30 @@ bool rtdbd_subtab_insert(rtdbd_subtab_t* t, uint32_t point_id)
             return true;
         }
         if (s->point_id == point_id) return true; /* 已存在 */
-        idx = (idx + 1u) & RTDBD_SUBTAB_MASK;
+        idx = (idx + 1u) & (t->cap - 1u);
     }
     return false; /* 表满 */
 }
 
 void rtdbd_subtab_remove(rtdbd_subtab_t* t, uint32_t point_id)
 {
-    uint32_t idx = subtab_home(point_id);
-    uint32_t n;
-    for (n = 0; n < RTDBD_SUBTAB_CAP; ++n) {
-        if (!t->slots[idx].used) return; /* 不存在 */
-        if (t->slots[idx].point_id == point_id) break;
-        idx = (idx + 1u) & RTDBD_SUBTAB_MASK;
-    }
-    if (n == RTDBD_SUBTAB_CAP) return;
+    if (!t->slots || t->cap == 0) return;
 
-    /* 向后移位删除：把洞后面的探测链元素前移，直到遇到空槽。 */
+    uint32_t idx = subtab_home(t, point_id);
+    uint32_t n;
+    for (n = 0; n < t->cap; ++n) {
+        if (!t->slots[idx].used) return;
+        if (t->slots[idx].point_id == point_id) break;
+        idx = (idx + 1u) & (t->cap - 1u);
+    }
+    if (n == t->cap) return;
+
     uint32_t hole = idx;
     uint32_t j = idx;
     for (;;) {
-        j = (j + 1u) & RTDBD_SUBTAB_MASK;
+        j = (j + 1u) & (t->cap - 1u);
         if (!t->slots[j].used) break;
-        uint32_t k = subtab_home(t->slots[j].point_id);
+        uint32_t k = subtab_home(t, t->slots[j].point_id);
         bool in_range;
         if (hole <= j) in_range = (k > hole && k <= j);
         else           in_range = (k > hole || k <= j);

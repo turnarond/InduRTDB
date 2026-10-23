@@ -25,6 +25,8 @@
 
 #include <stdint.h>
 
+#include <rtdbd/protocol.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -32,6 +34,21 @@ extern "C" {
 #define RTDBD_CONF_MAX_PARTITIONS 64u
 #define RTDBD_CONF_MAX_ALIASES    64u
 #define RTDBD_CONF_ALIAS_MAX      64u
+
+/* v3.11 容量默认值/硬上限；max_batch 与 max_subs 复用协议硬上限。 */
+#define RTDBD_CONF_MAX_CLIENTS          128u
+#define RTDBD_CONF_DEFAULT_MAX_CLIENTS  128u
+#define RTDBD_CONF_DEFAULT_INITIAL_CLIENTS 32u
+#define RTDBD_CONF_DEFAULT_MAX_SUBS     RTDBD_SUB_MAX_PER_CONN
+#define RTDBD_CONF_DEFAULT_INITIAL_SUBS 1024u
+#define RTDBD_CONF_DEFAULT_MAX_BATCH    RTDBD_BATCH_MAX
+
+/* caps_present：区分“未配置”与“显式配置为默认值”。 */
+#define RTDBD_CONF_HAS_MAX_CLIENTS          (1u << 0)
+#define RTDBD_CONF_HAS_INITIAL_CLIENTS      (1u << 1)
+#define RTDBD_CONF_HAS_MAX_SUBS_PER_CONN    (1u << 2)
+#define RTDBD_CONF_HAS_INITIAL_SUBS         (1u << 3)
+#define RTDBD_CONF_HAS_MAX_BATCH            (1u << 4)
 
 typedef struct {
     uint32_t key;
@@ -44,6 +61,14 @@ typedef struct {
     rtdbd_partition_alias_t aliases[RTDBD_CONF_MAX_ALIASES];
     uint32_t alias_line[RTDBD_CONF_MAX_ALIASES]; /* 别名所在行号（校验报错用） */
     uint32_t n_aliases;
+
+    /* v3.11 容量（内置默认值，YAML/CLI 可覆盖）。 */
+    uint32_t max_clients;
+    uint32_t initial_clients;
+    uint32_t max_subs_per_conn;
+    uint32_t initial_subs_per_conn;
+    uint32_t max_batch;
+    uint32_t caps_present;
 } rtdbd_conf_t;
 
 void rtdbd_conf_init(rtdbd_conf_t* c);

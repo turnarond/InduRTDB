@@ -36,6 +36,7 @@ RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
                "rtdbd_meta_payload_t must match indurtdb_meta_t size");
 
 #define RTDBD_MAX_CLIENTS 128
+#define RTDBD_INITIAL_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
 
 /* --max-points 的硬上限（B3 参数校验）：点位区按 128B/点计算，
@@ -74,6 +75,12 @@ static rtdbd_log_entry_t g_log_out[RTDBD_LOG_CAPACITY];
 
 /* SET_SUBS 读取 id 数组的静态缓冲（BSS，单线程串行处理，无并发） */
 static uint32_t g_set_subs_ids[RTDBD_SUB_MAX];
+
+/* v3.11 批量 I/O 静态缓冲：单线程串行处理，禁止在处理路径 malloc。
+ * 读响应 4+1024*72=73,732B；写请求 4+1024*24=24,580B；写响应 4+1024*8=8,196B。 */
+static uint8_t g_batch_read_resp[4 + RTDBD_BATCH_MAX * sizeof(rtdbd_batch_read_item_t)];
+static uint8_t g_batch_write_req[4 + RTDBD_BATCH_MAX * sizeof(rtdbd_write_req_t)];
+static uint8_t g_batch_write_resp[4 + RTDBD_BATCH_MAX * sizeof(rtdbd_batch_write_item_t)];
 
 /* v3.10 T5：1 Hz 超时扫描状态。g_quality 记录上一轮质量，只有
  * “非 TIMEOUT → TIMEOUT”才推送，避免每个扫描周期重复通知。 */
@@ -143,44 +150,156 @@ static uint64_t now_ns(void)
 
 /* 每连接出站通知队列容量（v3.7 主题B B2 背压）。
  * 定长环形队列：队列满时丢最旧（保序），绝不无限增长拖垮服务端。 */
-#define RTDBD_OUTQ_CAP 1024u
+#define RTDBD_OUTQ_CAP 2048u
+#define RTDBD_SNAPSHOT_QUEUE_MAX 767u
+#define RTDBD_SNAPSHOT_PUMP_BATCH 64u
+/* 单次 outq_flush 最多拼 64 帧（64×44=2816B）再 send：
+ * 高频通知下把每帧一次 send 的 syscall 降为每 64 帧一次。 */
+#define RTDBD_OUTQ_FLUSH_BATCH 64u
+
+typedef struct {
+    uint16_t opcode;
+    uint16_t payload_len;
+    union {
+        rtdbd_notify_t        notify;
+        rtdbd_snapshot_done_t done;
+    } u;
+} rtdbd_outq_frame_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_outq_frame_t) == 40, "outq frame must be 40B");
 
 typedef struct {
     int      fd;
+    uint32_t peer_pid;
+    uint32_t peer_uid;
+    bool     peer_cred_ok;
     uint32_t partition;   /* v3.9 T5：连接级默认分区（OP_SELECT 设置，初值 0） */
     uint32_t subs[RTDBD_SUB_MAX];
     uint32_t nsubs;
     rtdbd_subtab_t sub;   /* v3.10：订阅成员 + RBE 状态合并表 */
+    bool     caps_negotiated; /* v3.11：对端已发 OP_CAPS，快照完成后发 SNAPSHOT_DONE */
+    bool     snap_active;     /* 快照流进行中 */
+    uint32_t snap_next;       /* 下一个待发快照在 subs[] 中的下标 */
+    uint32_t snap_emitted;    /* 已入队的快照帧数（含被后续淘汰的实时帧之外的成功帧） */
+    uint32_t snap_outq_count; /* 当前队列中的快照帧数，用于 767 槽预算 */
     /* 出站通知环形队列（B2 背压）：写成功只入队，由主循环 POLLOUT 时 flush。
      * 慢消费者 socket 缓冲满 → POLLOUT 不就绪 → 不 flush（不阻塞他人），
      * 队列填满则丢最旧并计 notify_drop。
      * outq_sent：队首帧已发出的字节数（部分发送进度），非阻塞 flush 用。 */
-    rtdbd_notify_t outq[RTDBD_OUTQ_CAP];
-    uint16_t       outq_head;
-    uint16_t       outq_tail;
-    uint16_t       outq_count;
-    uint16_t       outq_sent;
+    rtdbd_outq_frame_t outq[RTDBD_OUTQ_CAP];
+    uint16_t           outq_head;
+    uint16_t           outq_tail;
+    uint16_t           outq_count;
+    uint16_t           outq_sent;
 } rtdbd_conn_t;
 
-/* 一帧通知的线缆长度：请求头 12B + 负载 32B */
+/* 一帧通知/完成屏障的线缆长度：请求头 12B + 负载 32B/8B */
 #define RTDBD_NOTIFY_FRAME_LEN (sizeof(rtdbd_req_hdr_t) + sizeof(rtdbd_notify_t))
+#define RTDBD_DONE_FRAME_LEN   (sizeof(rtdbd_req_hdr_t) + sizeof(rtdbd_snapshot_done_t))
 
-/* 全局连接表：放文件域（.bss）而非 main 栈帧。
- * v3.10：每连接 subs[1024] + subtab(2048×16B) + outq(1024×32B) ≈ 68KB，
- * 128 连接约 8.5MB；留在栈上对嵌入式（SylixOS，小栈配置）不可行。
- * 零堆、零栈压力。 */
-static rtdbd_conn_t g_conns[RTDBD_MAX_CLIENTS];
+/* 全局连接表：启动时按 initial_clients 预创建连接结构，其余槽位首次接入时
+ * 按需分配。空闲槽位保留内存（连接高水位），避免反复 accept 造成分配抖动。 */
+static uint32_t      g_max_clients = RTDBD_MAX_CLIENTS;
+static uint32_t      g_initial_clients = RTDBD_INITIAL_CLIENTS;
+static uint32_t      g_initial_sub_cap = RTDBD_SUBTAB_MIN_CAP;
+static rtdbd_conn_t* g_conn_pool = NULL;
+static rtdbd_conn_t* g_conns[RTDBD_MAX_CLIENTS];
+static int           g_conn_high = 0;   /* 最高活跃槽位 + 1；广播/轮询只扫到这里 */
 
-static void conn_init(rtdbd_conn_t* c)
+static bool conn_init(rtdbd_conn_t* c)
 {
     c->fd = -1;
+    c->peer_pid = 0;
+    c->peer_uid = 0;
+    c->peer_cred_ok = false;
     c->partition = 0;   /* v3.9 T5：连接默认分区复位（断开/复用槽位时清） */
     c->nsubs = 0;
-    rtdbd_subtab_init(&c->sub);
+    c->caps_negotiated = false;
+    c->snap_active = false;
+    c->snap_next = 0;
+    c->snap_emitted = 0;
+    c->snap_outq_count = 0;
+    if (!c->sub.slots) {
+        if (!rtdbd_subtab_init(&c->sub, g_initial_sub_cap)) return false;
+    } else {
+        rtdbd_subtab_clear(&c->sub);
+    }
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_count = 0;
     c->outq_sent  = 0;
+    return true;
+}
+
+static rtdbd_conn_t* conn_slot_acquire(int idx)
+{
+    rtdbd_conn_t* c = g_conns[idx];
+    if (!c) {
+        if (idx < (int)g_initial_clients) {
+            c = &g_conn_pool[idx];
+        } else {
+            c = (rtdbd_conn_t*)calloc(1, sizeof(*c));
+            if (!c) { g_stats.conn_alloc_fail++; return NULL; }
+        }
+        g_conns[idx] = c;
+    }
+    if (!conn_init(c)) {
+        g_stats.conn_alloc_fail++;
+        if (idx >= (int)g_initial_clients) {
+            free(c);
+            g_conns[idx] = NULL;
+        }
+        return NULL;
+    }
+    return c;
+}
+
+static void conn_note_closed(int idx)
+{
+    if (idx + 1 != g_conn_high) return;
+    while (g_conn_high > 0) {
+        rtdbd_conn_t* c = g_conns[g_conn_high - 1];
+        if (c && c->fd >= 0) break;
+        g_conn_high--;
+    }
+}
+
+static void conn_pool_free(void)
+{
+    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
+        rtdbd_conn_t* c = g_conns[i];
+        if (!c) continue;
+        rtdbd_subtab_free(&c->sub);
+        if (i >= (int)g_initial_clients) free(c);
+        g_conns[i] = NULL;
+    }
+    free(g_conn_pool);
+    g_conn_pool = NULL;
+    g_initial_clients = 0;
+    g_initial_sub_cap = RTDBD_SUBTAB_MIN_CAP;
+}
+
+static bool conn_pool_init(uint32_t initial_clients, uint32_t initial_subs)
+{
+    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) g_conns[i] = NULL;
+    g_conn_high = 0;
+
+    g_initial_clients = initial_clients;
+    uint32_t cap = RTDBD_SUBTAB_MIN_CAP;
+    while (cap < initial_subs * 2u && cap < RTDBD_SUBTAB_MAX_CAP) cap <<= 1u;
+    g_initial_sub_cap = cap;
+
+    g_conn_pool = (rtdbd_conn_t*)calloc(initial_clients, sizeof(*g_conn_pool));
+    if (!g_conn_pool) return false;
+
+    for (uint32_t i = 0; i < initial_clients; ++i) {
+        g_conns[i] = &g_conn_pool[i];
+        if (!conn_init(g_conns[i])) {
+            conn_pool_free();
+            return false;
+        }
+    }
+    return true;
 }
 
 static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
@@ -225,6 +344,8 @@ static void conn_discard_outq(rtdbd_conn_t* c)
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_sent  = 0;
+    c->snap_active = false;
+    c->snap_outq_count = 0;
 }
 
 /* SET_SUBS 替换订阅集时的软清理：仅复位出站队列指针，**不**计入 notify_drop、
@@ -236,31 +357,105 @@ static void conn_clear_outq_soft(rtdbd_conn_t* c)
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_sent  = 0;
+    c->snap_active = false;
+    c->snap_outq_count = 0;
 }
 
-/* 出站队列入队（B2 背压）：满则丢最旧（保序），绝不无限增长。 */
-static void outq_push(rtdbd_conn_t* c, const rtdbd_notify_t* nt)
+/* 实时帧 = NOTIFY 且未置快照标志；控制/快照帧永不因队列压力淘汰。 */
+static bool outq_frame_is_live(const rtdbd_outq_frame_t* f)
 {
-    if (c->outq_count == RTDBD_OUTQ_CAP) {
-        /* 队首已部分上线（socket 缓冲不足导致 outq_sent > 0）时**禁止淘汰**它：
-         * 否则下轮 flush 会用新队首的帧、却从旧的 outq_sent 偏移续发，
-         * 线上变成「旧帧前缀 + 新帧后缀」的混合帧（长度仍是 44B，
-         * 但 magic/opcode/payload 已被拼接破坏，是对端无法解析的坏帧）。
-         * 此时改为丢弃**本次新通知**——它最旧、价值最低，且尚未上线。 */
-        if (c->outq_sent > 0) {
-            g_stats.notify_drop++;
-            rtdbd_stats_note_error();
-            return;
-        }
-        c->outq_head = (uint16_t)((c->outq_head + 1u) % RTDBD_OUTQ_CAP);
-        c->outq_count--;
-        g_stats.notify_drop++;   /* 慢消费者：丢最旧，值仍在库内可被 GET 读到 */
-        rtdbd_stats_note_error();
-    }
-    c->outq[c->outq_tail] = *nt;
+    return f->opcode == RTDBD_OP_NOTIFY &&
+           (f->u.notify.reserved[1] & RTDBD_NOTIFY_F_SNAPSHOT) == 0;
+}
+
+static bool outq_frame_is_snapshot(const rtdbd_outq_frame_t* f)
+{
+    return f->opcode == RTDBD_OP_NOTIFY &&
+           (f->u.notify.reserved[1] & RTDBD_NOTIFY_F_SNAPSHOT) != 0;
+}
+
+/* 队列满时仅允许淘汰“未开始发送且为实时”的队首。
+ * 队首已部分上线时淘汰会破坏帧边界（旧前缀 + 新帧后缀），必须拒绝。 */
+static bool outq_make_room(rtdbd_conn_t* c)
+{
+    if (c->outq_count < RTDBD_OUTQ_CAP) return true;
+    if (c->outq_sent != 0) return false;
+    if (!outq_frame_is_live(&c->outq[c->outq_head])) return false;
+
+    c->outq_head = (uint16_t)((c->outq_head + 1u) % RTDBD_OUTQ_CAP);
+    c->outq_count--;
+    g_stats.notify_drop++;
+    g_stats.notify_drop_live++;
+    rtdbd_stats_note_error();
+    return true;
+}
+
+static void outq_append(rtdbd_conn_t* c, const rtdbd_outq_frame_t* f)
+{
+    c->outq[c->outq_tail] = *f;
     c->outq_tail = (uint16_t)((c->outq_tail + 1u) % RTDBD_OUTQ_CAP);
     c->outq_count++;
-    g_stats.n_notifies++;   /* 入队计数（含触发丢弃的那次入队） */
+}
+
+static void outq_push_notify(rtdbd_conn_t* c, const rtdbd_notify_t* nt)
+{
+    if (!outq_make_room(c)) {
+        g_stats.notify_drop++;
+        g_stats.notify_drop_live++;
+        rtdbd_stats_note_error();
+        return;
+    }
+
+    rtdbd_outq_frame_t f;
+    f.opcode      = RTDBD_OP_NOTIFY;
+    f.payload_len = (uint16_t)sizeof(rtdbd_notify_t);
+    f.u.notify    = *nt;
+    outq_append(c, &f);
+    g_stats.n_notifies++;   /* 成功入队计数；丢弃的实时帧不计数 */
+}
+
+/* 快照通知与 SNAPSHOT_DONE 走控制帧路径：可淘汰未发送的实时帧，
+ * 但绝不淘汰已部分发送的队首，也不互相淘汰。 */
+static bool outq_push_control(rtdbd_conn_t* c, const rtdbd_outq_frame_t* f)
+{
+    if (!outq_make_room(c)) return false;
+    outq_append(c, f);
+    return true;
+}
+
+static bool outq_push_snapshot(rtdbd_conn_t* c, const rtdbd_notify_t* nt)
+{
+    rtdbd_outq_frame_t f;
+    f.opcode      = RTDBD_OP_NOTIFY;
+    f.payload_len = (uint16_t)sizeof(rtdbd_notify_t);
+    f.u.notify    = *nt;
+    f.u.notify.reserved[1] |= RTDBD_NOTIFY_F_SNAPSHOT;
+
+    if (!outq_push_control(c, &f)) {
+        g_stats.notify_drop_snapshot++;
+        rtdbd_stats_note_error();
+        return false;
+    }
+    c->snap_outq_count++;
+    g_stats.n_notifies++;
+    return true;
+}
+
+/* 快照完成屏障：仅对发过 OP_CAPS 的连接发送。 */
+static bool outq_push_done(rtdbd_conn_t* c, uint32_t count)
+{
+    rtdbd_outq_frame_t f;
+    memset(&f, 0, sizeof(f));
+    f.opcode      = RTDBD_OP_SNAPSHOT_DONE;
+    f.payload_len = (uint16_t)sizeof(rtdbd_snapshot_done_t);
+    f.u.done.count = count;
+    f.u.done.flags = RTDBD_SNAPSHOT_DONE_F_COMPLETE;
+    if (!outq_push_control(c, &f)) {
+        g_stats.notify_drop_snapshot++;
+        rtdbd_stats_note_error();
+        return false;
+    }
+    return true;
 }
 
 /* 排空单个连接的出站队列，**非阻塞**。
@@ -275,21 +470,41 @@ static void outq_push(rtdbd_conn_t* c, const rtdbd_notify_t* nt)
  */
 static int outq_flush(rtdbd_conn_t* c)
 {
-    while (c->outq_count > 0) {
-        /* 组帧：请求头 + 队首负载（仅在未发送完时构造，省常态开销） */
-        uint8_t frame[RTDBD_NOTIFY_FRAME_LEN];
-        rtdbd_req_hdr_t nh;
-        memset(&nh, 0, sizeof(nh));
-        nh.magic       = RTDBD_MAGIC;
-        nh.version     = RTDBD_PROTO_VERSION;
-        nh.opcode      = RTDBD_OP_NOTIFY;
-        nh.payload_len = (uint32_t)sizeof(rtdbd_notify_t);
-        memcpy(frame, &nh, sizeof(nh));
-        memcpy(frame + sizeof(nh), &c->outq[c->outq_head], sizeof(rtdbd_notify_t));
+    uint8_t  batch[RTDBD_OUTQ_FLUSH_BATCH * RTDBD_NOTIFY_FRAME_LEN];
+    uint16_t frame_len[RTDBD_OUTQ_FLUSH_BATCH];
 
-        size_t total = RTDBD_NOTIFY_FRAME_LEN;
-        size_t want  = total - c->outq_sent;
-        ssize_t n = send(c->fd, frame + c->outq_sent, want, MSG_DONTWAIT);
+    while (c->outq_count > 0) {
+        uint16_t idx = c->outq_head;
+        uint16_t nframes = 0;
+        size_t   used = 0;
+
+        while (nframes < RTDBD_OUTQ_FLUSH_BATCH && nframes < c->outq_count) {
+            const rtdbd_outq_frame_t* f = &c->outq[idx];
+            if (f->payload_len > sizeof(f->u)) {
+                conn_discard_outq(c);
+                g_stats.notify_send_fail++;
+                rtdbd_stats_note_error();
+                return -1;
+            }
+
+            size_t frame_len_bytes = sizeof(rtdbd_req_hdr_t) + f->payload_len;
+            rtdbd_req_hdr_t nh;
+            memset(&nh, 0, sizeof(nh));
+            nh.magic       = RTDBD_MAGIC;
+            nh.version     = RTDBD_PROTO_VERSION;
+            nh.opcode      = f->opcode;
+            nh.payload_len = f->payload_len;
+            memcpy(batch + used, &nh, sizeof(nh));
+            memcpy(batch + used + sizeof(nh), &f->u, f->payload_len);
+
+            frame_len[nframes] = (uint16_t)frame_len_bytes;
+            used += frame_len_bytes;
+            nframes++;
+            idx = (uint16_t)((idx + 1u) % RTDBD_OUTQ_CAP);
+        }
+
+        size_t want = used - c->outq_sent;
+        ssize_t n = send(c->fd, batch + c->outq_sent, want, MSG_DONTWAIT);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;  /* 下轮再试 */
@@ -299,13 +514,20 @@ static int outq_flush(rtdbd_conn_t* c)
             return -1;
         }
         if (n == 0) return 0;   /* 理论上不会：非阻塞 send 返回 0 视为无进展 */
-        c->outq_sent = (uint16_t)(c->outq_sent + (uint16_t)n);
-        if (c->outq_sent < total) return 0;   /* 部分发送：下轮续 */
 
-        /* 整帧发完 → 出队 */
-        c->outq_head = (uint16_t)((c->outq_head + 1u) % RTDBD_OUTQ_CAP);
-        c->outq_count--;
-        c->outq_sent = 0;
+        size_t sent = c->outq_sent + (size_t)n;
+        uint16_t consumed = 0;
+        while (consumed < nframes && sent >= frame_len[consumed]) {
+            const rtdbd_outq_frame_t* f = &c->outq[c->outq_head];
+            if (outq_frame_is_snapshot(f) && c->snap_outq_count > 0)
+                c->snap_outq_count--;
+            c->outq_head = (uint16_t)((c->outq_head + 1u) % RTDBD_OUTQ_CAP);
+            c->outq_count--;
+            sent -= frame_len[consumed];
+            consumed++;
+        }
+        c->outq_sent = (uint16_t)sent;
+        if (c->outq_sent != 0) return 0;   /* 部分发送：下轮续 */
     }
     return 0;
 }
@@ -313,10 +535,22 @@ static int outq_flush(rtdbd_conn_t* c)
 /* 写成功后向所有订阅了该点位的连接**入队**变更通知。
  * v3.7 主题A T1：经 RBE 门控——死区未越过则抑制本次入队（值仍已落库）。
  * v3.7 主题B B2：不再阻塞直发，改为入队 + 主循环 POLLOUT flush（背压）。 */
-static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* conns, int n,
+static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* const* conns, int n,
                              const rtdbd_write_req_t* w,
                              const indurtdb_meta_t* meta)
 {
+    bool subscribed[RTDBD_MAX_CLIENTS] = {false};
+    bool any = false;
+
+    for (int i = 0; i < n; ++i) {
+        rtdbd_conn_t* c = conns[i];
+        if (!c || c->fd < 0) continue;
+        if (!conn_has_sub(c, w->point_id)) continue;
+        subscribed[i] = true;
+        any = true;
+    }
+    if (!any) return;
+
     rtdbd_notify_t nt;
     memset(&nt, 0, sizeof(nt));
 
@@ -339,19 +573,18 @@ static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* conns, int n,
     double v = indurtdb_value_to_double(w->type, &w->value_bits);
 
     for (int i = 0; i < n; ++i) {
-        rtdbd_conn_t* c = &conns[i];
-        if (c->fd < 0) continue;
-        if (!conn_has_sub(c, w->point_id)) continue;
+        if (!subscribed[i]) continue;
+        rtdbd_conn_t* c = conns[i];
 
         /* RBE 门控：死区未越过则抑制本次通知 */
         if (!rtdbd_subtab_decide(&c->sub, w->point_id, v, meta)) continue;
 
-        outq_push(c, &nt);
+        outq_push_notify(c, &nt);
     }
 }
 
 /* 质量跃迁通知：跳过 RBE，保证 TIMEOUT 一定送达（RBE 只用于值变化门控）。 */
-static void notify_quality_transition(rtdbd_conn_t* conns, int n, uint32_t point_id)
+static void notify_quality_transition(rtdbd_conn_t* const* conns, int n, uint32_t point_id)
 {
     indurtdb_point_t pt;
     if (indurtdb_h_read_point(g_h, point_id, &pt) != 0) return;
@@ -368,16 +601,16 @@ static void notify_quality_transition(rtdbd_conn_t* conns, int n, uint32_t point
     nt.source_ts_ns   = pt.source_timestamp_ns;
 
     for (int i = 0; i < n; ++i) {
-        rtdbd_conn_t* c = &conns[i];
-        if (c->fd < 0) continue;
+        rtdbd_conn_t* c = conns[i];
+        if (!c || c->fd < 0) continue;
         if (!conn_has_sub(c, point_id)) continue;
-        outq_push(c, &nt);
+        outq_push_notify(c, &nt);
     }
 }
 
 /* 1 Hz 扫描：标记超时并只对“非 TIMEOUT → TIMEOUT”的跃迁推送。
  * 恢复方向不在此推送；写路径的 notify_broadcast 已带 GOOD。 */
-static void scan_timeouts(rtdbd_conn_t* conns, int n, uint64_t timeout_ns)
+static void scan_timeouts(rtdbd_conn_t* const* conns, int n, uint64_t timeout_ns)
 {
     if (g_timeout_disabled) return;
 
@@ -401,8 +634,8 @@ static void scan_timeouts(rtdbd_conn_t* conns, int n, uint64_t timeout_ns)
     }
 }
 
-/* 启动时建立质量基线；超过扫描上限则整体禁用并只告警一次。 */
-static void init_timeout_scan(void)
+/* 启动时建立质量基线；无全局/每点超时或超过扫描上限则整体禁用。 */
+static void init_timeout_scan(uint64_t timeout_ns)
 {
     g_last_scan_mono_ns = mono_now_ns();
     if (g_max_points > RTDBD_TIMEOUT_MAX_POINTS) {
@@ -413,21 +646,35 @@ static void init_timeout_scan(void)
                         (unsigned)RTDBD_TIMEOUT_MAX_POINTS);
         return;
     }
+
+    bool any_timeout = (timeout_ns != 0);
     for (uint32_t id = 0; id < g_max_points; ++id) {
         indurtdb_point_t pt;
         if (indurtdb_h_read_point(g_h, id, &pt) == 0)
             g_quality[id] = pt.quality;
+        if (!any_timeout) {
+            indurtdb_meta_t m;
+            if (indurtdb_h_get_meta(g_h, id, &m) == 0 &&
+                (m.flags & INDURTDB_META_FLAG_TIMEOUT)) {
+                uint32_t ms = 0;
+                memcpy(&ms, m.reserved, sizeof(ms));
+                if (ms > 0) any_timeout = true;
+            }
+        }
     }
+    if (!any_timeout) g_timeout_disabled = true;
 }
 
 /* v3.7 主题B B1：连接表完整性检查。
  * 空闲槽（fd<0）不应残留任何订阅（否则退订/断开清理有漏，幽灵订阅会持续收通知）；
  * 已连接槽的订阅数不得超过 RTDBD_SUB_MAX。返回 0 = 完好，-1 = 异常。 */
-static int conn_table_check(const rtdbd_conn_t* conns, int n)
+static int conn_table_check(rtdbd_conn_t* const* conns, int n)
 {
     for (int i = 0; i < n; ++i) {
-        if (conns[i].nsubs > RTDBD_SUB_MAX) return -1;
-        if (conns[i].fd < 0 && conns[i].nsubs != 0) return -1;  /* 空闲槽有残留订阅 */
+        rtdbd_conn_t* c = conns[i];
+        if (!c) continue;
+        if (c->nsubs > RTDBD_SUB_MAX) return -1;
+        if (c->fd < 0 && c->nsubs != 0) return -1;  /* 空闲槽有残留订阅 */
     }
     return 0;
 }
@@ -494,6 +741,14 @@ static int peer_cred(int fd, uint32_t* pid, uint32_t* uid){
     if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cr, &len) != 0) return -1;
     *pid = (uint32_t)cr.pid;
     *uid = (uint32_t)cr.uid;
+    return 0;
+}
+
+static int conn_peer_cred(const rtdbd_conn_t* c, uint32_t* pid, uint32_t* uid)
+{
+    if (!c || !c->peer_cred_ok) return -1;
+    *pid = c->peer_pid;
+    *uid = c->peer_uid;
     return 0;
 }
 
@@ -589,10 +844,12 @@ typedef struct {
     irt_policy_t*          policy;
     irt_audit_t*           audit;
     rtdbd_conn_t*          conn;    /* 当前连接（承载默认分区） */
-    rtdbd_conn_t*          conns;   /* 连接表（广播/健康用） */
+    rtdbd_conn_t**         conns;   /* 连接表（广播/健康用） */
     int                    nconns;
     const rtdbd_conf_t*    conf;    /* v3.9 分区白名单（可为空配置） */
     uint32_t               max_subs;   /* v3.10：每连接订阅上限（--max-subs） */
+    uint32_t               initial_subs; /* v3.11：CAPS 上报的初始订阅容量 */
+    uint32_t               max_batch;  /* v3.11：CAPS 上报的批量上限 */
     uint64_t               timeout_ns; /* v3.10：全局默认超时（--timeout-ms 换算） */
     const rtdbd_req_hdr_t* req;     /* 本次请求头（生命周期 = handle_request 栈） */
     rtdbd_resp_hdr_t       resp;    /* 本次响应头（magic/version 已置） */
@@ -612,7 +869,7 @@ static int point_subscribable(rtdbd_ctx_t* cx, uint32_t id,
     if (pt.name[0] == '\0') return RTDBD_ST_NOT_FOUND;
 
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(cx->conn->fd, &pid, &uid) != 0) return RTDBD_ST_INTERNAL;
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) return RTDBD_ST_INTERNAL;
 
     if (!irt_policy_allows(cx->policy, uid, pt.partition, id)) return RTDBD_ST_DENIED;
     if (!rtdbd_conf_partition_allowed(cx->conf, pt.partition)) return RTDBD_ST_DENIED;
@@ -623,38 +880,85 @@ static int point_subscribable(rtdbd_ctx_t* cx, uint32_t id,
     return 0;
 }
 
-/* 替换连接的整个订阅集：清空旧 subs/subtab，按升序插入新 ids，
- * 并为每个 id 入队一帧当前值快照 NOTIFY。 */
-static void conn_replace_subs(rtdbd_conn_t* c, const uint32_t* ids, uint32_t n,
-                              indurtdb_t* h, uint32_t max_subs)
+/* 原子替换订阅集：先在临时表中构建完整集合，全部成功后再交换；
+ * 任一步失败释放临时表，旧订阅集保持不变。 */
+static bool conn_install_subs(rtdbd_conn_t* c, const uint32_t* ids, uint32_t n)
 {
-    c->nsubs = 0;
-    rtdbd_subtab_clear(&c->sub);
-
+    rtdbd_subtab_t next;
+    if (!rtdbd_subtab_init(&next, RTDBD_SUBTAB_MIN_CAP)) {
+        g_stats.subs_alloc_fail++;
+        return false;
+    }
+    if (n > 0 && !rtdbd_subtab_reserve(&next, n * 2u)) {
+        g_stats.subs_alloc_fail++;
+        rtdbd_subtab_free(&next);
+        return false;
+    }
     for (uint32_t i = 0; i < n; ++i) {
-        uint32_t id = ids[i];
-        if (c->nsubs >= max_subs || c->nsubs >= RTDBD_SUB_MAX) break;
-        if (!rtdbd_subtab_insert(&c->sub, id)) continue;
-        c->subs[c->nsubs++] = id;
+        if (!rtdbd_subtab_insert(&next, ids[i])) {
+            g_stats.subs_alloc_fail++;
+            rtdbd_subtab_free(&next);
+            return false;
+        }
+    }
 
-        /* 构造当前值快照 NOTIFY */
+    rtdbd_subtab_free(&c->sub);
+    c->sub = next;
+    if (n > 0) memcpy(c->subs, ids, (size_t)n * sizeof(uint32_t));
+    c->nsubs = n;
+    return true;
+}
+
+/* 启动快照流：主循环按 64 帧/轮推进，避免一次性占满出站队列。
+ * 快照帧上限 767，留出 256 个实时帧 + 1 个控制帧预算。 */
+static void conn_start_snapshot(rtdbd_conn_t* c)
+{
+    c->snap_next      = 0;
+    c->snap_emitted   = 0;
+    c->snap_outq_count = 0;
+    c->snap_active    = true;
+}
+
+static void conn_snapshot_pump(rtdbd_conn_t* c, indurtdb_t* h)
+{
+    if (!c || !c->snap_active || c->fd < 0) return;
+
+    uint32_t scanned = 0;
+    while (c->snap_active && c->snap_next < c->nsubs &&
+           c->snap_outq_count < RTDBD_SNAPSHOT_QUEUE_MAX &&
+           scanned < RTDBD_SNAPSHOT_PUMP_BATCH) {
+        uint32_t id = c->subs[c->snap_next++];
+        scanned++;
+
         indurtdb_point_t pt;
         if (indurtdb_h_read_point(h, id, &pt) != 0) continue;
         if (pt.name[0] == '\0') continue;
+
+        indurtdb_meta_t m;
+        memset(&m, 0, sizeof(m));
+        (void)indurtdb_h_get_meta(h, id, &m);
+        double v = 0.0;
+        if (pt.type != RTDBD_TYPE_STRING)
+            v = indurtdb_value_to_double(pt.type, &pt.value);
+        (void)rtdbd_subtab_decide(&c->sub, id, v, &m);
 
         rtdbd_notify_t nt;
         memset(&nt, 0, sizeof(nt));
         nt.point_id     = id;
         nt.type         = pt.type;
-        nt.reserved[0]  = pt.quality;  /* v3.10 T5：quality 放在 reserved[0] */
-        /* 字符串值不走 notify（32B 放不下），value_bits 保持 0；
-         * 监控台字符串点走 REST/GET。 */
+        nt.reserved[0]  = pt.quality;
         if (pt.type != RTDBD_TYPE_STRING)
             memcpy(&nt.value_bits, &pt.value, sizeof(nt.value_bits));
         nt.timestamp_ns   = pt.timestamp_ns;
         nt.source_ts_ns   = pt.source_timestamp_ns;
 
-        outq_push(c, &nt);
+        if (!outq_push_snapshot(c, &nt)) break;
+        c->snap_emitted++;
+    }
+
+    if (c->snap_active && c->snap_next >= c->nsubs) {
+        if (c->caps_negotiated && !outq_push_done(c, c->snap_emitted)) return;
+        c->snap_active = false;
     }
 }
 
@@ -681,6 +985,38 @@ static int op_audit_dump(int fd, rtdbd_ctx_t* cx)
     return 0;
 }
 
+/* 单点写入的公共路径：鉴权 → do_write → 审计/计数。
+ * 不发送响应、不广播通知；调用方负责保持既有响应/通知顺序。 */
+static uint16_t write_one(rtdbd_ctx_t* cx, const rtdbd_write_req_t* w,
+                          uint32_t pid, uint32_t uid, uint32_t partition,
+                          indurtdb_meta_t* out_meta)
+{
+    memset(out_meta, 0, sizeof(*out_meta));
+
+    if (!irt_policy_allows(cx->policy, uid, partition, w->point_id)) {
+        g_stats.write_rejected++;
+        rtdbd_stats_note_error();
+        return RTDBD_ST_DENIED;
+    }
+    if (!rtdbd_conf_partition_allowed(cx->conf, partition)) {
+        g_stats.write_rejected++;
+        rtdbd_stats_note_error();
+        return RTDBD_ST_DENIED;
+    }
+
+    int rc = do_write(cx->h, w, out_meta);
+    if (rc == -99) return RTDBD_ST_BAD_REQUEST;
+    if (rc != 0) {
+        g_stats.write_error++;
+        rtdbd_stats_note_error();
+        return RTDBD_ST_INTERNAL;
+    }
+
+    irt_audit_record(cx->audit, pid, uid, partition, w->point_id, now_ns());
+    g_stats.n_writes++;
+    return RTDBD_ST_OK;
+}
+
 static int op_write(int fd, rtdbd_ctx_t* cx)
 {
     rtdbd_write_req_t w;
@@ -692,7 +1028,7 @@ static int op_write(int fd, rtdbd_ctx_t* cx)
     }
 
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(fd, &pid, &uid) != 0) {
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
         cx->resp.status      = RTDBD_ST_INTERNAL;
         cx->resp.payload_len = 0;
         (void)send_all(fd, &cx->resp, sizeof(cx->resp));
@@ -700,47 +1036,128 @@ static int op_write(int fd, rtdbd_ctx_t* cx)
     }
 
     /* 鉴权：deny by default。分区取连接默认值（OP_SELECT 设置，T5）。 */
-    uint32_t partition = cx->conn->partition;
-    if (!irt_policy_allows(cx->policy, uid, partition, w.point_id)) {
-        g_stats.write_rejected++;
-        rtdbd_stats_note_error();
-        cx->resp.status      = RTDBD_ST_DENIED;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-    /* 白名单 fail-closed：连接默认分区不在白名单（如白名单 [1,2] 下初值 0）即拒写。 */
-    if (!rtdbd_conf_partition_allowed(cx->conf, partition)) {
-        g_stats.write_rejected++;
-        rtdbd_stats_note_error();
-        cx->resp.status      = RTDBD_ST_DENIED;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-
     indurtdb_meta_t m;
-    int rc = do_write(cx->h, &w, &m);
-    if (rc == -99) {
-        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-    if (rc != 0) {
-        g_stats.write_error++;
-        rtdbd_stats_note_error();
-        cx->resp.status      = RTDBD_ST_INTERNAL;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-
-    irt_audit_record(cx->audit, pid, uid, partition, w.point_id, now_ns());
-    g_stats.n_writes++;
-    cx->resp.status      = RTDBD_ST_OK;
+    uint16_t st = write_one(cx, &w, pid, uid, cx->conn->partition, &m);
+    cx->resp.status      = st;
     cx->resp.payload_len = 0;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
+    if (st != RTDBD_ST_OK) return 0;
 
     /* 变更通知：写成功后广播给订阅者（含写者自身，若它也订阅了）；RBE 门控在内部 */
     notify_broadcast(cx->h, cx->conns, cx->nconns, &w, &m);
     return 0;
+}
+
+/* ---- v3.11 BATCH_READ：count 个点，逐项返回 status + GET 结果 ---- */
+static int op_batch_read(int fd, rtdbd_ctx_t* cx)
+{
+    uint32_t count = 0;
+    if (cx->req->payload_len < sizeof(count) ||
+        recv_all(fd, &count, sizeof(count)) != 0) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    if (count == 0 || count > cx->max_batch || count > RTDBD_BATCH_MAX ||
+        cx->req->payload_len != sizeof(count) + count * sizeof(uint32_t)) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;  /* 负载未读，关闭连接避免流错位 */
+    }
+
+    g_stats.n_batch_read_reqs++;
+    uint32_t out_count = count;
+    memcpy(g_batch_read_resp, &out_count, sizeof(out_count));
+    rtdbd_batch_read_item_t* out =
+        (rtdbd_batch_read_item_t*)(g_batch_read_resp + sizeof(out_count));
+
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t id = 0;
+        if (recv_all(fd, &id, sizeof(id)) != 0) return 1;
+
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].point_id = id;
+        if (do_get(cx->h, id, &out[i].value) != 0) {
+            out[i].status = RTDBD_ST_NOT_FOUND;
+            memset(&out[i].value, 0, sizeof(out[i].value));
+        } else {
+            out[i].status = RTDBD_ST_OK;
+        }
+    }
+
+    cx->resp.status      = RTDBD_ST_OK;
+    cx->resp.payload_len = sizeof(out_count) +
+                           count * (uint32_t)sizeof(rtdbd_batch_read_item_t);
+    if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
+    return send_all(fd, g_batch_read_resp, cx->resp.payload_len);
+}
+
+/* ---- v3.11 BATCH_WRITE：跨分区逐项鉴权，部分失败不回滚 ---- */
+static int op_batch_write(int fd, rtdbd_ctx_t* cx)
+{
+    uint32_t count = 0;
+    if (cx->req->payload_len < sizeof(count) ||
+        recv_all(fd, &count, sizeof(count)) != 0) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    if (count == 0 || count > cx->max_batch || count > RTDBD_BATCH_MAX ||
+        cx->req->payload_len != sizeof(count) + count * sizeof(rtdbd_write_req_t)) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;  /* 负载未读，关闭连接避免流错位 */
+    }
+
+    uint32_t req_bytes = count * (uint32_t)sizeof(rtdbd_write_req_t);
+    memcpy(g_batch_write_req, &count, sizeof(count));
+    if (recv_all(fd, g_batch_write_req + sizeof(count), req_bytes) != 0) return 1;
+
+    uint32_t pid = 0, uid = 0;
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
+        cx->resp.status      = RTDBD_ST_INTERNAL;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    g_stats.n_batch_write_reqs++;
+    uint32_t out_count = count;
+    memcpy(g_batch_write_resp, &out_count, sizeof(out_count));
+    rtdbd_batch_write_item_t* out =
+        (rtdbd_batch_write_item_t*)(g_batch_write_resp + sizeof(out_count));
+    const rtdbd_write_req_t* req =
+        (const rtdbd_write_req_t*)(g_batch_write_req + sizeof(count));
+
+    for (uint32_t i = 0; i < count; ++i) {
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].point_id = req[i].point_id;
+
+        indurtdb_point_t pt;
+        if (req[i].point_id >= g_max_points ||
+            indurtdb_h_read_point(cx->h, req[i].point_id, &pt) != 0 ||
+            pt.name[0] == '\0') {
+            out[i].status = RTDBD_ST_NOT_FOUND;
+            continue;
+        }
+
+        indurtdb_meta_t m;
+        out[i].status = write_one(cx, &req[i], pid, uid, pt.partition, &m);
+        if (out[i].status == RTDBD_ST_OK)
+            notify_broadcast(cx->h, cx->conns, cx->nconns, &req[i], &m);
+    }
+
+    cx->resp.status      = RTDBD_ST_OK;  /* 整包成功；逐项状态在 item.status */
+    cx->resp.payload_len = sizeof(out_count) +
+                           count * (uint32_t)sizeof(rtdbd_batch_write_item_t);
+    if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
+    return send_all(fd, g_batch_write_resp, cx->resp.payload_len);
 }
 
 static int op_subscribe(int fd, rtdbd_ctx_t* cx)
@@ -863,7 +1280,7 @@ static int op_set_meta(int fd, rtdbd_ctx_t* cx)
     }
 
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(fd, &pid, &uid) != 0) {
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
         cx->resp.status      = RTDBD_ST_INTERNAL;
         cx->resp.payload_len = 0;
         (void)send_all(fd, &cx->resp, sizeof(cx->resp));
@@ -918,7 +1335,7 @@ static int op_create_point(int fd, rtdbd_ctx_t* cx)
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(fd, &pid, &uid) != 0) {
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
         cx->resp.status = RTDBD_ST_INTERNAL; cx->resp.payload_len = 0;
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
@@ -957,7 +1374,7 @@ static int op_delete_point(int fd, rtdbd_ctx_t* cx)
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(fd, &pid, &uid) != 0) {
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
         cx->resp.status = RTDBD_ST_INTERNAL; cx->resp.payload_len = 0;
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
@@ -995,7 +1412,7 @@ static int op_rename_point(int fd, rtdbd_ctx_t* cx)
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
     uint32_t pid = 0, uid = 0;
-    if (peer_cred(fd, &pid, &uid) != 0) {
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) {
         cx->resp.status = RTDBD_ST_INTERNAL; cx->resp.payload_len = 0;
         (void)send_all(fd, &cx->resp, sizeof(cx->resp)); return 1;
     }
@@ -1113,7 +1530,7 @@ static int op_health(int fd, rtdbd_ctx_t* cx)
     /* 返回前刷新自检：核心段头 + 错误计数分类 + 连接表完整性 */
     int health = rtdbd_self_check_core(cx->h);
     if (health != RTDBD_HEALTH_UNHEALTHY &&
-        conn_table_check(cx->conns, cx->nconns) != 0) {
+        conn_table_check(cx->conns, (int)g_max_clients) != 0) {
         health = RTDBD_HEALTH_UNHEALTHY;
         g_stats.health = RTDBD_HEALTH_UNHEALTHY;
     }
@@ -1130,7 +1547,10 @@ static int op_health(int fd, rtdbd_ctx_t* cx)
     h.uptime_ns        = g_stats.uptime_ns;
     h.health           = (uint32_t)health;
     uint32_t nc = 0;
-    for (int i = 0; i < cx->nconns; ++i) if (cx->conns[i].fd >= 0) nc++;
+    for (int i = 0; i < cx->nconns; ++i) {
+        rtdbd_conn_t* c = cx->conns[i];
+        if (c && c->fd >= 0) nc++;
+    }
     h.n_conns = nc;
 
     cx->resp.status      = RTDBD_ST_OK;
@@ -1168,19 +1588,52 @@ static int op_select(int fd, rtdbd_ctx_t* cx)
     return send_all(fd, &cx->resp, sizeof(cx->resp));
 }
 
+/* ---- v3.11：能力协商。空请求；成功后本连接才接收 SNAPSHOT_DONE。 ---- */
+static int op_caps(int fd, rtdbd_ctx_t* cx)
+{
+    if (cx->req->payload_len != 0) {
+        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+
+    rtdbd_caps_t caps;
+    memset(&caps, 0, sizeof(caps));
+    caps.proto_version         = RTDBD_PROTO_VERSION;
+    caps.max_clients           = g_max_clients;
+    caps.initial_clients       = g_initial_clients;
+    caps.max_subs_per_conn     = cx->max_subs;
+    caps.initial_subs_per_conn = cx->initial_subs;
+    caps.max_batch             = cx->max_batch;
+    caps.flags                 = RTDBD_CAPS_F_BATCH_READ |
+                                 RTDBD_CAPS_F_BATCH_WRITE |
+                                 RTDBD_CAPS_F_SNAPSHOT_DONE;
+
+    cx->resp.status      = RTDBD_ST_OK;
+    cx->resp.payload_len = (uint32_t)sizeof(caps);
+    if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
+    if (send_all(fd, &caps, sizeof(caps)) != 0) return 1;
+    cx->conn->caps_negotiated = true;
+    return 0;
+}
+
 /* ---- v3.10 T4：SET_SUBS 批量订阅整组替换 + 当前值快照 ----
  * 请求：u32 count; u32 ids[count]
  * 响应：空负载，status=OK 表示成功
  * 成功后：清空出站队列（不计 notify_drop），替换订阅集，按 id 升序推送快照 NOTIFY
  * 失败：旧订阅集保持不变，返回对应错误码 */
+static int cmp_u32_asc(const void* a, const void* b)
+{
+    uint32_t x = *(const uint32_t*)a;
+    uint32_t y = *(const uint32_t*)b;
+    return (x > y) - (x < y);
+}
+
 static int op_set_subs(int fd, rtdbd_ctx_t* cx)
 {
-    /* 若出站队列有部分已发送帧，关闭连接而不回包：
-     * 部分发送的 NOTIFY 帧在流中，插入响应会破坏帧边界。 */
-    if (cx->conn->outq_sent != 0) return 1;
-
-    /* 最小负载：4 字节 count；超过 4+4*1024 直接断连（无法安全 drain，
-     * 也避免恶意超大 payload 让服务端空读）。 */
+    /* 最小负载：4 字节 count；超过 4+4*RTDBD_SET_SUBS_MAX 直接断连
+     * （无法安全 drain，也避免恶意超大 payload 让服务端空读）。 */
     if (cx->req->payload_len < 4 ||
         cx->req->payload_len > 4 + 4 * RTDBD_SET_SUBS_MAX) return 1;
 
@@ -1194,7 +1647,7 @@ static int op_set_subs(int fd, rtdbd_ctx_t* cx)
 
     /* count 超过单次 SET_SUBS 上限 */
     if (count > RTDBD_SET_SUBS_MAX) {
-        /* 安全 drain 剩余 payload（最多 4*1024 字节） */
+        /* 安全 drain 剩余 payload */
         uint8_t drain_buf[256];
         uint32_t remaining = cx->req->payload_len - 4;
         while (remaining > 0) {
@@ -1250,15 +1703,14 @@ static int op_set_subs(int fd, rtdbd_ctx_t* cx)
         }
     }
 
-    /* 校验重复 id（O(n^2)，n <= 1024 可接受） */
-    for (uint32_t i = 0; i < count; ++i) {
-        for (uint32_t j = i + 1; j < count; ++j) {
-            if (g_set_subs_ids[i] == g_set_subs_ids[j]) {
-                cx->resp.status      = RTDBD_ST_BAD_REQUEST;
-                cx->resp.payload_len = 0;
-                (void)send_all(fd, &cx->resp, sizeof(cx->resp));
-                return 0;  /* 旧订阅不变 */
-            }
+    /* 排序后相邻去重：10k 订阅下 O(n log n)，避免 O(n^2) 卡住单线程服务端。 */
+    qsort(g_set_subs_ids, count, sizeof(uint32_t), cmp_u32_asc);
+    for (uint32_t i = 1; i < count; ++i) {
+        if (g_set_subs_ids[i] == g_set_subs_ids[i - 1]) {
+            cx->resp.status      = RTDBD_ST_BAD_REQUEST;
+            cx->resp.payload_len = 0;
+            (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+            return 0;  /* 旧订阅不变 */
         }
     }
 
@@ -1274,20 +1726,14 @@ static int op_set_subs(int fd, rtdbd_ctx_t* cx)
         }
     }
 
-    /* 升序排序（插入排序，n <= 1024） */
-    for (uint32_t i = 1; i < count; ++i) {
-        uint32_t key = g_set_subs_ids[i];
-        int32_t j = (int32_t)i - 1;
-        while (j >= 0 && g_set_subs_ids[j] > key) {
-            g_set_subs_ids[j + 1] = g_set_subs_ids[j];
-            j--;
-        }
-        g_set_subs_ids[j + 1] = key;
+    /* 全部校验通过：原子替换订阅集，再取消旧队列并启动流式快照。 */
+    if (!conn_install_subs(cx->conn, g_set_subs_ids, count)) {
+        cx->resp.status      = RTDBD_ST_NO_MEM;
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
     }
-
-    /* 全部校验通过：软清理出站队列，替换订阅集并入队快照 */
     conn_clear_outq_soft(cx->conn);
-    conn_replace_subs(cx->conn, g_set_subs_ids, count, cx->h, cx->max_subs);
+    conn_start_snapshot(cx->conn);
 
     cx->resp.status      = RTDBD_ST_OK;
     cx->resp.payload_len = 0;
@@ -1311,11 +1757,14 @@ static const struct {
     { RTDBD_OP_DELETE_POINT, op_delete_point },
     { RTDBD_OP_RENAME_POINT, op_rename_point },
     { RTDBD_OP_GET,          op_get          },
+    { RTDBD_OP_BATCH_READ,   op_batch_read   },
+    { RTDBD_OP_BATCH_WRITE,  op_batch_write  },
     { RTDBD_OP_LIST,         op_list         },
     { RTDBD_OP_GET_LOG,      op_get_log      },
     { RTDBD_OP_HEALTH,       op_health       },
     { RTDBD_OP_SELECT,       op_select       },
     { RTDBD_OP_SET_SUBS,     op_set_subs     },
+    { RTDBD_OP_CAPS,         op_caps         },
 };
 
 static int handle_request(int fd, rtdbd_ctx_t* cx)
@@ -1533,9 +1982,13 @@ static void usage(FILE* out, const char* prog)
             "  -s, --socket PATH          UDS 监听路径（默认 /run/indurtdb/default.sock）\n"
             "  -i, --instance ID          实例 ID（共享内存段 /indurtdb_<ID>）\n"
             "  -p, --policy PATH          策略文件\n"
-            "  -c, --config PATH          点位/分区配置 YAML\n"
+            "  -c, --config PATH          点位/容量/分区配置 YAML\n"
             "  -m, --max-points N         点位容量（默认 10000）\n"
-            "  -b, --max-subs N           每连接订阅上限（默认 1024，范围 1..1024）\n"
+            "  -b, --max-subs N           每连接订阅上限（默认 10000，范围 1..10000）\n"
+            "      --max-clients N        同时连接上限（默认 128，范围 1..128）\n"
+            "      --initial-clients N    启动预创建连接数（默认 32，范围 1..max-clients）\n"
+            "      --initial-subs N       每连接初始订阅容量（默认 1024，范围 1..max-subs）\n"
+            "      --max-batch N          单次批量读写上限（默认 1024，范围 1..1024）\n"
             "  -t, --timeout-ms N         全局默认点位超时毫秒（默认 0，0 = 不给全局默认）\n"
             "  -S, --supervise            以 supervisor 模式运行\n"
             "  -P, --pidfile PATH         supervisor 写入 worker pid 的文件\n"
@@ -1552,9 +2005,18 @@ int main(int argc, char** argv)
     const char* policy_path = NULL;
     const char* config_path = NULL;
     uint32_t    max_points = 10000;
-    uint32_t    max_subs   = RTDBD_SUB_MAX_PER_CONN;
+    uint32_t    max_clients = RTDBD_CONF_DEFAULT_MAX_CLIENTS;
+    uint32_t    initial_clients = RTDBD_CONF_DEFAULT_INITIAL_CLIENTS;
+    uint32_t    max_subs   = RTDBD_CONF_DEFAULT_MAX_SUBS;
+    uint32_t    initial_subs = RTDBD_CONF_DEFAULT_INITIAL_SUBS;
+    uint32_t    max_batch  = RTDBD_CONF_DEFAULT_MAX_BATCH;
     uint32_t    timeout_ms = 0;
     bool        supervise  = false;
+    bool        cli_max_clients = false;
+    bool        cli_initial_clients = false;
+    bool        cli_max_subs = false;
+    bool        cli_initial_subs = false;
+    bool        cli_max_batch = false;
     const char* pidfile    = NULL;
     /* v3.7 B4：运行时变更 delta 日志。**默认关闭**（未指定则不启用），
      * 以保持既有部署"运行时点位重启即丢"的语义不变。 */
@@ -1567,6 +2029,10 @@ int main(int argc, char** argv)
         {"config",     required_argument, 0, 'c'},
         {"max-points", required_argument, 0, 'm'},
         {"max-subs",   required_argument, 0, 'b'},
+        {"max-clients", required_argument, 0, 1000},
+        {"initial-clients", required_argument, 0, 1001},
+        {"initial-subs", required_argument, 0, 1002},
+        {"max-batch", required_argument, 0, 1003},
         {"timeout-ms", required_argument, 0, 't'},
         {"supervise",  no_argument,       0, 'S'},
         {"pidfile",    required_argument, 0, 'P'},
@@ -1594,6 +2060,35 @@ int main(int argc, char** argv)
                 fprintf(stderr, "rtdbd: invalid --max-subs '%s'\n", optarg);
                 return RTDBD_EXIT_ERROR;
             }
+            cli_max_subs = true;
+            break;
+        case 1000:
+            if (parse_u32_cli(optarg, &max_clients) != 0) {
+                fprintf(stderr, "rtdbd: invalid --max-clients '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            cli_max_clients = true;
+            break;
+        case 1001:
+            if (parse_u32_cli(optarg, &initial_clients) != 0) {
+                fprintf(stderr, "rtdbd: invalid --initial-clients '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            cli_initial_clients = true;
+            break;
+        case 1002:
+            if (parse_u32_cli(optarg, &initial_subs) != 0) {
+                fprintf(stderr, "rtdbd: invalid --initial-subs '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            cli_initial_subs = true;
+            break;
+        case 1003:
+            if (parse_u32_cli(optarg, &max_batch) != 0) {
+                fprintf(stderr, "rtdbd: invalid --max-batch '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            cli_max_batch = true;
             break;
         case 't':
             if (parse_u32_cli(optarg, &timeout_ms) != 0) {
@@ -1644,11 +2139,6 @@ int main(int argc, char** argv)
                 (unsigned)RTDBD_MAX_POINTS_LIMIT);
         return RTDBD_EXIT_ERROR;
     }
-    if (max_subs == 0 || max_subs > RTDBD_SUB_MAX_PER_CONN) {
-        fprintf(stderr, "rtdbd: invalid --max-subs (must be in [1,%u])\n",
-                (unsigned)RTDBD_SUB_MAX_PER_CONN);
-        return RTDBD_EXIT_CONFIG;
-    }
     if (!sock_path || sock_path[0] == '\0' ||
         strlen(sock_path) >= sizeof(((struct sockaddr_un*)0)->sun_path)) {
         fprintf(stderr, "rtdbd: invalid --socket (empty or too long)\n");
@@ -1694,15 +2184,60 @@ int main(int argc, char** argv)
     if (config_path) {
         uint32_t cline = 0;
         if (rtdbd_conf_load(&conf, config_path, &cline) != 0) {
-            fprintf(stderr, "rtdbd: invalid config (partition) '%s': line %u\n",
+            fprintf(stderr, "rtdbd: invalid config '%s': line %u\n",
                     config_path, (unsigned)cline);
             irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
-                            "rtdbd: partition config invalid at line %u", (unsigned)cline);
+                            "rtdbd: config invalid at line %u", (unsigned)cline);
             return RTDBD_EXIT_CONFIG;
         }
     } else {
         rtdbd_conf_init(&conf);
     }
+
+    if (!cli_max_clients) max_clients = conf.max_clients;
+    if (!cli_initial_clients) {
+        initial_clients = conf.initial_clients;
+        if (!(conf.caps_present & RTDBD_CONF_HAS_INITIAL_CLIENTS) &&
+            initial_clients > max_clients)
+            initial_clients = max_clients;
+    }
+    if (!cli_max_subs) max_subs = conf.max_subs_per_conn;
+    if (!cli_initial_subs) {
+        initial_subs = conf.initial_subs_per_conn;
+        /* 兼容旧的 --max-subs N（N < 默认 initial_subs）：未显式配置初始容量时
+         * 收敛到上限，避免只调低每连接订阅数反而启动失败。 */
+        if (!(conf.caps_present & RTDBD_CONF_HAS_INITIAL_SUBS) && initial_subs > max_subs)
+            initial_subs = max_subs;
+    }
+    if (!cli_max_batch) max_batch = conf.max_batch;
+
+    if (max_clients == 0 || max_clients > RTDBD_MAX_CLIENTS) {
+        fprintf(stderr, "rtdbd: invalid max_clients (must be in [1,%u])\n",
+                (unsigned)RTDBD_MAX_CLIENTS);
+        return RTDBD_EXIT_CONFIG;
+    }
+    if (initial_clients == 0 || initial_clients > max_clients) {
+        fprintf(stderr, "rtdbd: invalid initial_clients (must be in [1,%u])\n",
+                (unsigned)max_clients);
+        return RTDBD_EXIT_CONFIG;
+    }
+    if (max_subs == 0 || max_subs > RTDBD_SUB_MAX_PER_CONN) {
+        fprintf(stderr, "rtdbd: invalid %s (must be in [1,%u])\n",
+                cli_max_subs ? "--max-subs" : "max_subs_per_conn",
+                (unsigned)RTDBD_SUB_MAX_PER_CONN);
+        return RTDBD_EXIT_CONFIG;
+    }
+    if (initial_subs == 0 || initial_subs > max_subs) {
+        fprintf(stderr, "rtdbd: invalid initial_subs_per_conn (must be in [1,%u])\n",
+                (unsigned)max_subs);
+        return RTDBD_EXIT_CONFIG;
+    }
+    if (max_batch == 0 || max_batch > RTDBD_BATCH_MAX) {
+        fprintf(stderr, "rtdbd: invalid max_batch (must be in [1,%u])\n",
+                (unsigned)RTDBD_BATCH_MAX);
+        return RTDBD_EXIT_CONFIG;
+    }
+    g_max_clients = max_clients;
 
     /* v3.9 T5：改用句柄 API 打开实例（分区感知 API 只存在于句柄层）。 */
     indurtdb_cfg_t cfg;
@@ -1804,7 +2339,7 @@ int main(int argc, char** argv)
         return RTDBD_EXIT_SELFCHECK;   /* 保留段（不 close，避免 unlink） */
     }
 
-    init_timeout_scan();
+    init_timeout_scan(timeout_ns);
 
     unlink(sock_path);
 
@@ -1823,7 +2358,7 @@ int main(int argc, char** argv)
      * 握手（SO_ACCEPTCONN 队列溢出），导致负载端误判为客户端故障。
      * 与连接表容量对齐，避免 accept 队列成为并发上限。 */
     if (bind(listen_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 ||
-        listen(listen_fd, RTDBD_MAX_CLIENTS) < 0) {
+        listen(listen_fd, (int)g_max_clients) < 0) {
         perror("bind/listen");
         close(listen_fd);
         return RTDBD_EXIT_ERROR;
@@ -1832,23 +2367,37 @@ int main(int argc, char** argv)
     irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
                     "rtdbd listening on %s (instance=%s)", sock_path, instance);
 
-    rtdbd_conn_t* conns = g_conns;   /* 指向文件域全局表（避免占用栈帧） */
-    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_init(&conns[i]);
+    rtdbd_conn_t** conns = g_conns;
+    if (!conn_pool_init(initial_clients, initial_subs)) {
+        fprintf(stderr, "rtdbd: failed to preallocate connections\n");
+        close(listen_fd);
+        unlink(sock_path);
+        indurtdb_h_close(g_h);
+        return RTDBD_EXIT_SHM;
+    }
     while (!g_stop) {
+        /* v3.11：每轮推进快照流（最多 64 帧/连接），填满 POLLOUT 后由 poll 发送。
+         * 单次全量入队会把实时通知挤出队列；分轮推进保留 256 槽实时预算。 */
+        for (int i = 0; i < g_conn_high; ++i) {
+            rtdbd_conn_t* c = conns[i];
+            if (c && c->fd >= 0) conn_snapshot_pump(c, g_h);
+        }
+
         struct pollfd fds[RTDBD_MAX_CLIENTS + 1];
         fds[0].fd = listen_fd;
         fds[0].events = POLLIN;
         int nfds = 1;
 
-        for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-            if (conns[i].fd >= 0) {
-                fds[nfds].fd = conns[i].fd;
-                /* B2 背压：有待发通知时才监听 POLLOUT；否则纯 POLLIN。
-                 * 慢消费者 socket 缓冲满 → POLLOUT 不就绪 → 本连接不被 flush，
-                 * 不影响其他连接（消除 head-of-line 阻塞）。 */
-                fds[nfds].events = (conns[i].outq_count > 0)
-                                     ? (short)(POLLIN | POLLOUT)
-                                     : POLLIN;
+        for (int i = 0; i < g_conn_high; ++i) {
+            rtdbd_conn_t* c = conns[i];
+            if (c && c->fd >= 0) {
+                fds[nfds].fd = c->fd;
+                /* B2 背压：有待发通知时监听 POLLOUT；队首帧部分上线期间
+                 * 不再监听 POLLIN，避免读请求后直发响应插进未完成的帧流。 */
+                short ev = 0;
+                if (c->outq_count > 0) ev |= POLLOUT;
+                if (c->outq_sent == 0) ev |= POLLIN;
+                fds[nfds].events = ev;
                 nfds++;
             }
         }
@@ -1860,21 +2409,23 @@ int main(int argc, char** argv)
         }
 
         /* v3.10 T5：每轮检查 1 Hz 节拍；poll 超时（500ms）也会触发。 */
-        scan_timeouts(conns, RTDBD_MAX_CLIENTS, timeout_ns);
+        scan_timeouts(conns, g_conn_high, timeout_ns);
 
         /* SIGUSR1：dump 运行统计到 g_stats_file（含连接摘要）。
          * 在主循环内执行（非信号上下文），自检后落盘。 */
         if (g_dump_stats) {
             g_dump_stats = 0;
             if (rtdbd_self_check() != RTDBD_HEALTH_UNHEALTHY &&
-                conn_table_check(conns, RTDBD_MAX_CLIENTS) != 0) {
+                conn_table_check(conns, (int)g_max_clients) != 0) {
                 g_stats.health = RTDBD_HEALTH_UNHEALTHY;
             }
             FILE* fp = fopen(g_stats_file, "w");
             if (fp) {
                 uint32_t nc = 0;
-                for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i)
-                    if (conns[i].fd >= 0) nc++;
+                for (int i = 0; i < (int)g_max_clients; ++i) {
+                    rtdbd_conn_t* c = conns[i];
+                    if (c && c->fd >= 0) nc++;
+                }
                 fprintf(fp, "n_conns          = %u\n", nc);
                 rtdbd_stats_dump(fp);
                 fclose(fp);
@@ -1885,22 +2436,35 @@ int main(int argc, char** argv)
             int cfd = accept(listen_fd, NULL, NULL);
             if (cfd >= 0) {
                 int placed = 0;
-                for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-                    if (conns[i].fd < 0) {
-                        conn_init(&conns[i]);
-                        conns[i].fd = cfd;
+                uint32_t peer_pid = 0, peer_uid = 0;
+                if (peer_cred(cfd, &peer_pid, &peer_uid) != 0) {
+                    close(cfd);
+                    cfd = -1;
+                }
+                for (int i = 0; cfd >= 0 && i < (int)g_max_clients; ++i) {
+                    rtdbd_conn_t* c = conns[i];
+                    if (!c || c->fd < 0) {
+                        c = conn_slot_acquire(i);
+                        if (!c) continue;
+                        c->fd = cfd;
+                        c->peer_pid = peer_pid;
+                        c->peer_uid = peer_uid;
+                        c->peer_cred_ok = true;
+                        if (i + 1 > g_conn_high) g_conn_high = i + 1;
                         placed = 1;
                         break;
                     }
                 }
-                if (!placed) close(cfd);
+                if (!placed && cfd >= 0) close(cfd);
             }
         }
 
         for (int i = 1; i < nfds; ++i) {
             rtdbd_conn_t* conn = NULL;
-            for (int k = 0; k < RTDBD_MAX_CLIENTS; ++k) {
-                if (conns[k].fd == fds[i].fd) { conn = &conns[k]; break; }
+            int conn_idx = -1;
+            for (int k = 0; k < g_conn_high; ++k) {
+                rtdbd_conn_t* c = conns[k];
+                if (c && c->fd == fds[i].fd) { conn = c; conn_idx = k; break; }
             }
             if (!conn) continue;
 
@@ -1910,10 +2474,12 @@ int main(int argc, char** argv)
                 if (outq_flush(conn) != 0) {
                     close(fds[i].fd);
                     conn_init(conn);
+                    conn_note_closed(conn_idx);
                     continue;
                 }
             }
 
+            if (conn->outq_sent != 0) continue;
             if (!(fds[i].revents & POLLIN)) continue;
 
             rtdbd_ctx_t cx;
@@ -1922,9 +2488,11 @@ int main(int argc, char** argv)
             cx.audit      = &audit;
             cx.conn       = conn;
             cx.conns      = conns;
-            cx.nconns     = RTDBD_MAX_CLIENTS;
+            cx.nconns     = g_conn_high;
             cx.conf       = &conf;
             cx.max_subs   = max_subs;
+            cx.initial_subs = initial_subs;
+            cx.max_batch  = max_batch;
             cx.timeout_ns = timeout_ns;
             cx.req        = NULL;
             memset(&cx.resp, 0, sizeof(cx.resp));
@@ -1933,6 +2501,7 @@ int main(int argc, char** argv)
                 close(fds[i].fd);
                 conn_discard_outq(conn);   /* 队列内容计入 notify_drop，不静默丢 */
                 conn_init(conn);
+                conn_note_closed(conn_idx);
             }
         }
     }
@@ -1945,9 +2514,10 @@ int main(int argc, char** argv)
         while (deadline_ms > 0) {
             struct pollfd pfd[RTDBD_MAX_CLIENTS];
             int np = 0;
-            for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-                if (conns[i].fd >= 0 && conns[i].outq_count > 0) {
-                    pfd[np].fd = conns[i].fd;
+            for (int i = 0; i < (int)g_max_clients; ++i) {
+                rtdbd_conn_t* c = conns[i];
+                if (c && c->fd >= 0 && c->outq_count > 0) {
+                    pfd[np].fd = c->fd;
                     pfd[np].events = POLLOUT;
                     pfd[np].revents = 0;
                     np++;
@@ -1966,9 +2536,10 @@ int main(int argc, char** argv)
 
             for (int i = 0; i < np; ++i) {
                 if (!(pfd[i].revents & POLLOUT)) continue;
-                for (int k = 0; k < RTDBD_MAX_CLIENTS; ++k) {
-                    if (conns[k].fd == pfd[i].fd && conns[k].outq_count > 0) {
-                        (void)outq_flush(&conns[k]);   /* 失败已计 notify_send_fail */
+                for (int k = 0; k < (int)g_max_clients; ++k) {
+                    rtdbd_conn_t* c = conns[k];
+                    if (c && c->fd == pfd[i].fd && c->outq_count > 0) {
+                        (void)outq_flush(c);   /* 失败已计 notify_send_fail */
                         break;
                     }
                 }
@@ -1977,11 +2548,16 @@ int main(int argc, char** argv)
     }
 
     /* 排空超时仍未发完的：统一计入 notify_drop，不静默丢弃 */
-    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) conn_discard_outq(&conns[i]);
-
-    for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
-        if (conns[i].fd >= 0) close(conns[i].fd);
+    for (int i = 0; i < (int)g_max_clients; ++i) {
+        rtdbd_conn_t* c = conns[i];
+        if (c) conn_discard_outq(c);
     }
+
+    for (int i = 0; i < (int)g_max_clients; ++i) {
+        rtdbd_conn_t* c = conns[i];
+        if (c && c->fd >= 0) close(c->fd);
+    }
+    conn_pool_free();
     close(listen_fd);
     unlink(sock_path);
 

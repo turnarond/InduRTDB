@@ -31,7 +31,13 @@ typedef struct {
     uint64_t write_rejected;    /* 鉴权拒绝（policy deny） */
     uint64_t write_error;       /* do_write 返回非 0 且非 -99（类型不支持） */
     uint64_t notify_drop;       /* 通知丢弃数（队列满丢最旧 + 连接关闭丢弃待发队列） */
+    uint64_t notify_drop_live;  /* 实时通知因队列压力被丢弃的次数 */
+    uint64_t notify_drop_snapshot; /* 快照通知因队列压力被丢弃的次数（应为 0） */
     uint64_t notify_send_fail;  /* 出站发送失败（对端已关闭等） */
+    uint64_t n_batch_read_reqs; /* v3.11：BATCH_READ 请求数 */
+    uint64_t n_batch_write_reqs;/* v3.11：BATCH_WRITE 请求数 */
+    uint64_t conn_alloc_fail;   /* v3.11：连接槽分配失败 */
+    uint64_t subs_alloc_fail;   /* v3.11：订阅表构建/扩容失败 */
     uint64_t uptime_ns;         /* 最近一次快照时的进程启动至今纳秒 */
     int      health;            /* 最近一次自检结果：RTDBD_HEALTH_* */
 } rtdbd_stats_t;

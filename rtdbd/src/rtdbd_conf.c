@@ -11,6 +11,11 @@ void rtdbd_conf_init(rtdbd_conf_t* c)
 {
     if (!c) return;
     memset(c, 0, sizeof(*c));
+    c->max_clients          = RTDBD_CONF_DEFAULT_MAX_CLIENTS;
+    c->initial_clients      = RTDBD_CONF_DEFAULT_INITIAL_CLIENTS;
+    c->max_subs_per_conn    = RTDBD_CONF_DEFAULT_MAX_SUBS;
+    c->initial_subs_per_conn = RTDBD_CONF_DEFAULT_INITIAL_SUBS;
+    c->max_batch            = RTDBD_CONF_DEFAULT_MAX_BATCH;
 }
 
 static int is_ws(char ch) { return ch == ' ' || ch == '\t'; }
@@ -43,6 +48,43 @@ static int parse_u32(const char** pp, uint32_t* out)
     }
     *out = (uint32_t)v;
     *pp  = p;
+    return 0;
+}
+
+/* 标量容量值：只允许十进制数字，可带行尾注释。 */
+static int parse_u32_scalar(const char* v, uint32_t* out)
+{
+    const char* p = v;
+    skip_ws(&p);
+    if (parse_u32(&p, out) != 0) return -1;
+    skip_ws(&p);
+    if (*p == '#') return 0;
+    return (*p == '\0') ? 0 : -1;
+}
+
+static int parse_capacity_key(const char* key, const char* val, rtdbd_conf_t* c)
+{
+    uint32_t v;
+    if (parse_u32_scalar(val, &v) != 0) return -1;
+
+    if (strcmp(key, "max_clients") == 0) {
+        c->max_clients = v;
+        c->caps_present |= RTDBD_CONF_HAS_MAX_CLIENTS;
+    } else if (strcmp(key, "initial_clients") == 0) {
+        c->initial_clients = v;
+        c->caps_present |= RTDBD_CONF_HAS_INITIAL_CLIENTS;
+    } else if (strcmp(key, "max_subs_per_conn") == 0) {
+        c->max_subs_per_conn = v;
+        c->caps_present |= RTDBD_CONF_HAS_MAX_SUBS_PER_CONN;
+    } else if (strcmp(key, "initial_subs_per_conn") == 0) {
+        c->initial_subs_per_conn = v;
+        c->caps_present |= RTDBD_CONF_HAS_INITIAL_SUBS;
+    } else if (strcmp(key, "max_batch") == 0) {
+        c->max_batch = v;
+        c->caps_present |= RTDBD_CONF_HAS_MAX_BATCH;
+    } else {
+        return -1;
+    }
     return 0;
 }
 
@@ -134,6 +176,7 @@ int rtdbd_conf_load(rtdbd_conf_t* c, const char* path, uint32_t* err_line)
 
     char line[RTDBD_CONF_LINE_MAX];
     uint32_t lineno = 0;
+    int in_rtdbd = 0;
 
     while (fgets(line, sizeof(line), f)) {
         lineno++;
@@ -155,11 +198,43 @@ int rtdbd_conf_load(rtdbd_conf_t* c, const char* path, uint32_t* err_line)
         /* 只读 `points:` 之前的顶层键；之后的内容归核心解析器。 */
         if (strncmp(t, "points:", 7) == 0) break;
 
+        char* first = line;
+        while (is_ws(*first)) first++;
+        int indented = (first != line);
+
         char* colon = strchr(t, ':');
-        if (!colon) continue;   /* 非键值行忽略（与核心解析器一致的宽松） */
+        if (!colon) {
+            if (in_rtdbd && indented) {
+                if (err_line) *err_line = lineno;
+                fclose(f);
+                return -1;
+            }
+            continue;   /* 非键值行忽略（与核心解析器一致的宽松） */
+        }
         *colon = '\0';
         char* key = trim(t);
         char* val = trim(colon + 1);
+
+        if (in_rtdbd && !indented) in_rtdbd = 0;
+
+        if (strcmp(key, "rtdbd") == 0 && !indented) {
+            if (truncated || *val != '\0') {
+                if (err_line) *err_line = lineno;
+                fclose(f);
+                return -1;
+            }
+            in_rtdbd = 1;
+            continue;
+        }
+
+        if (in_rtdbd) {
+            if (!indented || parse_capacity_key(key, val, c) != 0) {
+                if (err_line) *err_line = lineno;
+                fclose(f);
+                return -1;
+            }
+            continue;
+        }
 
         if (strcmp(key, "partitions") == 0) {
             if (truncated || parse_partitions(val, c) != 0) {

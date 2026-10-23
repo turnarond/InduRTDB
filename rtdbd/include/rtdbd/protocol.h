@@ -71,16 +71,35 @@
  * 本任务只预留 opcode 常量，处理器与快照在任务 4 落地。 */
 #define RTDBD_OP_SET_SUBS    18u
 
+/* v3.11：批量 I/O、能力协商与快照完成屏障（协议主版本仍为 3，纯加法）。 */
+#define RTDBD_OP_BATCH_READ     19u /* 请求：count + point_ids[]；响应：逐项状态+值 */
+#define RTDBD_OP_BATCH_WRITE    20u /* 请求：count + write_req[]；响应：逐项状态 */
+#define RTDBD_OP_CAPS           21u /* 请求：无负载；响应：rtdbd_caps_t */
+#define RTDBD_OP_SNAPSHOT_DONE  22u /* 服务端→客户端：快照流完成屏障 */
+
 /* OP_LIST 的分区哨兵：请求 partition == 该值时列出**全部**分区点位。
  * 取 uint32 最大值（真实分区号几乎不可能用到该值；分区无表、任意值合法，
  * 但该哨兵是显式的“不过滤”语义，非普通分区）。 */
 #define RTDBD_PARTITION_ALL  0xFFFFFFFFu
 
-/* 单连接最大订阅点数（v3.10：32 → 1024，服务端按 --max-subs 再收紧） */
-#define RTDBD_SUB_MAX_PER_CONN 1024u
+/* 单连接最大订阅点数（v3.11：1024 → 10000，服务端按 --max-subs 再收紧） */
+#define RTDBD_SUB_MAX_PER_CONN 10000u
 #define RTDBD_SUB_MAX          RTDBD_SUB_MAX_PER_CONN   /* 兼容旧引用 */
 /* SET_SUBS 单次整组替换的 id 上限（与每连接上限一致） */
 #define RTDBD_SET_SUBS_MAX     RTDBD_SUB_MAX_PER_CONN
+/* 单次批量读写的点位数上限 */
+#define RTDBD_BATCH_MAX        1024u
+
+/* NOTIFY.reserved[1] 的 bit0：该帧属于 SET_SUBS 快照流。 */
+#define RTDBD_NOTIFY_F_SNAPSHOT 0x01u
+
+/* CAPS.flags */
+#define RTDBD_CAPS_F_BATCH_READ    0x01u
+#define RTDBD_CAPS_F_BATCH_WRITE   0x02u
+#define RTDBD_CAPS_F_SNAPSHOT_DONE 0x04u
+
+/* SNAPSHOT_DONE.flags */
+#define RTDBD_SNAPSHOT_DONE_F_COMPLETE 0x01u
 
 /* ---- 状态码 ---- */
 #define RTDBD_ST_OK               0u
@@ -88,6 +107,7 @@
 #define RTDBD_ST_DENIED           2u
 #define RTDBD_ST_INTERNAL         3u
 #define RTDBD_ST_NOT_FOUND        4u /* 按名未找到 / 越界 id */
+#define RTDBD_ST_NO_MEM           5u /* 有界分配失败，旧状态保持不变 */
 #define RTDBD_ST_NOT_IMPLEMENTED  9u
 
 /* ---- 点位类型（与 indurtdb.h 保持一致） ---- */
@@ -310,5 +330,47 @@ typedef struct {
 } rtdbd_health_t;
 
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_health_t) == 72, "rtdbd_health_t must be 72B");
+
+/* ---- v3.11：能力协商、批量 I/O 与快照完成屏障 ---- */
+
+typedef struct {
+    uint32_t proto_version;
+    uint32_t max_clients;
+    uint32_t initial_clients;
+    uint32_t max_subs_per_conn;
+    uint32_t initial_subs_per_conn;
+    uint32_t max_batch;
+    uint32_t flags;
+    uint32_t reserved;
+} rtdbd_caps_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_caps_t) == 32, "rtdbd_caps_t must be 32B");
+
+typedef struct {
+    uint32_t         point_id;
+    uint16_t         status;
+    uint16_t         reserved;
+    rtdbd_get_resp_t value;
+} rtdbd_batch_read_item_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_batch_read_item_t) == 72,
+                    "rtdbd_batch_read_item_t must be 72B");
+
+typedef struct {
+    uint32_t point_id;
+    uint16_t status;
+    uint16_t reserved;
+} rtdbd_batch_write_item_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_batch_write_item_t) == 8,
+                    "rtdbd_batch_write_item_t must be 8B");
+
+typedef struct {
+    uint32_t count;
+    uint32_t flags;
+} rtdbd_snapshot_done_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_snapshot_done_t) == 8,
+                    "rtdbd_snapshot_done_t must be 8B");
 
 #endif /* RTDBD_PROTOCOL_H_ */

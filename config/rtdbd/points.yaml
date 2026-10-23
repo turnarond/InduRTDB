@@ -1,9 +1,23 @@
 # InduRTDB 点位配置样例
 #
-# ⚠️ 解析器只读 `points:` 之后的内容。写在它前面的任何键
-#    （含 instance_id / max_points / max_subscribers）会被【静默忽略】。
-#    这三项只能通过命令行设置：
-#       --instance / --max-points / --max-subs
+# rtdbd 只解析 `points:` 之前的以下顶层键：
+#   rtdbd:            # v3.11 容量配置（可选）
+#   partitions:       # v3.9 分区白名单
+#   partition_alias:  # v3.9 分区别名
+# 其它键（instance_id / max_points 等）会被【静默忽略】。
+# `--instance` / `--max-points` 只能通过命令行设置；容量项可在 YAML 配置，
+# 且命令行优先级高于 YAML。
+#
+# v3.11 容量配置（写在 `points:` 之前）：
+#   rtdbd:
+#     max_clients: 128
+#     initial_clients: 32
+#     max_subs_per_conn: 10000
+#     initial_subs_per_conn: 1024
+#     max_batch: 1024
+# 交叉约束：1 <= initial_clients <= max_clients <= 128；
+#           1 <= initial_subs_per_conn <= max_subs_per_conn <= 10000；
+#           1 <= max_batch <= 1024。越界或不一致 → 启动失败（退出码 2）。
 #
 # 解析规则：
 #   注释        # 起始到行尾

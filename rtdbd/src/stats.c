@@ -81,5 +81,11 @@ void rtdbd_stats_dump(FILE* fp)
     fprintf(fp, "write_rejected    = %llu\n", (unsigned long long)g_stats.write_rejected);
     fprintf(fp, "write_error       = %llu\n", (unsigned long long)g_stats.write_error);
     fprintf(fp, "notify_drop       = %llu\n", (unsigned long long)g_stats.notify_drop);
+    fprintf(fp, "notify_drop_live  = %llu\n", (unsigned long long)g_stats.notify_drop_live);
+    fprintf(fp, "notify_drop_snapshot = %llu\n", (unsigned long long)g_stats.notify_drop_snapshot);
     fprintf(fp, "notify_send_fail  = %llu\n", (unsigned long long)g_stats.notify_send_fail);
+    fprintf(fp, "n_batch_read_reqs = %llu\n", (unsigned long long)g_stats.n_batch_read_reqs);
+    fprintf(fp, "n_batch_write_reqs= %llu\n", (unsigned long long)g_stats.n_batch_write_reqs);
+    fprintf(fp, "conn_alloc_fail   = %llu\n", (unsigned long long)g_stats.conn_alloc_fail);
+    fprintf(fp, "subs_alloc_fail   = %llu\n", (unsigned long long)g_stats.subs_alloc_fail);
 }
