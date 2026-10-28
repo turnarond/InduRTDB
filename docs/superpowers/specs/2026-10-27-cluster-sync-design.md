@@ -77,7 +77,7 @@
 
 ### 3.2 变化的来源（同步触发面）
 
-Master 端触发点收敛为一个挂接位置：**写路径的 delta/版本钩子**（候选实现点：`src/core/irt_point_manager.c` 的版本更新路径与 `irt_delta_open_append/append` 调用链；`irt_subscription.h` 的 `irt_sub_notify` 通知链）。同步器订阅与既有订阅客户端同级，不引入新扫描线程。
+Master 端触发点收敛为一个挂接位置：**写路径的 delta/版本钩子**（候选实现点：`src/core/irt_point_manager.c` 的版本更新路径与 `irt_delta_open_append/append` 调用链；`irt_subscription.h` 的 `irt_sub_notify` 通知链）。同步器订阅与既有订阅客户端同级，不引入新扫描线程。**值载荷说明**：delta 记录（`irt_delta_rec_t`）仅携带结构与元信息（点表增删改、命名等），不含点值字段；点值变化的值载荷经由既有 `irt_sub_notify` 通知链直接投递给同步器（与订阅客户端同级复用同一通知机制），结构变更与值变更共用同一触发点但载荷通道分离。
 
 同步三类事件：
 
@@ -161,10 +161,13 @@ rtdbd --sync-status                # 查询链路状态（连接、lag、full_sy
 
 - Master：HookBridge 把写路径 delta 记录转 push 到 SyncMgr 队列；SyncMgr 按 `flush_ms` 批量组帧：
   ```
-  delta 帧 = [ base_lsn | count | rec_1 ... rec_count ]
-  rec      = 现有 irt_delta_rec_t 直传（不重编码）
+delta 帧 = [ base_lsn | frame_seq | count | rec_1 ... rec_count ]
+rec      = 现有 irt_delta_rec_t POD 序列化直传（不重编码）。注意：`irt_delta_rec_t` 是 80B POD，
+           仅含 结构变化 元数据（op/point_id/type/access/name），不含 value 与 LSN——
+           值变化 payload 走 §3.2 的值同步通道（`irt_sub_notify` 链），base_lsn 取全量快照
+           底座时序号（§4.5），frame_seq 为本连接内单调递增帧序号（用于 standby 去重与 ack 水位）。
   ```
-- Standby：收帧后逐一 `irt_delta_* apply`（重用 `irt_delta_apply_fn`）；确认机制按"应用即 ack"，Master 每 K 帧记录远端水位。
+- Standby：收帧后逐一 `irt_delta_* apply`（重用 `irt_delta_apply_fn`）；确认机制按"应用即 ack"，Master 按 `frame_seq` 记录远端水位；standby 以 `frame_seq ≤ applied_frame_seq` 整帧去重。
 - 表结构变化帧先于其后的值变化帧（Master 端保证入队顺序；同一条 `irt_delta` 流中结构变更是定点事件）。
 
 ### 4.4 状态机（每 peer）
@@ -181,9 +184,9 @@ STEADY ──lag 超限 / 断链 / 结构大改──► FULL_SYNC
 
 **增量必须只认"同一底座"**：
 
-- `base_lsn`（快照底座时序号）是每条 delta 的前提；
+- `base_lsn`（快照底座时序号）是每条 delta 的前提；`base_lsn` 取自快照时的 LSN（在 `irt_seqlock` 读侧临界区内捕获，见 §4.8），因此增量流与快照底座严格对应；
 - Standby 端收到的任意 delta 帧 `base_lsn` 与本地"已应用底座 LSN"不一致 → 丢弃该帧之后全部流，立即回 `FULL_SYNC`；
-- Master 发送窗口内一旦触发快照重排产，当前增量远窗口落判失效 → 转 FULL_SYNC。
+- Master 发送窗口内一旦触发快照重排，当前增量发送窗口即刻作废 → 转 FULL_SYNC。
 
 这保证"standby 挂掉丢包重连"、"全量与增量竞态"都归拢为同一条规则，不增设补洞机制。
 
@@ -211,8 +214,8 @@ STEADY ──lag 超限 / 断链 / 结构大改──► FULL_SYNC
 
 ### 4.9 幂等
 
-- delta 帧带 `base_lsn` + 每条 `rec.lsn`（沿用 delta 记录内序），standby 端 dedupe：`rec.lsn ≤ applied_lsn` 直接跳过；
-- 全量 resume：Standby 记录"已收帧偏移 + base_lsn"，重连时若槽位仍有效可从偏移续传（可选项，初版可不做、整段重发）。
+- delta 帧带 `frame_seq`（沿用 §4.3 delta 帧格式），standby 端整帧级 dedupe：`frame_seq ≤ applied_frame_seq` 的帧整体跳过（ack 继续返回，保证重发收敛）；
+- 全量 resume：Standby 记录"已收帧偏移 + frame_seq（帧序号）"，重连时若槽位仍有效可从偏移续传（可选项，初版可不做、整段重发）。
 
 ### 4.10 Standby 读写策略
 
@@ -223,8 +226,8 @@ STEADY ──lag 超限 / 断链 / 结构大改──► FULL_SYNC
 ## 5 为什么增量快、边界在哪
 
 - **快**：同步路径不扫 SHM、不 diff 全表。每一笔变化是写路径上**一次 log**（`irt_delta_append` O(1) 摊还），同步面只是把日志流转发出去 + ack。与"订阅客户端"同一条变化链路，不增加写路径额外内存序/锁；批处理（count 帧）把网络往返摊薄到每 `flush_ms` 一次。
-- **边界 1（CPU/带宽）**：standby 端是重放成本——它要真的执行写入，不共享 Master 的 SHM；大批量结构变更或冬天全量时 standby 会成为落盘端瓶颈，ہن快照帧必须分批流式（不能整段加载）。
-- **边界 2（LSN 窗口）**：增量可用的前提是"Standby 的底座没变过去"。一旦全量重排产，窗口作废——**没有无限回放**，这是反压→全量兜底纪律的根源。
+- **边界 1（CPU/带宽）**：standby 端是重放成本——它要真的执行写入，不共享 Master 的 SHM；大批量结构变更或初次/定期全量时 standby 会成为落盘端瓶颈，快照帧必须分批流式（不能整段加载）。
+- **边界 2（LSN 窗口）**：增量可用的前提是"Standby 的底座没变过去"。一旦全量重排，窗口作废——**没有无限回放**，这是反压→全量兜底纪律的根源。
 - **边界 3（跨进程语义）**：时钟不参与排序（跳变不安全），排序只看 LSN/seq。
 
 ## 6 性能测试规格
@@ -244,7 +247,7 @@ STEADY ──lag 超限 / 断链 / 结构大改──► FULL_SYNC
 - 默认零行为变更：`sync:` 不配置时，代码路径 `if (!cfg.sync.enabled) skip` 全部旁路，无额外线程/句柄。
 - 公开 API 不变（G5）。
 - 配置文件向后兼容：`sync:` 是新增可选段，无 schema 破坏。
-- **多实例同一主机共存**：现有 rtdbd 固定 `sock_path` + 退出 `unlink(sock_path)` —— 一旦同机跑两个 rtdbd（方案 A 或调试），必须改成"实例名派生路径 + 退出只 unlink 自己的路径"；这部分改动即使选 B 传输也存在（IPC 面），需与方案解耦地做（`§10 留给实现者`）。
+- **多实例同一主机共存**：现有 rtdbd 固定 `sock_path` + 退出 `unlink(sock_path)` —— 一旦同机跑两个 rtdbd（方案 A 或调试），必须改成"每实例从实例名派生 IPC 路径（如 `~/.indurtdb/cluster/<instance>.sock`）+ 退出只 unlink 自己的路径"；这部分改动即使选 B 传输也存在（IPC 面），需与方案解耦地做（`§10 留给实现者`）。
 - README 声明更新：把"集群 / 跨节点同步"从不做列移到"有限支持（主备单向）"。
 
 ## 8 风险与回退
