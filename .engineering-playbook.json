@@ -1,0 +1,17 @@
+{
+  "name": "InduRTDB",
+  "skillVersion": "0.1.3",
+  "scriptsVersion": "0.1.3",
+  "playbookVersion": "1.3.0",
+  "profiles": ["cpp", "linux", "sylixos"],
+  "adoptedAt": "2026-11-06",
+  "mainBranch": "main",
+  "releaseBranchPrefix": "release/",
+  "workBranchPrefixes": ["feature/", "fix/", "docs/", "refactor/"],
+  "docDir": "docs",
+  "changeCardDir": "docs/02-需求文档/changes",
+  "reviewEvidenceDir": "docs/03-设计文档/reviews",
+  "gate": "scripts/check_all.sh",
+  "versionFile": "VERSION",
+  "changelog": "CHANGELOG.md"
+}

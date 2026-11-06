@@ -146,6 +146,9 @@ docker_cache/
 !.clang-format
 demo/demo
 
+# 工程规范采用标记 —— 必须入库（上方全局忽略了 *.json），AI 技能据此启用闸门
+!.engineering-playbook.json
+
 # 工具产物
 .omc/
 .codegraph/
