@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "feature": "v3.12-集群同步与VSOA双栈前端",
+  "review_evidence": "docs/03-设计文档/reviews/v3.12-集群同步与VSOA双栈前端-复评第二签.md",
+  "re_review_evidence": "docs/03-设计文档/reviews/v3.12-整改复验-独立第三签.md",
+  "hard_conditions": [
+    {
+      "id": "HC1",
+      "title": "4 类零实现依赖命令取证",
+      "closed": true,
+      "evidence": "docs/08-验证记录/v3.12-门禁整改TDD-RED证据.md",
+      "verified_by": "docs/03-设计文档/reviews/v3.12-整改复验-独立第三签.md",
+      "verified_at": "2026-11-07",
+      "note": "第三签裁定可置 closed=true（结论与整改 HC1）。实现：check_api_count.py 登记 D8 计划 API 台账、check_arch_layers.py 补 libvsoa ring、新增 check_dispatch_boundary.py 并挂 check_all.sh Stage 0.7b、版本四处对齐 3.11.0 消除 WARN；canary 自证 4→8 项（非 7）。【H-3 判据等价替换留痕】复评第二签字面要求「基准同步 56/118」，提请单 §2 由实现方改写为「target 56/118 + self-test 4 项」；第三签独立实测确认 wait_sync 未实现、机械改 56 会让门禁恒红，裁定第三条路 A′：当前生效基准 EXPECTED_*=55/117 与真实头文件一致，56/118 是 PLANNED_V2_APIS 派生的目标基准 target_*，属原字面判据的等价替换而非基准已同步。此改写经独立第三签明确确认，不得被后续复验误读；详见 13 号 §10.3 与 SDK 手册首段。guard_alive 覆盖不全属 H-2 纵深，已收紧并补判据自证。"
+    },
+    {
+      "id": "HC2",
+      "title": "整改条件 1/5/7/8 设计交付物",
+      "closed": true,
+      "evidence": "docs/03-设计文档/13-2026-11-06-集群同步边界与假设裁决.md",
+      "verified_by": "docs/03-设计文档/reviews/v3.12-整改复验-独立第三签.md",
+      "verified_at": "2026-11-07",
+      "note": "第三签裁定可置 closed=true：§5 T5 按 VSOA 主写入口重写、§6 UDS 行为零变化适用范围与 D9 统一、§6:92/§6:93 口径冲突消除、§7.1 SELECT/FIND_BY_NAME 取舍澄清、§11 实现期验收契约（IR/ctest/字段/校验器/台账 schema）；12 号 77+/79− 修订提交方式由用户 2026-11-07 书面拍板（保留现状、不覆盖不丢弃、未执行 git 写操作）。"
+    },
+    {
+      "id": "HC3",
+      "title": "B 段可证伪机械出口 + verdict_class 修正",
+      "closed": true,
+      "evidence": "docs/08-验证记录/v3.12-门禁整改TDD-RED证据.md",
+      "verified_by": "docs/03-设计文档/reviews/v3.12-HC3复验-独立第四签.md",
+      "verified_at": "2026-11-07",
+      "note": "第四签（独立第四签，证据 v3.12-HC3复验-独立第四签.md）裁定【通过，可置 closed=true】。第三签击穿的坏样本（verified_by=/etc/hostname、verified_at=9999-99-99）及新增三类（随手 md、2026-02-30/2026-13-01 非法日历、占位符/空模板）均经第四签独立 check_conditions 实测被挡，H-1 机械防自审自批子判据真闭环、无回归、无新假绿。第四签另发现 require_second 接受 reviewer_type=human 的残留盲区，已按第四签 H-2 纵深收窄：check_conditions 现额外要求 verified_by 证据 reviewer_type=ai-independent（TDD：新增 human-type 用例先红后绿；坏样本复验确认 human 伪证据被拒）。ir_snapshot/full_gate_log 实时性仍为 H-2 实现期纵深项。"
+    },
+    {
+      "id": "HC4",
+      "title": "A 段判据文字对齐",
+      "closed": true,
+      "evidence": "docs/03-设计文档/13-2026-11-06-集群同步边界与假设裁决.md",
+      "verified_by": "docs/03-设计文档/reviews/v3.12-整改复验-独立第三签.md",
+      "verified_at": "2026-11-07",
+      "note": "第三签裁定可置 closed=true：§10 表 P2/P4/P5 已改为布局/通道/调度模型级，真实 arm roundtrip、UDP 丢包注入、rtdbd UDS+SHM 写端到端 P99 显式移入 B 段；§10.1 有取证层级列与「不足以支撑 A 段各项判据全绿」诚实边界。H-4 已订正变更卡第 29 行 UDS P99 口径与 §10 表 B 段划分。"
+    }
+  ],
+  "b_segment": {
+    "numbers_ledger": "docs/08-验证记录/v3.12-B段数字落库.json",
+    "ir_snapshot": "build/ctest-v3.12-snapshot.txt",
+    "required_irs": [
+      "IR1_FullSnapshot",
+      "IR2_AuthDeny",
+      "IR3_DeferredQueue",
+      "IR4_PeersRuntime",
+      "IR5_NotifyDirection",
+      "IR6_RestartSemantics",
+      "IR7_PartitionConverge"
+    ],
+    "full_gate_log": "build/check-all-20261107-113830.log",
+    "note": "B 段 7 项全为 pending，须 rtdbd 实现 + 6 节点编排 + 现场取证。ir_snapshot = ctest --test-dir build -N 输出（当前 0 个 IR 用例）；full_gate_log 实存、含 ALL GREEN 且无 [SKIP] canary，判据只认内容不认时间戳。第三签风险点指出静态快照可被手写绕过，H-2 已记录为实现期纵深项（实时 ctest 复核 + 日志新鲜度）。即使 HC1–HC4 全部 closed，发布门仍须因 B 段 pending + IR 未注册而 FAIL——这是设计意图。"
+  }
+}

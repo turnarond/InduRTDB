@@ -100,6 +100,45 @@ typedef struct {
 IRTCLI_STATIC_ASSERT(sizeof(irtcli_point_info_t) == 76,
                      "irtcli_point_info_t must be 76B (与 rtdbd_point_info_t 一致)");
 
+/* ---- v3.12 M3.2 ④：集群成员运行时配置（OP_SET_PEERS/GET_PEERS） ----
+ * 与 rtdbd 协议 rtdbd_peer_t **逐字段布局一致（128B）**，但刻意在公共头里
+ * 重新声明：client.h 仅依赖 indurtdb.h，不得把 rtdbd/protocol.h 泄漏给集成方
+ * （与上面 irtcli_point_info_t 的隔离约定一致）。
+ */
+#define IRTCLI_PEER_MAX          32u
+#define IRTCLI_PEER_ADDR_MAX     64u
+#define IRTCLI_PEER_NODE_ID_MAX  32u
+
+/* 成员状态（lag / degraded 的裁决不在客户端）。 */
+#define IRTCLI_PEER_ST_UNKNOWN   0u
+#define IRTCLI_PEER_ST_JOINING   1u
+#define IRTCLI_PEER_ST_ACTIVE    2u
+#define IRTCLI_PEER_ST_DEGRADED  3u
+#define IRTCLI_PEER_ST_LOST      4u
+
+typedef struct {
+    char     addr[IRTCLI_PEER_ADDR_MAX];
+    char     node_id[IRTCLI_PEER_NODE_ID_MAX];
+    uint32_t state;
+    uint64_t boot_id;
+    uint64_t applied_offset;
+    uint32_t lag;
+} irtcli_peer_t;
+
+IRTCLI_STATIC_ASSERT(sizeof(irtcli_peer_t) == 128,
+                     "irtcli_peer_t must be 128B (与 rtdbd_peer_t 一致)");
+
+/* SET_PEERS：**整组替换**（服务端原子；非法成员返回错误且旧表不变）。
+ * peers 为 n 条（n <= IRTCLI_PEER_MAX）；n==0 表示清空成员表。
+ * 返回 IRTCLI_OK / IRTCLI_ERR_DENIED / IRTCLI_ERR_ARG / IRTCLI_ERR_IO 等。 */
+int irtcli_set_peers(irtcli_t* c, const irtcli_peer_t* peers, uint32_t n);
+
+/* GET_PEERS：out 为调用方缓冲（cap 条 irtcli_peer_t）。
+ * 服务端成员数 n > cap 时返回 IRTCLI_ERR_ARG（**不截断、不越界**），
+ * 且 *out_count = 0；成功返回 IRTCLI_OK 且 *out_count = n。 */
+int irtcli_get_peers(irtcli_t* c, irtcli_peer_t* out, uint32_t cap,
+                     uint32_t* out_count);
+
 /* 初始化。cap 为 0 时使用 IRTCLI_QUEUE_CAP_DEFAULT。返回 IRTCLI_OK 或负错误码 */
 int irtcli_init(irtcli_t* c, const char* sock_path, uint32_t cap,
                 irtcli_alert_fn alert, void* user_data);

@@ -51,6 +51,8 @@ export const api = {
     rest(`/api/points/${id}/rename`, { method: 'POST', body: JSON.stringify({ name }) }),
   // v3.6 运行日志
   getLogs: (maxN = 0) => rest(`/api/logs?max_n=${maxN}`),
+  // v3.12 M3.2 ⑥：集群成员运行时表
+  getPeers: () => rest('/api/peers'),
   // v3.6 命令终端
   runCmd: (cmd) => rest('/api/cmd', { method: 'POST', body: JSON.stringify({ cmd }) })
 }

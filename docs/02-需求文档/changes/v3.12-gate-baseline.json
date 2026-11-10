@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-07T03:11:06.112506+00:00",
+  "capturedAtNs": 1794021066112505725,
+  "artifacts": [
+    {
+      "path": "v3.12-集群同步与VSOA双栈前端.md",
+      "md5": "5b3e397c938cc50927d44da26150b754",
+      "size": 12301,
+      "mtimeNs": 1794020160221432015,
+      "birthNs": null
+    },
+    {
+      "path": "../../03-设计文档/reviews/v3.12-集群同步与VSOA双栈前端-复评第二签.md",
+      "md5": "1ad15c0a7b8fbe2e6b7fecfb1410f5c4",
+      "size": 21918,
+      "mtimeNs": 1794019857453175203,
+      "birthNs": null
+    },
+    {
+      "path": "../../03-设计文档/13-2026-11-06-集群同步边界与假设裁决.md",
+      "md5": "887c16a437ddf7ea4dde79057ece4893",
+      "size": 62905,
+      "mtimeNs": 1794020305389399545,
+      "birthNs": null
+    }
+  ]
+}

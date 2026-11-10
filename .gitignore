@@ -96,6 +96,12 @@ examples/build/
 .claude/
 .codebuddy/memory/
 
+# 外部 VSOA SDK 参考副本（用户 2026-11-07 拍板：不入库）
+# 仅为理解 libvsoa 1.8.0 总体架构，只读、代码禁改、不作构建依赖；
+# v3.12 构建目标是外部 libvsoa 1.9.1（VSOA_SDK_ROOT）。
+# 该目录含 246 个未跟踪文件，禁止 git add . 顺带带入。
+/vsoa/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -148,6 +154,13 @@ demo/demo
 
 # 工程规范采用标记 —— 必须入库（上方全局忽略了 *.json），AI 技能据此启用闸门
 !.engineering-playbook.json
+
+# 流程证据类 JSON —— 必须入库，否则冻结基线 / 条件闭环台账会被静默排除
+!docs/02-需求文档/changes/*-baseline.json
+!docs/02-需求文档/changes/*-conditions.json
+!docs/03-设计文档/reviews/*-conditions.json
+!docs/03-设计文档/reviews/v3.12-条件闭环台账.json
+!docs/08-验证记录/v3.12-B段数字落库.json
 
 # 工具产物
 .omc/

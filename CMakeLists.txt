@@ -1,6 +1,6 @@
 # InduRTDB - Industrial Real-Time Database (pure C core)
 cmake_minimum_required(VERSION 3.15)
-project(InduRTDB VERSION 3.10.0 LANGUAGES C CXX)
+project(InduRTDB VERSION 3.11.0 LANGUAGES C CXX)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -56,6 +56,40 @@ if(INDURTDB_ENABLE_COVERAGE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --coverage -O0 -g")
     set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} --coverage")
     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} --coverage")
+endif()
+
+# --- VSOA 双栈前端（v3.12 M1.3，doc 13 §95「VSOA 接入形态 = ③ 双栈过渡」）---
+# 默认 OFF：干净树无需外部 SDK 即可构建（§95 硬要求）。
+# 开启时必须给出 VSOA_SDK_ROOT（libvsoa 树根），并在配置期做**硬探测**：
+# 头/库缺失或版本不符一律 FATAL_ERROR，绝不静默降级为「以为接了 VSOA 实际没接」。
+option(INDURTDB_ENABLE_VSOA "Build rtdbd with VSOA dual-stack frontend" OFF)
+set(VSOA_SDK_ROOT "" CACHE PATH "libvsoa SDK root (contains include/libvsoa and lib/linux/x86_64)")
+set(VSOA_LIB_SUBDIR "lib/linux/x86_64" CACHE STRING "VSOA library subdir under VSOA_SDK_ROOT")
+if(INDURTDB_ENABLE_VSOA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT VSOA_SDK_ROOT)
+        message(FATAL_ERROR
+            "INDURTDB_ENABLE_VSOA=ON 需要 -DVSOA_SDK_ROOT=<libvsoa 树根>；"
+            "干净树默认构建请保持 INDURTDB_ENABLE_VSOA=OFF（doc 13 §95）。")
+    endif()
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+        execute_process(
+            COMMAND ${Python3_EXECUTABLE}
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_vsoa_sdk.py
+                    --root ${VSOA_SDK_ROOT} --json
+            OUTPUT_VARIABLE _vsoa_probe
+            ERROR_VARIABLE _vsoa_probe_err
+            RESULT_VARIABLE _vsoa_probe_rc
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        if(NOT _vsoa_probe_rc EQUAL 0)
+            message(FATAL_ERROR
+                "VSOA SDK 探测失败（不得静默降级）：\n${_vsoa_probe}\n${_vsoa_probe_err}")
+        endif()
+        message(STATUS "VSOA SDK 探测通过：${VSOA_SDK_ROOT}")
+    else()
+        message(FATAL_ERROR
+            "INDURTDB_ENABLE_VSOA=ON 需要 Python3 解释器运行 scripts/check_vsoa_sdk.py 硬探测。")
+    endif()
 endif()
 
 include(GNUInstallDirs)

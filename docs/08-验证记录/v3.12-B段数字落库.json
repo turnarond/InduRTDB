@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "feature": "v3.12-集群同步与VSOA双栈前端",
+  "status": "pending",
+  "note": "B 段实现/现场验收数字落库。7 项均为 pending，须 rtdbd 实现、6 节点编排与现场取证后逐项填 fields 并由独立复验置 measured；字段与 ctest 映射见 13 号 §11。当前空表是诚实留白，不得视为已完成。",
+  "items": [
+    {"id": "P3", "status": "pending", "ctest_case": "Gate_T3_WallClock", "fixture": "tests/integration/test_vsoa_snapshot.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P6", "status": "pending", "ctest_case": "IR3_DeferredQueue", "fixture": "tests/integration/test_vsoa_reconnect.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P7", "status": "pending", "ctest_case": "IR2_AuthDeny", "fixture": "tests/integration/test_vsoa_auth.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P8", "status": "pending", "ctest_case": "IR4_PeersRuntime", "fixture": "tests/integration/test_vsoa_peers.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P9", "status": "pending", "ctest_case": "IR5_NotifyDirection", "fixture": "tests/integration/test_vsoa_notify.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P10", "status": "pending", "ctest_case": "IR7_PartitionConverge", "fixture": "tests/integration/test_vsoa_partition.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
+    {"id": "P11", "status": "pending", "ctest_case": "IR6_RestartSemantics", "fixture": "tests/integration/test_vsoa_restart.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""}
+  ]
+}

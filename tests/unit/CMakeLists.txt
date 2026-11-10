@@ -53,6 +53,33 @@ if(TARGET test_c_mirror)
         INDURTDB_TOOLS_DIR="${PROJECT_SOURCE_DIR}/tools")
 endif()
 
+# M1.1：传输无关会话 + 延迟动作队列单测。模块源文件在 GREEN 阶段接入
+# （RED 阶段故意不接，使「实现缺失」表现为链接失败）。
+if(TARGET test_c_session)
+    target_sources(test_c_session PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
+    target_include_directories(test_c_session PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session)
+endif()
+
+# M1：双前端等价协议层单测直接编译 rtdbd/src/dispatch/rtdbd_dispatch.c
+# （纯叶子模块，仅依赖 libc + protocol.h，无 transport/VSOA 耦合）。
+if(TARGET test_c_dispatch)
+    target_sources(test_c_dispatch PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
+    target_include_directories(test_c_dispatch PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch)
+endif()
+
 # T8 诊断工具集成测试：告知工具目录、harness 路径与源码根
 if(TARGET test_c_diag)
     target_compile_definitions(test_c_diag PRIVATE

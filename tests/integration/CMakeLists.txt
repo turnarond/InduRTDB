@@ -227,3 +227,207 @@ if(TARGET rtdbd)
     add_dependencies(test_rtdbd_delta rtdbd)
     add_test(NAME test_rtdbd_delta COMMAND test_rtdbd_delta)
 endif()
+
+# ---- v3.12 M3.2 ②：UDS 23/24 端到端 ----
+if(TARGET rtdbd)
+    add_executable(test_rtdbd_peers test_rtdbd_peers.cpp)
+    target_link_libraries(test_rtdbd_peers PRIVATE GTest::gtest GTest::gtest_main)
+    target_include_directories(test_rtdbd_peers PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_rtdbd_peers PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    set_target_properties(test_rtdbd_peers PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_rtdbd_peers rtdbd)
+    add_test(NAME test_rtdbd_peers COMMAND test_rtdbd_peers)
+endif()
+
+# ---- v3.12 M3.3：成员表进程级单例 + --sync-self-addr 接线 ----
+add_executable(test_peers_global test_peers_global.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c)
+target_include_directories(test_peers_global PRIVATE
+    ${PROJECT_SOURCE_DIR}/rtdbd/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/src
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
+target_link_libraries(test_peers_global PRIVATE GTest::gtest GTest::gtest_main)
+set_target_properties(test_peers_global PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME test_peers_global COMMAND test_peers_global)
+
+if(TARGET rtdbd)
+    add_executable(test_sync_self_addr test_sync_self_addr.cpp)
+    target_include_directories(test_sync_self_addr PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_sync_self_addr PRIVATE
+        _GNU_SOURCE RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    target_link_libraries(test_sync_self_addr PRIVATE GTest::gtest GTest::gtest_main)
+    set_target_properties(test_sync_self_addr PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_sync_self_addr rtdbd)
+    add_test(NAME test_sync_self_addr COMMAND test_sync_self_addr)
+endif()
+
+# ---- v3.12 M3.2 ④：irtcli SDK / CLI 成员管控通道（真实 rtdbd 往返）----
+if(TARGET rtdbd AND TARGET irtcli AND TARGET irtcli_cli)
+    add_executable(test_irtcli_peers test_irtcli_peers.cpp)
+    target_link_libraries(test_irtcli_peers PRIVATE
+        GTest::gtest GTest::gtest_main irtcli)
+    target_include_directories(test_irtcli_peers PRIVATE
+        ${PROJECT_SOURCE_DIR}/client/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include)
+    target_compile_definitions(test_irtcli_peers PRIVATE
+        _GNU_SOURCE
+        RTDBD_BIN="$<TARGET_FILE:rtdbd>"
+        IRTCLI_CLI_BIN="$<TARGET_FILE:irtcli_cli>")
+    set_target_properties(test_irtcli_peers PROPERTIES
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_irtcli_peers rtdbd irtcli_cli)
+    add_test(NAME test_irtcli_peers COMMAND test_irtcli_peers)
+endif()
+
+# ---- v3.12 M3.2 ③：延迟动作队列循环尾执行器（纯逻辑，默认构建即可运行）----
+# 用例名固定 IR3_DeferredQueue（§11.1 required_irs 之一，不得改名）。
+add_executable(IR3_DeferredQueue IR3_DeferredQueue.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_actions.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
+target_include_directories(IR3_DeferredQueue PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/src
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
+target_link_libraries(IR3_DeferredQueue PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(IR3_DeferredQueue PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME IR3_DeferredQueue COMMAND IR3_DeferredQueue)
+
+# ---- v3.12 M3/IR4：成员运行时表语义（纯逻辑，默认构建即可运行）----
+# 用例名固定为 IR4_PeersRuntime（§11.1 required_irs 之一，不得改名）。
+add_executable(IR4_PeersRuntime IR4_PeersRuntime.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c)
+target_include_directories(IR4_PeersRuntime PRIVATE
+    ${PROJECT_SOURCE_DIR}/rtdbd/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
+target_link_libraries(IR4_PeersRuntime PRIVATE GTest::gtest GTest::gtest_main)
+set_target_properties(IR4_PeersRuntime PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME IR4_PeersRuntime COMMAND IR4_PeersRuntime)
+
+# ---- v3.12 M1.3c：VSOA 端到端联调用例（server 子进程 + client 父进程）----
+# 仅在 INDURTDB_ENABLE_VSOA=ON 时注册 —— 干净树默认构建不含此用例，也不引入
+# 任何 SDK 依赖（doc 13 §95：干净树默认 OFF 仍可构建）。
+if(INDURTDB_ENABLE_VSOA)
+    add_executable(test_vsoa_e2e test_vsoa_e2e.cpp
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+    target_include_directories(test_vsoa_e2e PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_libraries(test_vsoa_e2e PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_e2e PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    # DT_RPATH（--disable-new-dtags）：libvsoa-server.so 依赖 parser/json，
+    # DT_RUNPATH 不参与传递依赖查找，会导致运行期 not found。
+    target_link_options(test_vsoa_e2e PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_e2e PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME test_vsoa_e2e COMMAND test_vsoa_e2e)
+
+    # ---- v3.12 M3.3 方案 A：单线程统一 poll 主循环（真实 rtdbd 双栈可达）----
+    add_executable(test_vsoa_main_loop test_vsoa_main_loop.cpp)
+    target_include_directories(test_vsoa_main_loop PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_compile_definitions(test_vsoa_main_loop PRIVATE
+        _GNU_SOURCE RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    target_link_libraries(test_vsoa_main_loop PRIVATE
+        GTest::gtest GTest::gtest_main
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_main_loop PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(test_vsoa_main_loop PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_main_loop PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_vsoa_main_loop rtdbd)
+    add_test(NAME test_vsoa_main_loop COMMAND test_vsoa_main_loop)
+
+    # ---- v3.12 M3.3 切片 C：VSOA /sync/peers + role=sync_admin ----
+    add_executable(test_vsoa_peers_admin test_vsoa_peers_admin.cpp)
+    target_include_directories(test_vsoa_peers_admin PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_compile_definitions(test_vsoa_peers_admin PRIVATE
+        _GNU_SOURCE RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    target_link_libraries(test_vsoa_peers_admin PRIVATE
+        GTest::gtest GTest::gtest_main
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_peers_admin PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(test_vsoa_peers_admin PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_peers_admin PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_vsoa_peers_admin rtdbd)
+    add_test(NAME test_vsoa_peers_admin COMMAND test_vsoa_peers_admin)
+
+    # ---- v3.12 M2：6 节点编排 + 故障注入 harness（IR1–IR7 的基础设施）----
+    add_executable(test_vsoa_cluster test_vsoa_cluster.cpp
+        vsoa_cluster_harness.cpp
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+    target_include_directories(test_vsoa_cluster PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_libraries(test_vsoa_cluster PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_cluster PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(test_vsoa_cluster PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_cluster PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME test_vsoa_cluster COMMAND test_vsoa_cluster)
+endif()

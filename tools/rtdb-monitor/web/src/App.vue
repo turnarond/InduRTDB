@@ -15,6 +15,9 @@
         <el-menu-item index="logs">
           <el-icon><Document /></el-icon><span>运行日志</span>
         </el-menu-item>
+        <el-menu-item index="peers">
+          <el-icon><Connection /></el-icon><span>集群成员</span>
+        </el-menu-item>
       </el-menu>
     </el-aside>
 
@@ -101,6 +104,7 @@
         </div>
         <TerminalView v-else-if="view === 'terminal'" @changed="refresh" />
         <LogsView v-else-if="view === 'logs'" />
+        <PeersView v-else-if="view === 'peers'" />
         <div v-else class="placeholder">
           <el-result icon="info" :title="placeholderTitle" sub-title="该功能规划中，需要 rtddb 后端协议扩展（Phase 2）。">
             <template #extra>
@@ -151,12 +155,13 @@
 
 <script setup>
 import { ref, reactive, onMounted, onBeforeUnmount, computed } from 'vue'
-import { Refresh, Histogram, Collection, Monitor, Document } from '@element-plus/icons-vue'
+import { Refresh, Histogram, Collection, Monitor, Document, Connection } from '@element-plus/icons-vue'
 import { api, RtdbSocket } from './api.js'
 import PointTable from './components/PointTable.vue'
 import PointDetailDrawer from './components/PointDetailDrawer.vue'
 import TerminalView from './components/TerminalView.vue'
 import LogsView from './components/LogsView.vue'
+import PeersView from './components/PeersView.vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
 const view = ref('points')

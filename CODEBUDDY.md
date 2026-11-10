@@ -8,7 +8,7 @@ InduRTDB 是**纯 C11 实现的工业实时数据库**，定位为边缘控制�
 |---|---|
 | 跨进程共享内存点位存储（低延迟、确定性）、工业语义（quality/timestamp/unit/access）、订阅、崩溃自愈 | 南向设备驱动（Modbus/OPC UA/S7）、北向 SCADA 对接、持久化/历史库、集群同步 |
 
-它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 **v3.7.0**（README / `VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏四处一致）。
+它作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的底层数据层被集成；北向与持久化能力复用 node-server，不重复实现。当前版本 **v3.11.0**（用户 2026-11-07 拍板；`VERSION` / CMake `project(VERSION)` / `indurtdb.h` 版本宏 / `CHANGELOG.md` 四处一致）。
 
 ## 常用命令
 
@@ -22,7 +22,7 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j$(nproc)
 ```bash
 cd build && ctest --output-on-failure -j$(nproc)
 ```
-需先安装 GTest（`find_package(GTest REQUIRED)`）。**37 个 ctest 用例**（25 单元 + 12 集成），gtest 层面共 **266 个用例**。引用测试数量时须说明是哪一层——这两个数字不是同一口径，别混用。
+需先安装 GTest（`find_package(GTest REQUIRED)`）。**42 个 ctest 用例**（29 单元 `test_c_*` + 12 集成 + 1 个 `Gate.ApiCountMatches`），gtest 层面共 **381 个用例**（2026-11-06 实测，`ctest --test-dir build -N` 与各二进制 `--gtest_list_tests`）。引用测试数量时须说明是哪一层——这两个数字不是同一口径，别混用；新增测试文件后需重新 cmake 才会被 `file(GLOB)` 收录，数量随之变化。
 
 **运行单个测试**
 ```bash
@@ -220,5 +220,7 @@ irt_header_t (128B, aligned 128)
 - **长稳视角**：评审与测试须考虑内存泄漏、句柄（fd/shm）泄漏等长期运行问题。
 - **根因定位**：测试失败要追问到业务根因与技术约束根因（Linux 用 gdb，Windows 用 cdb 或转 WSL），禁止循环打补丁；修复后清理临时补丁以免误导。
 - **不越界修他人问题**：排查可以，最终修复以 issue 形式提给对应工程/SDK/文档供应商。
+- **外部 SDK 参考副本 `vsoa/`**：仓内 `vsoa/` 是上游 VSOA SDK 源码（`vsoa/vsoa/libs/libvsoa/vsoa_version.h` 为 **libvsoa 1.8.0**），用途**仅为理解 VSOA 总体架构**（核心协议 + 多语言绑定 + TCP 可靠/UDP 快速双通道 + parser/hpserv/position/mware/regulator），**只读参考、代码禁止改动，不作构建依赖**；其缺陷与需求提 Issue 给 SDK 供应商，不在本仓打补丁。`vsoa/` 内文档如确需修正可改，但须单独提交并注明上游版本；本仓 `docs/` 文档按既有规则同步。
+- **VSOA 构建目标（2026-11-06 冻结）**：v3.12 采用 **libvsoa 1.9.1**，路径 `/home/yanchaodong/work/acoinfo/vsoa_framework`（`VSOA_SDK_ROOT`）；相比 1.8.0 多出 `vsoa_mem.h` 内存池配置与 `VSOA_FLAG_MEM*`，`hpserv/position/mware/regulator/parallel/syncer` 两版齐备。引用 SDK 事实时必须注明版本。仓内 `vsoa/` 为 246 个文件的只读参考副本，**用户 2026-11-07 拍板不入库**，已由 `.gitignore` 的 `/vsoa/` 排除；禁止 `git add .` 顺带带入。
 - **重构需讨论**：当改动与整体架构冲突大、别扭或影响面广时，先讨论再重构。
 - **工具集**：按需建设配套工具，优先做成 Python 系列工程（测试/部署/冒烟验证），工具自身要有工程架构；新工具须支持 `--json`、自带 `--self-test`，并挂进 `scripts/check_all.sh` 的 Stage 链，禁止散落一次性脚本。

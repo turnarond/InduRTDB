@@ -279,6 +279,50 @@ RTDBD_STATIC_ASSERT(sizeof(rtdbd_create_req_t) == 76, "rtdbd_create_req_t must b
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_delete_req_t) == 8, "rtdbd_delete_req_t must be 8B");
 RTDBD_STATIC_ASSERT(sizeof(rtdbd_rename_req_t) == 72, "rtdbd_rename_req_t must be 72B");
 
+/* ---- v3.12 M3.2：集群成员管控（尾部可加，协议主版本仍为 3） ----
+ * 裁决 doc 13 §8.3-6 / §9.1：OP_SET_PEERS(23) / OP_GET_PEERS(24) 为**纯可加项**，
+ * 既有 22 个 opcode 与 libindurtdb.a ABI 一字不改。沿用 :74-78 的 v3.11 范式。
+ * rtdbd_peer_t 原在 rtdbd/src/cluster/rtdbd_peer_table.h，按方案评审结论提升为
+ * **协议单一真源**（本文件）；irtcli 公共头按既有惯例重新声明同构结构对外暴露，
+ * 本头仍不随 SDK 安装（顶层 CMakeLists.txt 只装 include/indurtdb 与 client/include/irtcli）。
+ */
+#define RTDBD_OP_SET_PEERS 23u
+#define RTDBD_OP_GET_PEERS 24u
+
+#define RTDBD_PEER_MAX          32u
+#define RTDBD_PEER_ADDR_MAX     64u
+#define RTDBD_PEER_NODE_ID_MAX  32u
+
+/* 成员状态（lag / degraded 语义留字段，不在本协议裁决） */
+#define RTDBD_PEER_ST_UNKNOWN   0u
+#define RTDBD_PEER_ST_JOINING   1u
+#define RTDBD_PEER_ST_ACTIVE    2u
+#define RTDBD_PEER_ST_DEGRADED  3u
+#define RTDBD_PEER_ST_LOST      4u
+
+/* 单条成员 128B：addr[64] + node_id[32] + state(4) + 隐式填充(4)
+ * + boot_id(8) + applied_offset(8) + lag(4) + 尾部填充(4)。
+ * 显式填充由镜像侧用 `4x` 复刻，保证 C/Python 字节布局一致。 */
+typedef struct {
+    char     addr[RTDBD_PEER_ADDR_MAX];
+    char     node_id[RTDBD_PEER_NODE_ID_MAX];
+    uint32_t state;
+    uint64_t boot_id;
+    uint64_t applied_offset;
+    uint32_t lag;
+} rtdbd_peer_t;
+
+/* SET_PEERS 请求 / GET_PEERS 响应共用：count + 显式 reserved(4，保证 peers 8 对齐)
+ * + 定长 32 条。sizeof = 8 + 32*128 = 4104B。 */
+typedef struct {
+    uint32_t     count;
+    uint32_t     reserved;
+    rtdbd_peer_t peers[RTDBD_PEER_MAX];
+} rtdbd_peers_resp_t;
+
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_peer_t) == 128, "rtdbd_peer_t must be 128B");
+RTDBD_STATIC_ASSERT(sizeof(rtdbd_peers_resp_t) == 4104, "rtdbd_peers_resp_t must be 4104B");
+
 /* ---- v3.6 运行日志 ---- */
 
 /* 单条日志消息上限（含结尾 '\0'） */

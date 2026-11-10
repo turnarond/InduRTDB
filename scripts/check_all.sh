@@ -94,7 +94,7 @@ else
   run_stage build bash -c "cmake -S . -B '$BUILD_DIR' -DCMAKE_BUILD_TYPE=Release && cmake --build '$BUILD_DIR' -j$JOBS" || exit 1
 fi
 
-# 0.4 单元 + 集成测试（37 个 ctest 用例）
+# 0.4 单元 + 集成测试（2026-11-06 实测 42 个 ctest 用例）
 run_stage ctest bash -c "cd '$BUILD_DIR' && ctest --output-on-failure -j$JOBS" || exit 1
 
 # 0.5 API 计数（头文件与 SDK 手册声明一致）
@@ -103,10 +103,16 @@ run_stage api_count python3 scripts/check_api_count.py || exit 1
 # 0.6 探针自证：检查器用例 + 守卫判据自证（防「判据被改坏仍恒绿」）
 run_stage self_test bash -c "python3 scripts/test_checkers.py \
   && python3 scripts/check_version_sync.py --self-test \
-  && python3 scripts/check_arch_layers.py --self-test" || exit 1
+  && python3 scripts/check_arch_layers.py --self-test \
+  && python3 scripts/check_dispatch_boundary.py --self-test \
+  && python3 scripts/check_api_count.py --self-test \
+  && python3 scripts/check_release_conditions.py --self-test" || exit 1
 
 # 0.7 架构分层方向（机制 C）
 run_stage arch_layers python3 scripts/check_arch_layers.py || exit 1
+
+# 0.7b dispatch 层传输无关性（机制 D：符号级，分层边检查抓不到）
+run_stage dispatch_boundary python3 scripts/check_dispatch_boundary.py || exit 1
 
 # 0.8 门禁金丝雀：坏样本必须被抓出（机制 B），全量模式必跑
 if [[ $QUICK -eq 1 ]]; then

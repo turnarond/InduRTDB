@@ -1,8 +1,12 @@
 # InduRTDB C API 参考手册
 
-**版本**: 3.10.0 | **更新日期**: 2026-10-21 | **变更**: v3.10 为 rtdbd/监控台规模化增强，**无公开 C API 变更**；公开 API 仍为 **117 个**：v1 全局函数 **62** + v2 句柄函数 **55**。
+**版本**: 3.11.0 | **更新日期**: 2026-11-07 | **变更**: v3.11 为 1 万订阅与批量 I/O，**无公开 C API 变更**；公开 API 仍为 **117 个**：v1 全局函数 **62** + v2 句柄函数 **55**。
 
 > 此前本段长期记为「90 个 = 47 + 43」，而 v3.7 主题 A/B 已新增多个 API。该计数是 `scripts/check_api_count.py`（CI 第一道门禁）的基准，两者失配会让流水线在 10 秒内直接失败。改动 API 时须同步三处：本文首段 · 该脚本 `EXPECTED_*` · 其注释中的版本标注。
+>
+> **v3.12 计划增量（D8，尚未实现）**：`indurtdb_h_wait_sync()` 已在 `13` 号裁决 §9.1 冻结为新增公开 API，但实现尚未开工（第二签硬条件未闭环前禁止写代码）。落地后计数变为 **118 = 62 + 56**，须同步本文首段、`docs/06-开发规划` 与 `check_api_count.py` 的 `EXPECTED_*`；该脚本已用 `PLANNED_V2_APIS` 台账显式登记目标基准 56/118，并在「API 已落地但基准未同步」时强制 FAIL，防止静默漂移。
+>
+> **判据等价替换（2026-11-07 独立第三签裁定 A′，见 `reviews/v3.12-整改复验-独立第三签.md`）**：复评第二签硬条件 1 的字面要求为「`check_api_count.py` 基准同步 56/118」。**当前生效基准 `EXPECTED_*` 仍为 55/117**（与真实头文件一致），56/118 是 `PLANNED_V2_APIS` 派生登记的**目标基准** `target_*`，不是已同步的基准。第三签独立实测确认：该 API 尚未实现（`grep wait_sync` 0 命中），机械改 `EXPECTED_V2=56` 会让门禁恒红，违反「门禁必须可证伪、不允许恒红或恒绿」；故裁定此为**原字面判据的等价替换**，非「基准已同步」。该替换及提请单 §2 中「由实现方改写的复验判据」已在条件台账 HC1 note 与 13 号 §10.3 留痕，避免后续复验误读。
 
 **头文件**: `<indurtdb/indurtdb.h>`
 **链接**: `-lindurtdb -lpthread -lrt`
@@ -808,6 +812,120 @@ irtcli [--sock PATH] [--partition N] [--help] ( select N | find NAME | list ) [.
 ```
 
 命令在同一连接上从左到右顺序执行；退出码映射 `OK=0 / ARG=1 / FULL=2 / IO=3 / DENIED=4 / PROTO=5 / NOT_FOUND=6`。
+
+### v3.12 M3.2：集群成员运行时配置（`OP_SET_PEERS` / `OP_GET_PEERS`）
+
+UDS 协议**尾部可加**的 23/24 两个 opcode（既有 22 个 opcode 与 `libindurtdb.a` ABI 一字不改，协议主版本仍为 3）。成员表在服务端为进程级定长表（32 条、零动态内存），`SET_PEERS` 为**原子整组替换**：失败时旧表保持不变。
+
+| 函数 | 说明 |
+|---|---|
+| `irtcli_set_peers(c, peers, n)` | 整组替换成员表（`n <= IRTCLI_PEER_MAX`，`n=0` 清空）。返回 `IRTCLI_OK` / `ERR_DENIED` / `ERR_ARG` 等 |
+| `irtcli_get_peers(c, out, cap, out_count)` | 取当前成员表；`n > cap` 返回 `ERR_ARG`（**不截断、不越界**），成功时 `*out_count = n` |
+
+成员结构（与 `rtdbd_peer_t` 逐字段布局一致，**128B**；公共头仅依赖 `indurtdb.h`，**不泄漏** `rtdbd/protocol.h`；`client.c` 内有 `offsetof` 编译期断言锁死两侧布局）：
+
+```c
+typedef struct {
+    char     addr[64];
+    char     node_id[32];
+    uint32_t state;           /* 0 unknown / 1 joining / 2 active / 3 degraded / 4 lost */
+    uint64_t boot_id;
+    uint64_t applied_offset;
+    uint32_t lag;
+} irtcli_peer_t;
+```
+
+线格式 `rtdbd_peers_resp_t` = `count(4) + reserved(4) + peers[32] * 128` = **4104B**，跨语言 Python 镜像 `rtdb_client.py` 的 `PEERS_HDR` / `PEER` 由 `test_c_mirror.cpp` 做真实尺寸交叉比对。
+
+命令行（同一连接上顺序执行）：
+
+```
+irtcli --sock PATH peers set 2 10.0.0.1 10.0.0.2 peers get
+```
+
+`peers get` 每行输出 `addr node_id state`；退出码沿用上文映射。Python 侧对应 `RtdbClient.set_peers(list[dict])` / `RtdbClient.get_peers()`。
+
+**本节点地址（v3.12 M3.3 接线）**：`rtdbd --sync-self-addr <IPv4>` 指定本节点地址；
+`SET_PEERS` 的成员集合中若含该地址，服务端返回 `BAD_REQUEST` 且**旧表不变**
+（§8.3-6「拒绝自地址」）。未配置该参数时不校验自地址。地址须为合法 IPv4 点分
+十进制，非法值在启动期即被拒（`rtdbd` 退出码 1）。成员表与 self_addr 均为
+**进程级单例**（`rtdbd/src/cluster/rtdbd_peers_global.{h,c}`），UDS 与 VSOA 两前端
+共用同一张表，避免各自持有副本。Python 侧 `RtdbClient.set_peers` / CLI
+`irtcli peers set` 均遵守同一拒绝语义。
+
+**UDS / VSOA 双栈启动（v3.12 M3.3 方案 A，§8.3-3 题 3）**：仅当构建开启
+`-DINDURTDB_ENABLE_VSOA=ON -DVSOA_SDK_ROOT=<libvsoa 树根>` 时，`rtdbd` 可接受：
+
+```bash
+rtdbd --socket /run/indurtdb/default.sock --policy policy.txt --config points.yaml \
+      --vsoa-port 0 --vsoa-port-file /run/indurtdb/vsoa.port
+```
+
+- `--vsoa-port N`：VSOA loopback 监听端口，`0` 由系统分配；`--vsoa-port-file PATH`
+  写入**实际绑定端口**，供运维/监控发现（未给这两个参数时不启动 VSOA）。
+- 实现为**单线程统一 `poll` 主循环**：VSOA `fd_set` 展开成 `pollfd` 与 UDS fd
+  一起 `poll()`，就绪后同线程串行调 `vsoa_server_input_fds()`，零线程零锁；
+  `pollfd` 数组按裁决改为动态构造。回调内不做 reconnect/close（走延迟动作队列，
+  循环尾统一执行）。
+- **鉴权边界**：token 表未配置时 `allow_unauthenticated` 保持 false，写路径一律
+  DENIED；本阶段只提供「双栈可达」，不默认放行写。`role=sync_admin` 与
+  `/sync/peers/{set,get}` 属后续切片。
+- 可运行示例：`examples/vsoa_dualstack_example.c`（ON 构建 target
+  `vsoa_dualstack_example`），自包含启 rtdbd 并交替打 UDS `OP_PING` 与 VSOA
+  `/ping`；实测输出见快速入门指南。
+
+**成员接纳状态机（v3.12 M3.3 切片 D）**：`OP_SET_PEERS` / `/sync/peers/set`
+  经 `rtdbd_peers_apply_set()` 整组替换后，新成员由循环尾 `defer_on_peer_add` 落
+  `JOINING`，再由 `defer_on_trigger_fullsync` 推进为 `ACTIVE`（成员接纳完成）。
+  `RECONNECT` 仍留 NULL（依赖连接管理与 IR1 全量补齐）。`peers_example` 与
+  `test_vsoa_peers_admin` 的 `IR1_JoinStateMachine*` 用例以「请求 UNKNOWN、终态
+  ACTIVE」可证伪「队列是死代码」。
+
+**VSOA 成员管控（v3.12 M3.3 切片 C，§197）**：`/indurtdb/v1/sync/peers/set` 与
+`/get` 为 VSOA 专有 URL（不进 13 个镜像 opcode 表），限 **`role=sync_admin` +
+已握手 + loopback**；未握手或 `role=plc` 一律 DENIED。请求/响应体复用
+`rtdbd_peers_resp_t`（4104B 定长 POD），`set` 与 UDS `OP_SET_PEERS` **共用**
+`rtdbd_peers_apply_set()`（原子整组替换、失败旧表不变、ADD/DEL diff 入全局延迟
+队列），故两前端看到同一张表、同一套循环尾延迟动作。
+
+预共享 token 由 `--vsoa-token-file PATH` 加载（**不要放命令行**，避免凭据出现在
+`ps`/日志）；每行一条、上限 32 条、`#` 为注释：
+
+```
+# token uid partition service_id role
+tok-admin-1 0 0 admin-console sync_admin
+tok-plc-1   0 0 plc-line-1   plc
+```
+
+`role` 取 `plc` / `sync_admin` / `sync_peer`；`/indurtdb/v1/hello` 携带
+`{token, service_id}` 换取 `(uid, partition, service_id, role)` 会话身份。
+`sync_peer` 的来源校验仍为显式 `NOT_IMPLEMENTED`（不静默放行）。
+
+**服务端鉴权**：沿用 `op_set_meta` 模板（`SO_PEERCRED` + `irt_policy_allows` + `rtdbd_conf_partition_allowed`，deny-by-default）；成员管控无点位维度，当前以 `point_id=0` 作管控哨兵（该口径待评审确认，见实现期证据）。
+
+**初始成员表持久化来源（v3.12 M3.3 切片 E）**：`rtdbd --peers-file PATH` 指定**启动期**初始成员文本文件，与运行时 `SET_PEERS`（整组覆盖、不回写）职责分离——`peers-file` 仅作冷启动种子，运行态变更一律走协议，绝不反向写回文件（避免双源冲突与无限重启）。
+
+文件格式每行一条成员、上限 32 条、`#` 为注释（与 `--vsoa-token-file` 同解析器约定）。
+每行可含可选的 `node_id` 第二字段（空格分隔；省略时为空），地址须为合法 IPv4 点分十进制：
+
+```
+# 初始集群成员（仅启动期加载，运行态 SET_PEERS 不回写）
+10.0.0.1 node-a
+10.0.0.2
+10.0.0.3 node-c
+```
+
+加载规则与 fail-fast（`RTDBD_EXIT_CONFIG`，退出码见下表）保证「配置错误即死」，杜绝带病反复重启：
+
+| 情形 | 行为 |
+|---|---|
+| 文件不存在 / 打开失败 | 启动失败，退出码 `RTDBD_EXIT_CONFIG` |
+| 行格式非法（非合法 IPv4 点分十进制） | 启动失败，退出码 `RTDBD_EXIT_CONFIG` |
+| 含本节点地址（`--sync-self-addr` 已配置时） | 启动失败，退出码 `RTDBD_EXIT_CONFIG` |
+| 成员数 > `IRTCLI_PEER_MAX`（32） | 启动失败，退出码 `RTDBD_EXIT_CONFIG` |
+| 正常 | 加载为初始成员表；后续 `SET_PEERS` / `/sync/peers/set` 整组覆盖，不回写文件 |
+
+> 该能力**不依赖 VSOA**：`--peers-file` 为纯 POSIX 长选项（option 值 1008），OFF / ON 构建同编同测。核心逻辑拆入 `rtdbd/src/cluster/rtdbd_peers_file.c`（纯文件解析，无 fd/socket/VSOA 耦合），由 `rtdbd.c` 在 getopt 解析后、fail-fast 前调用。
 
 ## 完整示例
 

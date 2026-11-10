@@ -64,5 +64,19 @@ with RtdbClient(__import__("os").environ["RTDBD_SOCK"]) as c:
     assert v == -12345, f"get after write mismatch: {v}"
     # 按名查找
     assert c.find_by_name("Pump_Start_CMD") == 11
+    # v3.12 M3.2 ⑤：成员管控 OP_SET_PEERS/GET_PEERS 往返（真实 rtdbd）
+    peers = [
+        {"addr": "10.30.0.1", "node_id": "smoke-a", "state": 2},
+        {"addr": "10.30.0.2", "node_id": "smoke-b", "state": 2},
+    ]
+    c.set_peers(peers)
+    got_peers = c.get_peers()
+    assert len(got_peers) == 2, f"expected 2 peers, got {len(got_peers)}"
+    assert got_peers[0]["addr"] == "10.30.0.1"
+    assert got_peers[1]["node_id"] == "smoke-b"
+    c.set_peers([])
+    assert c.get_peers() == [], "clear peers failed"
+    print("[smoke] OK: peers set/get round-trip")
+
     print("[smoke] OK: ping/list/write/get/find all passed")
 PY

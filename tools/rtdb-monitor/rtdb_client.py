@@ -48,6 +48,8 @@ OP_BATCH_READ = 19
 OP_BATCH_WRITE = 20
 OP_CAPS = 21
 OP_SNAPSHOT_DONE = 22
+OP_SET_PEERS = 23          # v3.12 M3.2 成员管控（纯可加）
+OP_GET_PEERS = 24
 
 # v3.11 协议上限；协商成功前按旧服务端 1024 保守回退。
 RTDBD_SET_SUBS_MAX = 10000
@@ -80,6 +82,11 @@ TYPE_FLOAT = 6
 
 # ---- 结构体（小端，与 C 布局对齐） ----
 REQ_HDR = struct.Struct("<IHHI")          # magic, version, opcode, payload_len
+
+# 单条成员 128B：与 rtdbd_peer_t 的 C 布局字节一致
+PEER = struct.Struct("<64s32sI4xQQI4x")
+PEERS_HDR = struct.Struct("<II")          # count, reserved（与 rtdbd_peers_resp_t 头一致）
+RTDBD_PEER_MAX = 32
 RESP_HDR = struct.Struct("<IHHI")         # magic, version, status, payload_len
 WRITE_REQ = struct.Struct("<IBxxxQQ")     # point_id, type, reserved[3], value_bits, source_ts_ns
 GET_REQ = struct.Struct("<I")             # point_id
@@ -154,6 +161,56 @@ def _encode_value(value, ptype: int) -> int:
     if ptype == TYPE_DOUBLE:
         return struct.unpack("<Q", struct.pack("<d", float(value)))[0]
     raise RtdbError(f"type {ptype} not writable via 8B value_bits")
+
+
+def _as_fixed(value, size: int, field: str) -> bytes:
+    """定长 char[] 编码：不截断、不静默溢出。"""
+    raw = value.encode("utf-8") if isinstance(value, str) else bytes(value)
+    if len(raw) >= size:
+        raise ValueError(f"{field} too long (max {size - 1})")
+    return raw
+
+
+def _pack_peers(peers: list[dict]) -> bytes:
+    """把成员列表编码为 rtdbd_peers_resp_t 的 4104B 线格式（8B 头 + 32*128B）。"""
+    if len(peers) > RTDBD_PEER_MAX:
+        raise ValueError(f"too many peers (max {RTDBD_PEER_MAX})")
+    out = bytearray(PEERS_HDR.pack(len(peers), 0))
+    for p in peers:
+        out += PEER.pack(
+            _as_fixed(p.get("addr", ""), 64, "addr"),
+            _as_fixed(p.get("node_id", ""), 32, "node_id"),
+            int(p.get("state", 2)),
+            int(p.get("boot_id", 0)),
+            int(p.get("applied_offset", 0)),
+            int(p.get("lag", 0)),
+        )
+    blank = PEER.pack(b"", b"", 0, 0, 0, 0)
+    out += blank * (RTDBD_PEER_MAX - len(peers))
+    return bytes(out)
+
+
+def _unpack_peers(body: bytes) -> list[dict]:
+    """解码 4104B 成员响应；长度或 count 非法一律拒绝（不截断）。"""
+    expected = PEERS_HDR.size + RTDBD_PEER_MAX * PEER.size
+    if len(body) != expected:
+        raise RtdbError(f"bad PEERS payload size {len(body)}, expect {expected}")
+    count, _reserved = PEERS_HDR.unpack_from(body, 0)
+    if count > RTDBD_PEER_MAX:
+        raise RtdbError(f"bad PEERS count {count}")
+    out: list[dict] = []
+    for i in range(count):
+        addr, node, state, boot, applied, lag = PEER.unpack_from(
+            body, PEERS_HDR.size + i * PEER.size)
+        out.append({
+            "addr": addr.rstrip(b"\x00").decode("utf-8", "replace"),
+            "node_id": node.rstrip(b"\x00").decode("utf-8", "replace"),
+            "state": state,
+            "boot_id": boot,
+            "applied_offset": applied,
+            "lag": lag,
+        })
+    return out
 
 
 class RtdbClient:
@@ -277,6 +334,14 @@ class RtdbClient:
     def write_point(self, point_id: int, ptype: int, value, source_ts_ns: int = 0) -> None:
         vbits = _encode_value(value, ptype)
         self._ok(OP_WRITE, WRITE_REQ.pack(point_id, ptype, vbits, source_ts_ns))
+
+    def set_peers(self, peers: list[dict]) -> None:
+        """OP_SET_PEERS(23)：整组替换成员表（服务端原子，非法成员旧表不变）。"""
+        self._ok(OP_SET_PEERS, _pack_peers(peers))
+
+    def get_peers(self) -> list[dict]:
+        """OP_GET_PEERS(24)：返回当前成员表（含 state / boot_id / applied_offset / lag）。"""
+        return _unpack_peers(self._ok(OP_GET_PEERS))
 
     def caps(self) -> dict:
         """OP_CAPS：取服务端容量并缓存升级本连接的上限。"""

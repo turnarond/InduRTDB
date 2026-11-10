@@ -52,6 +52,8 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8080
 | `OP_FIND_BY_NAME 7` | 在 `(partition, name)` 内按名查 id | 免鉴权 |
 | `OP_CREATE/DELETE/RENAME_POINT 12/13/14` | 点位 CRUD（请求体末尾带 `partition`） | 须鉴权 |
 | `OP_SELECT 17` | 连接级默认分区（Redis SELECT 语义） | 须鉴权 |
+| `OP_SET_PEERS 23` | 成员表整组替换（原子；失败旧表不变） | 须鉴权 |
+| `OP_GET_PEERS 24` | 读取成员表（4104B 定长响应） | 须鉴权 |
 
 `OP_WRITE`（设值）沿用既有写入路径，受 `SO_PEERCRED` + uid 策略管控。
 **协议主版本为 3**；v2 及更早客户端被 rtdbd 拒绝（`rtdb_client.py` 已同步 v3）。
@@ -63,8 +65,20 @@ python3 -m uvicorn app:app --host 127.0.0.1 --port 8080
 | `GET /api/points` | 枚举全部点位（列全部分区，v3.8 行为不变） |
 | `GET /api/points?partition=N` | 仅返回分区 N 的点位 |
 | `GET /api/partitions` | 已注册点位的分区列表（升序去重）：`{"partitions": [0, 1, ...]}` |
+| `GET /api/peers` | 集群成员运行时表：`{"peers": [...], "count": N, "notes": "..."}`；**`boot_id`/`applied_offset`/`lag` 为协议预留字段，当前恒 0**（IR1/IR6 未实现），见 v3.12 M3.2 ⑥ |
 
 `/api/points` 每项新增 `partition` 字段（纯增量）；`/ws` 与内部清单仍列出全部。
+
+### v3.12 M3.2 ⑥：集群成员视图
+
+- 前端菜单「**集群成员**」（`PeersView.vue`）：3s 可切换自动刷新，`el-table` 展示 `addr / node_id / state / boot_id / applied_offset / lag`，并有**预留字段提示条**（不假装有同步进度）。
+- 命令终端新增 `peers get` 与 `peers set <addr...>`（1..32 个 IPv4，整组替换）；`help` 已列出。
+- 端到端用例：`python3 tests/test_peers_view.py`（启真实 rtdbd + FastAPI TestClient，验证端点、终端命令与前端源码契约）。
+- `/api/peers` 的 `channels` 字段：后端**真实探测** `RTDBD_VSOA_PORT_FILE`
+  （由 `rtdbd --vsoa-port-file` 写出的端口文件）回报 `vsoa_enabled` / `vsoa_port`；
+  未设置时明确显示「未启用」，不臆测线上状态。前端「集群成员」视图顶部展示
+  UDS 与 VSOA 两个通道标签。
+
 
 ## 测试
 
@@ -80,6 +94,9 @@ python3 tests/test_e2e.py
 
 # 分区端到端：/api/partitions + 按分区过滤 + 前端源码契约
 python3 tests/test_partitions.py
+
+# 集群成员视图端到端：/api/peers + 终端命令 + 前端源码契约
+python3 tests/test_peers_view.py
 ```
 
 ## 限制（v1）

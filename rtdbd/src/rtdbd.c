@@ -24,9 +24,19 @@
 #include <rtdbd/protocol.h>
 
 #include "audit.h"
+#include "cluster/rtdbd_peer_table.h"
+#include "cluster/rtdbd_peers_global.h"
+#include "cluster/rtdbd_defer_global.h"
+#include "cluster/rtdbd_defer_actions.h"
+#include "dispatch/rtdbd_dispatch.h"
+#ifdef INDURTDB_ENABLE_VSOA
+#include "vsoa/vsoa_adapter.h"
+#include <sys/select.h>   /* FD_SETSIZE / fd_set：§8.3-3 单线程统一 poll 用 */
+#endif
 #include "policy.h"
 #include "rtdbd_conf.h"
 #include "logbuf.h"
+#include "session/rtdbd_session.h"
 #include "subtab.h"
 #include "stats.h"
 
@@ -68,6 +78,59 @@ static uint8_t g_list_buf[RTDBD_LIST_CHUNK * sizeof(rtdbd_point_info_t)];
  * 分区感知 API（_in 族）只存在于句柄层，故 rtdbd 必须持句柄。
  * 启动后立刻赋值，服务期只读。 */
 static indurtdb_t* g_h = NULL;
+
+/* ---- v3.12 M3.3 方案 A（§8.3-3 题 3）：VSOA adapter 接入生产主循环 ----
+ * OFF 构建下以下代码全部被预处理裁掉，行为零变化。 */
+#ifdef INDURTDB_ENABLE_VSOA
+static rtdbd_vsoa_adapter_t* g_vsoa = NULL;
+static bool     g_vsoa_enabled = false;
+static uint16_t g_vsoa_port = 0;
+static const char* g_vsoa_port_file = NULL;
+
+/* 兜底 handler 走**共享 dispatch**（与 UDS 前端同一函数，transport 无关）。
+ * adapter 已内联处理 /caps /point/get /select /subscribe /point/write，
+ * 其余镜像能力（如 /ping）由此进入，未实现 opcode 显式回 NOT_IMPLEMENTED。 */
+static int vsoa_main_handler(void* ctx, uint16_t opcode,
+                             const uint8_t* req, size_t req_len,
+                             uint8_t* resp, size_t resp_cap, size_t* resp_len)
+{
+    (void)ctx;
+    return (int)rtdbd_dispatch(opcode, req, req_len, resp, resp_cap, resp_len);
+}
+static const char* g_vsoa_token_file = NULL;
+
+/* token 文件每行：token uid partition service_id role
+ * （role = plc | sync_admin | sync_peer）；# 开头为注释。
+ * 用文件而非命令行参数传 token，避免凭据出现在 ps/日志里（§8.3-4）。
+ * 定长栈缓冲逐行解析，token 表 32 条上限由 adapter 保证，零动态分配。 */
+static int load_vsoa_token_file(const char* path, rtdbd_vsoa_adapter_t* a)
+{
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    char line[256];
+    int loaded = 0;
+    while (fgets(line, sizeof(line), f)) {
+        if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') continue;
+        char tok[64] = {0}, sid[64] = {0}, role_s[16] = {0};
+        unsigned uid = 0, part = 0;
+        if (sscanf(line, "%63s %u %u %63s %15s", tok, &uid, &part, sid, role_s) != 5) {
+            fclose(f); return -1;
+        }
+        rtdbd_session_role_t role;
+        if      (strcmp(role_s, "plc") == 0)        role = RTDBD_ROLE_PLC;
+        else if (strcmp(role_s, "sync_admin") == 0) role = RTDBD_ROLE_SYNC_ADMIN;
+        else if (strcmp(role_s, "sync_peer") == 0)  role = RTDBD_ROLE_SYNC_PEER;
+        else { fclose(f); return -1; }
+        if (rtdbd_vsoa_adapter_add_token(a, tok, (uint32_t)uid, (uint32_t)part,
+                                         sid, role) != 0) {
+            fclose(f); return -1;
+        }
+        ++loaded;
+    }
+    fclose(f);
+    return loaded;
+}
+#endif
 
 /* 运行日志环形缓冲 + GET_LOG 导出缓冲（定长，无堆分配） */
 static irt_logbuf_t      g_logbuf;
@@ -170,22 +233,20 @@ RTDBD_STATIC_ASSERT(sizeof(rtdbd_outq_frame_t) == 40, "outq frame must be 40B");
 
 typedef struct {
     int      fd;
-    uint32_t peer_pid;
-    uint32_t peer_uid;
-    bool     peer_cred_ok;
-    uint32_t partition;   /* v3.9 T5：连接级默认分区（OP_SELECT 设置，初值 0） */
-    uint32_t subs[RTDBD_SUB_MAX];
-    uint32_t nsubs;
-    rtdbd_subtab_t sub;   /* v3.10：订阅成员 + RBE 状态合并表 */
-    bool     caps_negotiated; /* v3.11：对端已发 OP_CAPS，快照完成后发 SNAPSHOT_DONE */
-    bool     snap_active;     /* 快照流进行中 */
-    uint32_t snap_next;       /* 下一个待发快照在 subs[] 中的下标 */
-    uint32_t snap_emitted;    /* 已入队的快照帧数（含被后续淘汰的实时帧之外的成功帧） */
-    uint32_t snap_outq_count; /* 当前队列中的快照帧数，用于 767 槽预算 */
-    /* 出站通知环形队列（B2 背压）：写成功只入队，由主循环 POLLOUT 时 flush。
+    /* 连接级状态**真源**：传输无关（doc 13 §8.3-3）。UDS 侧只用其传输无关部分
+     * （partition / 订阅+RBE / CAPS 位 / 快照态 / 凭据）；VSOA 前端将来复用同一份
+     * 会话语义（另加 service_id / epoch / role / 发送句柄）。 */
+    rtdbd_session_t session;
+    /* A2：槽位 generation（每次 conn_init 递增）。延迟动作入队时记录，
+     * drain 时比对，防止「连接关闭后槽位复用」导致旧 CLOSE/REBUILD 误伤新连接。
+     * 0 保留为「不校验」哨兵，故真实 generation 从 1 起。 */
+    uint32_t generation;
+    /* 传输细节：出站环形队列与快照帧**出站预算**（属 UDS 出站，不进 session）。
+     * 出站通知环形队列（B2 背压）：写成功只入队，由主循环 POLLOUT 时 flush。
      * 慢消费者 socket 缓冲满 → POLLOUT 不就绪 → 不 flush（不阻塞他人），
      * 队列填满则丢最旧并计 notify_drop。
      * outq_sent：队首帧已发出的字节数（部分发送进度），非阻塞 flush 用。 */
+    uint32_t snap_outq_count; /* 当前队列中的快照帧数，用于 767 槽预算 */
     rtdbd_outq_frame_t outq[RTDBD_OUTQ_CAP];
     uint16_t           outq_head;
     uint16_t           outq_tail;
@@ -196,6 +257,21 @@ typedef struct {
 /* 一帧通知/完成屏障的线缆长度：请求头 12B + 负载 32B/8B */
 #define RTDBD_NOTIFY_FRAME_LEN (sizeof(rtdbd_req_hdr_t) + sizeof(rtdbd_notify_t))
 #define RTDBD_DONE_FRAME_LEN   (sizeof(rtdbd_req_hdr_t) + sizeof(rtdbd_snapshot_done_t))
+
+/* v3.12 M3.2 ②：成员表**进程级单例**（rtdbd_ctx_t 每请求栈上构造，不能挂 ctx；
+ * 主循环单线程，零锁）。静态存储期零初始化已等价 rtdbd_peer_table_init()。
+ * 本节点地址由 --sync-self-addr 配置（M3.3 接线），未配置时不校验自地址；
+ * 纯逻辑校验由 IR4_PeersRuntime / test_peers_global 覆盖。 */
+/* M3.3：成员表与 self_addr 已下沉为 cluster 模块**进程级单例**；
+ * UDS / VSOA 两前端共用同一张表（rtdbd_peers_global.h）。 */
+
+/* v3.12 M3.2 ③：延迟动作队列**进程级单例**（rtdbd_ctx_t 每请求栈上构造，
+ * 不能挂 ctx；主循环单线程，零锁）。静态零初始化等价 rtdbd_defer_queue_init()，
+ * main 里仍显式调一次以便将来扩展。 */
+/* M3.3 切片 C：延迟队列与旧表快照已下沉为 cluster 单例，UDS/VSOA 共用。 */
+static uint64_t g_defer_executed = 0;     /* 循环尾真正执行数 */
+static uint64_t g_defer_stale = 0;        /* 目标已失效 → no-op 数 */
+static uint64_t g_defer_unavailable = 0;  /* 执行器缺失（动作未实现）数 */
 
 /* 全局连接表：启动时按 initial_clients 预创建连接结构，其余槽位首次接入时
  * 按需分配。空闲槽位保留内存（连接高水位），避免反复 accept 造成分配抖动。 */
@@ -209,20 +285,22 @@ static int           g_conn_high = 0;   /* 最高活跃槽位 + 1；广播/轮�
 static bool conn_init(rtdbd_conn_t* c)
 {
     c->fd = -1;
-    c->peer_pid = 0;
-    c->peer_uid = 0;
-    c->peer_cred_ok = false;
-    c->partition = 0;   /* v3.9 T5：连接默认分区复位（断开/复用槽位时清） */
-    c->nsubs = 0;
-    c->caps_negotiated = false;
-    c->snap_active = false;
-    c->snap_next = 0;
-    c->snap_emitted = 0;
+    c->generation++;
+    if (c->generation == 0u) c->generation = 1u; /* 溢出后跳过 0 哨兵 */
+    c->session.cred.pid = 0;
+    c->session.cred.uid = 0;
+    c->session.cred.cred_ok = false;
+    c->session.partition = 0;   /* v3.9 T5：连接默认分区复位（断开/复用槽位时清） */
+    c->session.nsubs = 0;
+    c->session.caps_negotiated = false;
+    c->session.snap_active = false;
+    c->session.snap_next = 0;
+    c->session.snap_emitted = 0;
     c->snap_outq_count = 0;
-    if (!c->sub.slots) {
-        if (!rtdbd_subtab_init(&c->sub, g_initial_sub_cap)) return false;
+    if (!c->session.sub.slots) {
+        if (!rtdbd_subtab_init(&c->session.sub, g_initial_sub_cap)) return false;
     } else {
-        rtdbd_subtab_clear(&c->sub);
+        rtdbd_subtab_clear(&c->session.sub);
     }
     c->outq_head  = 0;
     c->outq_tail  = 0;
@@ -269,7 +347,7 @@ static void conn_pool_free(void)
     for (int i = 0; i < RTDBD_MAX_CLIENTS; ++i) {
         rtdbd_conn_t* c = g_conns[i];
         if (!c) continue;
-        rtdbd_subtab_free(&c->sub);
+        rtdbd_subtab_free(&c->session.sub);
         if (i >= (int)g_initial_clients) free(c);
         g_conns[i] = NULL;
     }
@@ -304,29 +382,21 @@ static bool conn_pool_init(uint32_t initial_clients, uint32_t initial_subs)
 
 static bool conn_has_sub(const rtdbd_conn_t* c, uint32_t point_id)
 {
-    return rtdbd_subtab_has(&c->sub, point_id);
+    return rtdbd_session_subs_contains(&c->session, point_id);
 }
 
 static int conn_add_sub(rtdbd_conn_t* c, uint32_t point_id, uint32_t max_subs)
 {
-    if (conn_has_sub(c, point_id)) return 0;
-    if (c->nsubs >= max_subs || c->nsubs >= RTDBD_SUB_MAX) return -1;
-    /* subtab 插入失败（表满）时不写 subs[]，保持两套视图一致。 */
-    if (!rtdbd_subtab_insert(&c->sub, point_id)) return -1;
-    c->subs[c->nsubs++] = point_id;
-    return 0;
+    /* session 是订阅状态的唯一真源：有序视图与 RBE 合并表由同一处维护，
+     * 两份视图不会漂移。幂等语义与既有 UDS 行为一致（已订阅返回 0，非失败）。 */
+    rtdbd_subs_add_result_t r = rtdbd_session_subs_add(&c->session, point_id, max_subs);
+    return (r == RTDBD_SUBS_ADD_FAIL) ? -1 : 0;
 }
 
 static void conn_del_sub(rtdbd_conn_t* c, uint32_t point_id)
 {
-    /* 退订同步清 RBE 状态（重新订阅首值必发）。 */
-    rtdbd_subtab_remove(&c->sub, point_id);
-    for (uint32_t i = 0; i < c->nsubs; ++i) {
-        if (c->subs[i] != point_id) continue;
-        c->subs[i] = c->subs[c->nsubs - 1];
-        c->nsubs--;
-        return;
-    }
+    /* 退订同步清 RBE 状态（重新订阅首值必发）+ 从有序视图移除。 */
+    rtdbd_session_subs_remove(&c->session, point_id);
 }
 
 /* 丢弃某连接的整个出站队列（连接关闭 / flush 失败）。
@@ -344,7 +414,7 @@ static void conn_discard_outq(rtdbd_conn_t* c)
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_sent  = 0;
-    c->snap_active = false;
+    c->session.snap_active = false;
     c->snap_outq_count = 0;
 }
 
@@ -357,7 +427,7 @@ static void conn_clear_outq_soft(rtdbd_conn_t* c)
     c->outq_head  = 0;
     c->outq_tail  = 0;
     c->outq_sent  = 0;
-    c->snap_active = false;
+    c->session.snap_active = false;
     c->snap_outq_count = 0;
 }
 
@@ -551,33 +621,20 @@ static void notify_broadcast(indurtdb_t* h, rtdbd_conn_t* const* conns, int n,
     }
     if (!any) return;
 
+    /* 通知帧组装与 RBE 门控已迁入 transport 无关 dispatch（共享语义）：
+     * VSOA 侧须逐连接**定向**投递同一份帧（§8.3-5，禁用 publish），
+     * 故帧内容与 RBE 抑制状态机必须两端一致。 */
     rtdbd_notify_t nt;
-    memset(&nt, 0, sizeof(nt));
-
-    nt.point_id     = w->point_id;
-    nt.type         = w->type;
-    nt.value_bits   = w->value_bits;
-    nt.source_ts_ns = w->source_ts_ns;
-    nt.timestamp_ns = 0;
-
-    /* 时间戳对所有订阅者相同，只读一次 */
-    indurtdb_point_t pt;
-    if (indurtdb_h_read_point(h, w->point_id, &pt) == 0) {
-        nt.timestamp_ns = pt.timestamp_ns;
-        /* 写路径可能把 TIMEOUT 恢复为 GOOD；通知必须携带当前质量。
-         * 读点而不是假设 GOOD，可保留量程位。 */
-        nt.reserved[0] = pt.quality;
+    if (rtdbd_dispatch_notify(h, w, &nt) != RTDBD_ST_OK) {
+        return;
     }
-
-    /* 当前值（double）用于 RBE 死区比较 */
-    double v = indurtdb_value_to_double(w->type, &w->value_bits);
 
     for (int i = 0; i < n; ++i) {
         if (!subscribed[i]) continue;
         rtdbd_conn_t* c = conns[i];
 
         /* RBE 门控：死区未越过则抑制本次通知 */
-        if (!rtdbd_subtab_decide(&c->sub, w->point_id, v, meta)) continue;
+        if (!rtdbd_dispatch_notify_rbe(&c->session.sub, w, meta)) continue;
 
         outq_push_notify(c, &nt);
     }
@@ -673,8 +730,8 @@ static int conn_table_check(rtdbd_conn_t* const* conns, int n)
     for (int i = 0; i < n; ++i) {
         rtdbd_conn_t* c = conns[i];
         if (!c) continue;
-        if (c->nsubs > RTDBD_SUB_MAX) return -1;
-        if (c->fd < 0 && c->nsubs != 0) return -1;  /* 空闲槽有残留订阅 */
+        if (c->session.nsubs > RTDBD_SUB_MAX) return -1;
+        if (c->fd < 0 && c->session.nsubs != 0) return -1;  /* 空闲槽有残留订阅 */
     }
     return 0;
 }
@@ -746,9 +803,9 @@ static int peer_cred(int fd, uint32_t* pid, uint32_t* uid){
 
 static int conn_peer_cred(const rtdbd_conn_t* c, uint32_t* pid, uint32_t* uid)
 {
-    if (!c || !c->peer_cred_ok) return -1;
-    *pid = c->peer_pid;
-    *uid = c->peer_uid;
+    if (!c || !c->session.cred.cred_ok) return -1;
+    *pid = c->session.cred.pid;
+    *uid = c->session.cred.uid;
     return 0;
 }
 
@@ -756,49 +813,13 @@ static int conn_peer_cred(const rtdbd_conn_t* c, uint32_t* pid, uint32_t* uid)
  * 同步计算 EURange 量程位并经质量感知入口落值；meta 在返回时填充（供通知侧 RBE 门控复用）。
  *
  * 采集时刻由客户端经协议传入；为 0 表示"未提供"，库侧退化为仅记录入库时刻。 */
-static int do_write(indurtdb_t* h, const rtdbd_write_req_t* w, indurtdb_meta_t* meta)
-{
-    memset(meta, 0, sizeof(*meta));
-
-    /* 不支持的类型（STRING 受 8B 负载限制等）→ BAD_REQUEST */
-    if (w->type == RTDBD_TYPE_STRING || w->type > RTDBD_TYPE_FLOAT) return -99;
-
-    /* 取该点 meta（rtdbd 作为写权威，读 meta 属合理开销；核心热路径零 meta 读不变式保持） */
-    uint8_t lim = INDURTDB_LIMIT_NONE;
-    if (indurtdb_h_get_meta(h, w->point_id, meta) == 0) {
-        double v = indurtdb_value_to_double(w->type, &w->value_bits);
-        lim = indurtdb_eurange_limit(!!(meta->flags & INDURTDB_META_FLAG_EUR),
-                                     meta->eur_min, meta->eur_max, v);
-    }
-
-    /* 一次性落值 + 量程位（quality 基础码恒为 GOOD） */
-    uint8_t quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_GOOD, lim);
-    return indurtdb_h_write_quality_ts(h, w->point_id, w->type, &w->value_bits,
-                                       w->source_ts_ns, quality);
-}
-
 /* 返回 0 表示连接可继续保持；非 0 表示需关闭连接 */
 /* ---- v3.5 监控只读通道：GET / LIST（读免鉴权） ---- */
 
 /* 读取单点当前值快照；成功返回 0，失败（id 无效/未注册）返回 -1 */
-static int do_get(indurtdb_t* h, uint32_t id, rtdbd_get_resp_t* out)
-{
-    indurtdb_point_t pt;
-    if (indurtdb_h_read_point(h, id, &pt) != 0) return -1;
-    if (pt.name[0] == '\0') return -1; /* 未注册点位不可读，与 LIST 一致 */
-
-    memset(out, 0, sizeof(*out));
-    out->point_id     = id;
-    out->type         = pt.type;
-    out->quality      = pt.quality;
-    memcpy(&out->value_bits, &pt.value, sizeof(out->value_bits));
-    if (pt.type == INDURTDB_TYPE_STRING)
-        memcpy(out->value_str, pt.value.str, sizeof(out->value_str));
-    out->timestamp_ns   = pt.timestamp_ns;
-    out->source_ts_ns   = pt.source_timestamp_ns;
-    return 0;
-}
-
+/* 读点位当前值并组装 rtdbd_get_resp_t —— 业务语义已迁入 transport 无关 dispatch
+ * （rtdbd_dispatch_get）：UDS 与 VSOA 两前端读同一点位得到字节一致的响应体。
+ * 鉴权语义不变：/point/get 属 v3.5 监控只读通道（读免鉴权，同 GET_LOG 定位）。 */
 /* 枚举已注册点位（name[0]!='\0' 视为已注册）。
  * 从 offset(id) 起向后扫描，最多收集 max 个已注册点（max=0 表示上限 CHUNK 个），
  * 结果写入 buf，*out_len 返回字节数。分页时 offset 为起始 id，max 为返回条数上限。
@@ -871,8 +892,10 @@ static int point_subscribable(rtdbd_ctx_t* cx, uint32_t id,
     uint32_t pid = 0, uid = 0;
     if (conn_peer_cred(cx->conn, &pid, &uid) != 0) return RTDBD_ST_INTERNAL;
 
-    if (!irt_policy_allows(cx->policy, uid, pt.partition, id)) return RTDBD_ST_DENIED;
-    if (!rtdbd_conf_partition_allowed(cx->conf, pt.partition)) return RTDBD_ST_DENIED;
+    /* 鉴权（点位存在性 + 策略 + 点位分区）已迁入 transport 无关 dispatch：
+     * VSOA 前端须与 UDS **同一函数**、同一 deny-by-default（§8.3-4）。 */
+    uint16_t st = rtdbd_dispatch_subscribe_authz(cx->h, cx->policy, cx->conf, uid, id);
+    if (st != RTDBD_ST_OK) return (int)st;
 
     if (out_partition) *out_partition = pt.partition;
     if (out_uid) *out_uid = uid;
@@ -884,28 +907,13 @@ static int point_subscribable(rtdbd_ctx_t* cx, uint32_t id,
  * 任一步失败释放临时表，旧订阅集保持不变。 */
 static bool conn_install_subs(rtdbd_conn_t* c, const uint32_t* ids, uint32_t n)
 {
-    rtdbd_subtab_t next;
-    if (!rtdbd_subtab_init(&next, RTDBD_SUBTAB_MIN_CAP)) {
+    /* 原子替换：session 内部先在临时合并表构建完整集合，全部成功后再交换；
+     * 任一步失败释放临时表，旧订阅集保持不变（统计口径与既有实现一致：
+     * 一次失败计一次 subs_alloc_fail）。 */
+    if (!rtdbd_session_install_subs(&c->session, ids, n)) {
         g_stats.subs_alloc_fail++;
         return false;
     }
-    if (n > 0 && !rtdbd_subtab_reserve(&next, n * 2u)) {
-        g_stats.subs_alloc_fail++;
-        rtdbd_subtab_free(&next);
-        return false;
-    }
-    for (uint32_t i = 0; i < n; ++i) {
-        if (!rtdbd_subtab_insert(&next, ids[i])) {
-            g_stats.subs_alloc_fail++;
-            rtdbd_subtab_free(&next);
-            return false;
-        }
-    }
-
-    rtdbd_subtab_free(&c->sub);
-    c->sub = next;
-    if (n > 0) memcpy(c->subs, ids, (size_t)n * sizeof(uint32_t));
-    c->nsubs = n;
     return true;
 }
 
@@ -913,21 +921,21 @@ static bool conn_install_subs(rtdbd_conn_t* c, const uint32_t* ids, uint32_t n)
  * 快照帧上限 767，留出 256 个实时帧 + 1 个控制帧预算。 */
 static void conn_start_snapshot(rtdbd_conn_t* c)
 {
-    c->snap_next      = 0;
-    c->snap_emitted   = 0;
+    c->session.snap_next      = 0;
+    c->session.snap_emitted   = 0;
     c->snap_outq_count = 0;
-    c->snap_active    = true;
+    c->session.snap_active    = true;
 }
 
 static void conn_snapshot_pump(rtdbd_conn_t* c, indurtdb_t* h)
 {
-    if (!c || !c->snap_active || c->fd < 0) return;
+    if (!c || !c->session.snap_active || c->fd < 0) return;
 
     uint32_t scanned = 0;
-    while (c->snap_active && c->snap_next < c->nsubs &&
+    while (c->session.snap_active && c->session.snap_next < c->session.nsubs &&
            c->snap_outq_count < RTDBD_SNAPSHOT_QUEUE_MAX &&
            scanned < RTDBD_SNAPSHOT_PUMP_BATCH) {
-        uint32_t id = c->subs[c->snap_next++];
+        uint32_t id = c->session.subs[c->session.snap_next++];
         scanned++;
 
         indurtdb_point_t pt;
@@ -940,7 +948,7 @@ static void conn_snapshot_pump(rtdbd_conn_t* c, indurtdb_t* h)
         double v = 0.0;
         if (pt.type != RTDBD_TYPE_STRING)
             v = indurtdb_value_to_double(pt.type, &pt.value);
-        (void)rtdbd_subtab_decide(&c->sub, id, v, &m);
+        (void)rtdbd_subtab_decide(&c->session.sub, id, v, &m);
 
         rtdbd_notify_t nt;
         memset(&nt, 0, sizeof(nt));
@@ -953,12 +961,12 @@ static void conn_snapshot_pump(rtdbd_conn_t* c, indurtdb_t* h)
         nt.source_ts_ns   = pt.source_timestamp_ns;
 
         if (!outq_push_snapshot(c, &nt)) break;
-        c->snap_emitted++;
+        c->session.snap_emitted++;
     }
 
-    if (c->snap_active && c->snap_next >= c->nsubs) {
-        if (c->caps_negotiated && !outq_push_done(c, c->snap_emitted)) return;
-        c->snap_active = false;
+    if (c->session.snap_active && c->session.snap_next >= c->session.nsubs) {
+        if (c->session.caps_negotiated && !outq_push_done(c, c->session.snap_emitted)) return;
+        c->session.snap_active = false;
     }
 }
 
@@ -991,30 +999,20 @@ static uint16_t write_one(rtdbd_ctx_t* cx, const rtdbd_write_req_t* w,
                           uint32_t pid, uint32_t uid, uint32_t partition,
                           indurtdb_meta_t* out_meta)
 {
-    memset(out_meta, 0, sizeof(*out_meta));
-
-    if (!irt_policy_allows(cx->policy, uid, partition, w->point_id)) {
-        g_stats.write_rejected++;
-        rtdbd_stats_note_error();
-        return RTDBD_ST_DENIED;
+    /* 鉴权 + 落值 + 统计已迁入 transport 无关 dispatch（rtdbd_dispatch_write）：
+     * UDS 与 VSOA 两前端用**同一函数**、同一 deny-by-default（§8.3-4），
+     * 且写权威路径唯一（§8.3-1）。
+     * **审计**是前端特有副作用（依赖前端自己的 audit 对象），故留在 UDS 侧；
+     * 变更通知同理留在 op_write（VSOA 侧须定向投递，§8.3-5）。
+     * 顺序说明：原实现为「落值 → 审计 → n_writes++」，现为「落值 → n_writes++（dispatch
+     * 内）→ 审计」。二者无因果依赖（irt_audit_record 无返回值、不影响统计），故
+     * 可观测行为不变。 */
+    uint16_t st = rtdbd_dispatch_write(cx->h, cx->policy, cx->conf, w,
+                                       uid, partition, out_meta);
+    if (st == RTDBD_ST_OK) {
+        irt_audit_record(cx->audit, pid, uid, partition, w->point_id, now_ns());
     }
-    if (!rtdbd_conf_partition_allowed(cx->conf, partition)) {
-        g_stats.write_rejected++;
-        rtdbd_stats_note_error();
-        return RTDBD_ST_DENIED;
-    }
-
-    int rc = do_write(cx->h, w, out_meta);
-    if (rc == -99) return RTDBD_ST_BAD_REQUEST;
-    if (rc != 0) {
-        g_stats.write_error++;
-        rtdbd_stats_note_error();
-        return RTDBD_ST_INTERNAL;
-    }
-
-    irt_audit_record(cx->audit, pid, uid, partition, w->point_id, now_ns());
-    g_stats.n_writes++;
-    return RTDBD_ST_OK;
+    return st;
 }
 
 static int op_write(int fd, rtdbd_ctx_t* cx)
@@ -1037,7 +1035,7 @@ static int op_write(int fd, rtdbd_ctx_t* cx)
 
     /* 鉴权：deny by default。分区取连接默认值（OP_SELECT 设置，T5）。 */
     indurtdb_meta_t m;
-    uint16_t st = write_one(cx, &w, pid, uid, cx->conn->partition, &m);
+    uint16_t st = write_one(cx, &w, pid, uid, cx->conn->session.partition, &m);
     cx->resp.status      = st;
     cx->resp.payload_len = 0;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
@@ -1080,10 +1078,13 @@ static int op_batch_read(int fd, rtdbd_ctx_t* cx)
 
         memset(&out[i], 0, sizeof(out[i]));
         out[i].point_id = id;
-        if (do_get(cx->h, id, &out[i].value) != 0) {
+        uint8_t item_buf[sizeof(rtdbd_get_resp_t)];
+        size_t item_len = 0;
+        if (rtdbd_dispatch_get(cx->h, id, item_buf, sizeof(item_buf), &item_len) != RTDBD_ST_OK) {
             out[i].status = RTDBD_ST_NOT_FOUND;
             memset(&out[i].value, 0, sizeof(out[i].value));
         } else {
+            memcpy(&out[i].value, item_buf, sizeof(out[i].value));
             out[i].status = RTDBD_ST_OK;
         }
     }
@@ -1288,7 +1289,7 @@ static int op_set_meta(int fd, rtdbd_ctx_t* cx)
     }
 
     /* 鉴权：deny by default；元数据写入属管控操作。分区取连接默认值（T5）。 */
-    uint32_t partition = cx->conn->partition;
+    uint32_t partition = cx->conn->session.partition;
     if (!irt_policy_allows(cx->policy, uid, partition, s.point_id)) {
         cx->resp.status      = RTDBD_ST_DENIED;
         cx->resp.payload_len = 0;
@@ -1454,17 +1455,18 @@ static int op_get(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
 
-    rtdbd_get_resp_t r;
-    if (do_get(cx->h, g.point_id, &r) != 0) {
+    uint8_t get_buf[sizeof(rtdbd_get_resp_t)];
+    size_t get_len = 0;
+    if (rtdbd_dispatch_get(cx->h, g.point_id, get_buf, sizeof(get_buf), &get_len) != RTDBD_ST_OK) {
         cx->resp.status      = RTDBD_ST_NOT_FOUND; /* 越界/未注册均按未找到 */
         cx->resp.payload_len = 0;
         return send_all(fd, &cx->resp, sizeof(cx->resp));
     }
 
     cx->resp.status      = RTDBD_ST_OK;
-    cx->resp.payload_len = (uint32_t)sizeof(r);
+    cx->resp.payload_len = (uint32_t)get_len;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
-    return send_all(fd, &r, sizeof(r));
+    return send_all(fd, get_buf, get_len);
 }
 
 /* ---- v3.5 监控：枚举已注册点位（读，无需鉴权）；v3.9：按分区过滤 ---- */
@@ -1560,7 +1562,7 @@ static int op_health(int fd, rtdbd_ctx_t* cx)
 }
 
 /* ---- v3.9 T5：选择连接默认分区（uint32 负载，白名单校验） ----
- * 成功：更新 conn->partition 并回 OK；分区非法：回 DENIED **不改**连接状态。
+ * 成功：更新 conn->session.partition 并回 OK；分区非法：回 DENIED **不改**连接状态。
  * 负载长度错误同其它 op 的 BAD_REQUEST：回包后关闭连接（返回 1）。 */
 static int op_select(int fd, rtdbd_ctx_t* cx)
 {
@@ -1582,7 +1584,7 @@ static int op_select(int fd, rtdbd_ctx_t* cx)
         cx->resp.payload_len = 0;
         return send_all(fd, &cx->resp, sizeof(cx->resp));
     }
-    cx->conn->partition = p;
+    cx->conn->session.partition = p;
     cx->resp.status      = RTDBD_ST_OK;
     cx->resp.payload_len = 0;
     return send_all(fd, &cx->resp, sizeof(cx->resp));
@@ -1598,23 +1600,30 @@ static int op_caps(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
 
-    rtdbd_caps_t caps;
-    memset(&caps, 0, sizeof(caps));
-    caps.proto_version         = RTDBD_PROTO_VERSION;
-    caps.max_clients           = g_max_clients;
-    caps.initial_clients       = g_initial_clients;
-    caps.max_subs_per_conn     = cx->max_subs;
-    caps.initial_subs_per_conn = cx->initial_subs;
-    caps.max_batch             = cx->max_batch;
-    caps.flags                 = RTDBD_CAPS_F_BATCH_READ |
-                                 RTDBD_CAPS_F_BATCH_WRITE |
-                                 RTDBD_CAPS_F_SNAPSHOT_DONE;
+    /* 业务语义已迁入 transport 无关 dispatch：UDS 与 VSOA 两前端调用**同一**
+     * 实现，故 /caps 的 32B 响应体在两端字节一致（§8.3-3 / §7.4）。 */
+    rtdbd_dispatch_cfg_t cfg;
+    cfg.max_clients           = g_max_clients;
+    cfg.initial_clients       = g_initial_clients;
+    cfg.max_subs_per_conn     = cx->max_subs;
+    cfg.initial_subs_per_conn = cx->initial_subs;
+    cfg.max_batch             = cx->max_batch;
+
+    uint8_t caps_buf[sizeof(rtdbd_caps_t)];
+    size_t caps_len = 0;
+    uint16_t caps_st = rtdbd_dispatch_caps(&cfg, caps_buf, sizeof(caps_buf), &caps_len);
+    if (caps_st != RTDBD_ST_OK) {
+        cx->resp.status      = caps_st;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
 
     cx->resp.status      = RTDBD_ST_OK;
-    cx->resp.payload_len = (uint32_t)sizeof(caps);
+    cx->resp.payload_len = (uint32_t)caps_len;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
-    if (send_all(fd, &caps, sizeof(caps)) != 0) return 1;
-    cx->conn->caps_negotiated = true;
+    if (send_all(fd, caps_buf, caps_len) != 0) return 1;
+    cx->conn->session.caps_negotiated = true;
     return 0;
 }
 
@@ -1740,6 +1749,87 @@ static int op_set_subs(int fd, rtdbd_ctx_t* cx)
     return send_all(fd, &cx->resp, sizeof(cx->resp));
 }
 
+/* ---- v3.12 M3.2 ②：成员管控 opcode 23/24（尾部可加，既有 22 个零改动） ----
+ * 鉴权模板照 op_set_meta：SO_PEERCRED + irt_policy_allows + conf_partition_allowed，
+ * deny-by-default；成员管控无点位维度，用 point_id=0 作管控哨兵。
+ * 请求/响应同为 rtdbd_peers_resp_t（4104B 定长，protocol.h 已锁布局）。
+ */
+static int peers_authz(rtdbd_ctx_t* cx, uint32_t* out_pid, uint32_t* out_uid,
+                       uint32_t* out_partition)
+{
+    uint32_t pid = 0, uid = 0;
+    if (conn_peer_cred(cx->conn, &pid, &uid) != 0) return RTDBD_ST_INTERNAL;
+    uint32_t partition = cx->conn->session.partition;
+    if (!irt_policy_allows(cx->policy, uid, partition, 0)) return RTDBD_ST_DENIED;
+    if (!rtdbd_conf_partition_allowed(cx->conf, partition)) return RTDBD_ST_DENIED;
+    if (out_pid) *out_pid = pid;
+    if (out_uid) *out_uid = uid;
+    if (out_partition) *out_partition = partition;
+    return RTDBD_ST_OK;
+}
+
+static int op_set_peers(int fd, rtdbd_ctx_t* cx)
+{
+    static rtdbd_peers_resp_t req; /* 4104B：静态缓冲，主循环单线程 */
+    if (cx->req->payload_len != sizeof(req) || recv_all(fd, &req, sizeof(req)) != 0) {
+        cx->resp.status = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+    if (req.count > RTDBD_PEER_MAX) {
+        cx->resp.status = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+    uint32_t pid = 0, uid = 0, partition = 0;
+    uint16_t st = (uint16_t)peers_authz(cx, &pid, &uid, &partition);
+    if (st != RTDBD_ST_OK) {
+        cx->resp.status = st;
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
+    }
+    /* M3.3 切片 C：UDS 与 VSOA 共用**同一**整组替换 + diff 入队实现，
+     * 避免两前端出现两套成员表语义（§8.3-3 共享业务语义）。 */
+    if (rtdbd_peers_apply_set(req.peers, req.count) != 0) {
+        cx->resp.status = RTDBD_ST_BAD_REQUEST;  /* 失败旧表不变 */
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
+    }
+    irt_audit_record(cx->audit, pid, uid, partition, 0, now_ns());
+    cx->resp.status = RTDBD_ST_OK;
+    cx->resp.payload_len = 0;
+    return send_all(fd, &cx->resp, sizeof(cx->resp));
+}
+
+static int op_get_peers(int fd, rtdbd_ctx_t* cx)
+{
+    if (cx->req->payload_len != 0) {
+        cx->resp.status = RTDBD_ST_BAD_REQUEST;
+        cx->resp.payload_len = 0;
+        (void)send_all(fd, &cx->resp, sizeof(cx->resp));
+        return 1;
+    }
+    uint16_t st = (uint16_t)peers_authz(cx, NULL, NULL, NULL);
+    if (st != RTDBD_ST_OK) {
+        cx->resp.status = st;
+        cx->resp.payload_len = 0;
+        return send_all(fd, &cx->resp, sizeof(cx->resp));
+    }
+    rtdbd_peer_table_t *tbl = rtdbd_peers_global();
+    static rtdbd_peers_resp_t out;
+    memset(&out, 0, sizeof(out));
+    out.count = tbl->count;
+    if (out.count > 0) {
+        memcpy(out.peers, tbl->peers, (size_t)out.count * sizeof(rtdbd_peer_t));
+    }
+    cx->resp.status = RTDBD_ST_OK;
+    cx->resp.payload_len = (uint32_t)sizeof(out); /* 照 op_list：12B 头 + 定长体 */
+    if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
+    return send_all(fd, &out, sizeof(out));
+}
+
 /* opcode → 处理器。查找失败 = 未知 opcode → BAD_REQUEST + 关连接（同 v2 行为）。 */
 static const struct {
     uint16_t         op;
@@ -1765,6 +1855,8 @@ static const struct {
     { RTDBD_OP_SELECT,       op_select       },
     { RTDBD_OP_SET_SUBS,     op_set_subs     },
     { RTDBD_OP_CAPS,         op_caps         },
+    { RTDBD_OP_SET_PEERS,    op_set_peers    },   /* v3.12 尾部可加，旧客户端无感知 */
+    { RTDBD_OP_GET_PEERS,    op_get_peers    },
 };
 
 static int handle_request(int fd, rtdbd_ctx_t* cx)
@@ -1994,12 +2086,117 @@ static void usage(FILE* out, const char* prog)
             "  -P, --pidfile PATH         supervisor 写入 worker pid 的文件\n"
             "  -F, --stats-file PATH      统计 dump 输出路径（默认 /tmp/rtdbd.stats）\n"
             "  -D, --delta-file PATH      运行时变更 delta 日志\n"
+            "      --sync-self-addr IP  本节点地址（SET_PEERS 含该地址即拒绝；IPv4 点分十进制）\n"
+#ifdef INDURTDB_ENABLE_VSOA
+            "      --vsoa-port N         VSOA loopback 监听端口（0=系统分配；仅 VSOA 构建）\n"
+            "      --vsoa-port-file PATH 写入实际绑定端口（便于端口发现）\n"
+            "      --vsoa-token-file PATH 预共享 token 表（token uid partition service_id role）\n"
+#endif
             "  -h, --help                 显示本帮助\n",
             prog ? prog : "rtdbd");
 }
 
+/* ---- v3.12 M3.2 ③：循环尾延迟动作执行器（§8.3-3） ----
+ * 执行体在 rtdbd_defer_actions.c（纯逻辑），这里只注入 UDS 侧回调。
+ * rtdbd.c 只留这一处接线 + 循环尾一行调用，避免上帝对象继续膨胀
+ * （codegraph 评审：本文件 120 节点 / calls 出度 326 / 入度 201）。 */
+static uint32_t defer_session_generation(void* owner, uint32_t sid)
+{
+    (void)owner;
+    if (sid >= g_max_clients) return 0u;
+    rtdbd_conn_t* c = g_conns[sid];
+    return (c && c->fd >= 0) ? c->generation : 0u;
+}
+
+static bool defer_session_alive(void* owner, uint32_t sid)
+{
+    (void)owner;
+    if (sid >= g_max_clients) return false;
+    rtdbd_conn_t* c = g_conns[sid];
+    return c && c->fd >= 0;
+}
+
+static void defer_on_close(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)arg;
+    if (sid >= g_max_clients) return;
+    rtdbd_conn_t* c = g_conns[sid];
+    if (!c || c->fd < 0) return;
+    close(c->fd);
+    conn_discard_outq(c);
+    conn_init(c);
+    conn_note_closed((int)sid);
+}
+
+static void defer_on_rebuild_subs(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)arg;
+    /* UDS 侧重连即新连接，没有历史订阅可重建；显式替换为空集是可证伪的
+     * 正确结果，不假装有历史订阅（VSOA 侧按 session.sub 重建属 M3.3+）。 */
+    if (sid >= g_max_clients) return;
+    rtdbd_conn_t* c = g_conns[sid];
+    if (!c || c->fd < 0) return;
+    (void)rtdbd_session_install_subs(&c->session, NULL, 0);
+}
+
+static void defer_on_peer_add(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)sid;
+    rtdbd_peer_table_t *tbl = rtdbd_peers_global();
+    /* §8.3-6「新 peer 触发 on_join 全量」：全量补齐属 IR1（M3.3+），
+     * 这里先落地**可观测**的成员状态 JOINING，避免「入队即假装完成」。 */
+    if (arg < tbl->count) {
+        tbl->peers[arg].state = RTDBD_PEER_ST_JOINING;
+    }
+}
+
+static void defer_on_peer_del(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)sid; (void)arg;
+    /* SET_PEERS 已整组替换，旧成员不在新表中，无需再改表；
+     * 由 g_defer_executed 计数证明动作确实在循环尾被执行。 */
+}
+
+/* v3.12 继续 M3.3 剩余：成员接纳状态机 JOINING -> ACTIVE 闭环。
+ * defer_on_peer_add 把新 peer 置 JOINING（已加入、全量未完）；本执行器在
+ * 循环尾把所有 JOINING 推进为 ACTIVE。
+ * 诚实边界：真实快照序列化 + 分片推送（IR1：128KB 上限分页）属后续切片；
+ * 本系统 peer 是逻辑成员（地址+node_id，无独立连接），故「全量触发」在本
+ * 阶段等价于「成员接纳完成」。不声称已做数据同步传输。 */
+static void defer_on_trigger_fullsync(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)sid; (void)arg;
+    rtdbd_peer_table_t *tbl = rtdbd_peers_global();
+    for (uint32_t i = 0; i < tbl->count; ++i) {
+        if (tbl->peers[i].state == RTDBD_PEER_ST_JOINING) {
+            tbl->peers[i].state = RTDBD_PEER_ST_ACTIVE;
+        }
+    }
+}
+
+static void drain_deferred_actions(void)
+{
+    rtdbd_defer_exec_t exec;
+    memset(&exec, 0, sizeof(exec));
+    exec.session_generation = defer_session_generation;
+    exec.session_alive      = defer_session_alive;
+    exec.on_close           = defer_on_close;
+    exec.on_rebuild_subs    = defer_on_rebuild_subs;
+    exec.on_peer_add        = defer_on_peer_add;
+    exec.on_peer_del        = defer_on_peer_del;
+    /* TRIGGER_FULLSYNC 已闭环（JOINING->ACTIVE，成员接纳状态机）。 */
+    exec.on_trigger_fullsync = defer_on_trigger_fullsync;
+    /* RECONNECT 依赖 sync.peers 连接管理与 IR1 全量补齐（M3.3+）：
+     * 执行器故意留 NULL —— 入队不丢，drain 只计 unavailable，绝不假装执行。 */
+    exec.executed     = &g_defer_executed;
+    exec.stale        = &g_defer_stale;
+    exec.unavailable  = &g_defer_unavailable;
+    (void)rtdbd_defer_actions_drain(rtdbd_defer_global(), RTDBD_DEFER_DRAIN_BUDGET, &exec);
+}
+
 int main(int argc, char** argv)
 {
+    rtdbd_defer_queue_init(rtdbd_defer_global());
     const char* sock_path  = "/run/indurtdb/default.sock";
     const char* instance   = "default";
     const char* policy_path = NULL;
@@ -2021,6 +2218,7 @@ int main(int argc, char** argv)
     /* v3.7 B4：运行时变更 delta 日志。**默认关闭**（未指定则不启用），
      * 以保持既有部署"运行时点位重启即丢"的语义不变。 */
     const char* delta_path = NULL;
+    const char* peers_file_path = NULL;
 
     static struct option long_opts[] = {
         {"socket",     required_argument, 0, 's'},
@@ -2038,6 +2236,13 @@ int main(int argc, char** argv)
         {"pidfile",    required_argument, 0, 'P'},
         {"stats-file", required_argument, 0, 'F'},
         {"delta-file", required_argument, 0, 'D'},
+        {"sync-self-addr", required_argument, 0, 1004},
+        {"peers-file", required_argument, 0, 1008},
+#ifdef INDURTDB_ENABLE_VSOA
+        {"vsoa-port",      required_argument, 0, 1005},
+        {"vsoa-port-file", required_argument, 0, 1006},
+        {"vsoa-token-file", required_argument, 0, 1007},
+#endif
         {"help",       no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
@@ -2095,6 +2300,36 @@ int main(int argc, char** argv)
                 fprintf(stderr, "rtdbd: invalid --timeout-ms '%s'\n", optarg);
                 return RTDBD_EXIT_ERROR;
             }
+            break;
+#ifdef INDURTDB_ENABLE_VSOA
+        case 1005:
+            {
+                uint32_t vp = 0;
+                if (parse_u32_cli(optarg, &vp) != 0 || vp > 65535u) {
+                    fprintf(stderr, "rtdbd: invalid --vsoa-port '%s'\n", optarg);
+                    return RTDBD_EXIT_ERROR;
+                }
+                g_vsoa_port = (uint16_t)vp;
+                g_vsoa_enabled = true;
+            }
+            break;
+        case 1006:
+            g_vsoa_port_file = optarg;
+            g_vsoa_enabled = true;
+            break;
+        case 1007:
+            g_vsoa_token_file = optarg;
+            g_vsoa_enabled = true;
+            break;
+#endif
+        case 1004:
+            if (!rtdbd_peers_set_self_addr(optarg)) {
+                fprintf(stderr, "rtdbd: invalid --sync-self-addr '%s'\n", optarg);
+                return RTDBD_EXIT_ERROR;
+            }
+            break;
+        case 1008:
+            peers_file_path = optarg;
             break;
         case 'S': supervise = true; break;
         case 'P': pidfile = optarg; break;
@@ -2171,6 +2406,19 @@ int main(int argc, char** argv)
             }
             /* 策略属配置：以配置校验退出码终止，supervisor/systemd 才会
              * 停止 respawn（否则坏策略会触发无限重启循环）。 */
+            return RTDBD_EXIT_CONFIG;
+        }
+    }
+
+    /* v3.12 M3.3 切片 E：加载 --peers-file 初始成员表（配置来源）。
+     * self_addr 已在 getopt 阶段经 --sync-self-addr 设好，故自地址校验生效。
+     * 加载失败（格式错/含自地址）→ 以配置校验退出码终止，避免无限重启。 */
+    if (peers_file_path) {
+        if (rtdbd_peers_load_file(peers_file_path) != 0) {
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_ERROR,
+                            "rtdbd: failed to load --peers-file %s "
+                            "(format error or contains self address)",
+                            peers_file_path);
             return RTDBD_EXIT_CONFIG;
         }
     }
@@ -2375,6 +2623,69 @@ int main(int argc, char** argv)
         indurtdb_h_close(g_h);
         return RTDBD_EXIT_SHM;
     }
+    /* ---- v3.12 M3.3 方案 A（§8.3-3 题 3）：VSOA adapter 接入生产主循环 ----
+     * 只在 ON 构建且显式给了 --vsoa-port/--vsoa-port-file 时启动；
+     * token 表未配置 → allow_unauthenticated 保持 false，写路径一律 DENIED，
+     * 本阶段只提供「双栈可达 + 单线程统一 poll」，不默认放行写。 */
+#ifdef INDURTDB_ENABLE_VSOA
+    if (g_vsoa_enabled) {
+        rtdbd_vsoa_handler_t vh;
+        vh.handle = vsoa_main_handler;
+        vh.ctx    = NULL;
+        g_vsoa = rtdbd_vsoa_adapter_create(&vh);
+        if (!g_vsoa) {
+            fprintf(stderr, "rtdbd: failed to create VSOA adapter\n");
+            return RTDBD_EXIT_ERROR;
+        }
+        rtdbd_dispatch_cfg_t vcfg;
+        memset(&vcfg, 0, sizeof(vcfg));
+        vcfg.max_clients          = g_max_clients;
+        vcfg.initial_clients      = g_initial_clients;
+        vcfg.max_subs_per_conn    = RTDBD_SUB_MAX;   /* 保守按协议上限，避免误报容量 */
+        vcfg.initial_subs_per_conn = g_initial_sub_cap;
+        vcfg.max_batch            = RTDBD_BATCH_MAX;
+        rtdbd_vsoa_adapter_set_cfg(g_vsoa, &vcfg);
+        rtdbd_vsoa_adapter_set_handle(g_vsoa, g_h);
+        rtdbd_vsoa_adapter_set_policy(g_vsoa, &policy);
+        rtdbd_vsoa_adapter_set_conf(g_vsoa, &conf);
+        if (g_vsoa_token_file) {
+            int ntok = load_vsoa_token_file(g_vsoa_token_file, g_vsoa);
+            if (ntok < 0) {
+                fprintf(stderr, "rtdbd: failed to load VSOA token file: %s\n",
+                        g_vsoa_token_file);
+                return RTDBD_EXIT_ERROR;
+            }
+            irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                            "VSOA loaded %d pre-shared tokens", ntok);
+        }
+        uint16_t bound = 0;
+        if (!rtdbd_vsoa_adapter_start(g_vsoa, g_vsoa_port, &bound)) {
+            fprintf(stderr, "rtdbd: failed to start VSOA server\n");
+            return RTDBD_EXIT_ERROR;
+        }
+        if (g_vsoa_port_file) {
+            FILE* pf = fopen(g_vsoa_port_file, "w");
+            if (pf) { fprintf(pf, "%u\n", (unsigned)bound); fclose(pf); }
+        }
+        irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO,
+                        "VSOA listening on 127.0.0.1:%u (dual-stack poll)",
+                        (unsigned)bound);
+    }
+#endif
+
+    /* §8.3-3 题 3：pollfd 定长数组改为**动态构造**，容量容纳 UDS + VSOA fd_set
+     * 展开后的全部 fd；OFF 构建容量与旧版完全一致。 */
+#ifdef INDURTDB_ENABLE_VSOA
+    const int fds_cap = (int)RTDBD_MAX_CLIENTS + 1 + FD_SETSIZE;
+#else
+    const int fds_cap = (int)RTDBD_MAX_CLIENTS + 1;
+#endif
+    struct pollfd* fds = (struct pollfd*)calloc((size_t)fds_cap, sizeof(*fds));
+    if (!fds) {
+        fprintf(stderr, "rtdbd: failed to allocate pollfd array\n");
+        return RTDBD_EXIT_ERROR;
+    }
+
     while (!g_stop) {
         /* v3.11：每轮推进快照流（最多 64 帧/连接），填满 POLLOUT 后由 poll 发送。
          * 单次全量入队会把实时通知挤出队列；分轮推进保留 256 槽实时预算。 */
@@ -2383,7 +2694,7 @@ int main(int argc, char** argv)
             if (c && c->fd >= 0) conn_snapshot_pump(c, g_h);
         }
 
-        struct pollfd fds[RTDBD_MAX_CLIENTS + 1];
+        /* fds 已在循环外一次性动态构造（§8.3-3）；本轮只填有效项。 */
         fds[0].fd = listen_fd;
         fds[0].events = POLLIN;
         int nfds = 1;
@@ -2402,6 +2713,21 @@ int main(int argc, char** argv)
             }
         }
 
+        int uds_nfds = nfds;   /* UDS 段：[0, uds_nfds)；VSOA 段：[uds_nfds, nfds) */
+#ifdef INDURTDB_ENABLE_VSOA
+        if (g_vsoa) {
+            fd_set vsoa_rfds;
+            FD_ZERO(&vsoa_rfds);
+            (void)rtdbd_vsoa_adapter_fds(g_vsoa, &vsoa_rfds);
+            for (int fd = 0; fd < FD_SETSIZE && nfds < fds_cap; ++fd) {
+                if (!FD_ISSET(fd, &vsoa_rfds)) continue;
+                fds[nfds].fd      = fd;
+                fds[nfds].events  = POLLIN;
+                fds[nfds].revents = 0;
+                ++nfds;
+            }
+        }
+#endif
         int ready = poll(fds, (nfds_t)nfds, 500);
         if (ready < 0) {
             if (errno == EINTR) continue;
@@ -2447,9 +2773,9 @@ int main(int argc, char** argv)
                         c = conn_slot_acquire(i);
                         if (!c) continue;
                         c->fd = cfd;
-                        c->peer_pid = peer_pid;
-                        c->peer_uid = peer_uid;
-                        c->peer_cred_ok = true;
+                        c->session.cred.pid = peer_pid;
+                        c->session.cred.uid = peer_uid;
+                        c->session.cred.cred_ok = true;
                         if (i + 1 > g_conn_high) g_conn_high = i + 1;
                         placed = 1;
                         break;
@@ -2459,7 +2785,7 @@ int main(int argc, char** argv)
             }
         }
 
-        for (int i = 1; i < nfds; ++i) {
+        for (int i = 1; i < uds_nfds; ++i) {
             rtdbd_conn_t* conn = NULL;
             int conn_idx = -1;
             for (int k = 0; k < g_conn_high; ++k) {
@@ -2504,7 +2830,31 @@ int main(int argc, char** argv)
                 conn_note_closed(conn_idx);
             }
         }
+        /* §8.3-3：循环尾统一执行延迟动作（每轮 32 个预算，照 conn_snapshot_pump 分轮先例）。
+         * 放在这里而非 handle_request 回调内：SDK 规定回调里不得 reconnect/close。 */
+#ifdef INDURTDB_ENABLE_VSOA
+        /* 单线程统一 poll：把本轮**就绪**的 VSOA fd 重组 fd_set，串行驱动
+         * vsoa_server_input_fds()。回调内不得 reconnect/close（改走延迟队列，
+         * 由紧随其后的 drain_deferred_actions() 在循环尾统一执行）。 */
+        if (g_vsoa) {
+            fd_set vsoa_ready;
+            FD_ZERO(&vsoa_ready);
+            for (int i = uds_nfds; i < nfds; ++i) {
+                if (fds[i].revents & (POLLIN | POLLHUP | POLLERR)) {
+                    FD_SET(fds[i].fd, &vsoa_ready);
+                }
+            }
+            rtdbd_vsoa_adapter_input(g_vsoa, &vsoa_ready);
+        }
+#endif
+        drain_deferred_actions();
     }
+
+#ifdef INDURTDB_ENABLE_VSOA
+    if (g_vsoa) { rtdbd_vsoa_adapter_destroy(g_vsoa); g_vsoa = NULL; }
+    if (g_vsoa_port_file) unlink(g_vsoa_port_file);
+#endif
+    free(fds);
 
     /* ---- B2 优雅退出：限时 best-effort 排空所有出站队列 ----
      * 停收新连接（listen 已不再 poll）→ 把待发通知尽量送完再关 fd。

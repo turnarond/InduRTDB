@@ -6,6 +6,7 @@
            GET  /api/points/{id}    读取单点当前值
            POST /api/points/{id}/set 设置点位值（经 rtdbd WRITE，受策略管控）
            GET  /api/meta/{id}       读取点位元数据
+           GET  /api/peers            集群成员运行时表（v3.12 M3.2 ⑥）
   - WS:    /ws                       连接即推送全量清单；点位变更经 NOTIFY 实时推送 update；
            浏览器可发 {op:"set", id, value} / {op:"list"} / {op:"set_subs", ids}
            或兼容旧前端的 {op:"subscribe", pointIds}
@@ -232,6 +233,54 @@ def api_partitions(token: str | None = Query(default=None),
     return {"partitions": sorted({p.get("partition", 0) for p in pts})}
 
 
+def _vsoa_channel_info() -> dict:
+    """真实探测 VSOA 通道：读 rtdbd 由 --vsoa-port-file 写出的端口文件。
+
+    未设置 RTDBD_VSOA_PORT_FILE 或文件不可读 → 明确回报「未启用」，
+    绝不根据构建开关臆测线上状态。
+    """
+    path = os.environ.get("RTDBD_VSOA_PORT_FILE", "")
+    port = 0
+    if path:
+        try:
+            with open(path, encoding="utf-8") as f:
+                port = int(f.read().strip())
+        except (OSError, ValueError):
+            port = 0
+    return {
+        "uds": True,
+        "vsoa_enabled": port > 0,
+        "vsoa_port": port,
+        "source": "RTDBD_VSOA_PORT_FILE" if path else "unset",
+    }
+
+
+@app.get("/api/peers")
+def api_peers(token: str | None = Query(default=None),
+              authorization: str | None = Header(default=None)):
+    """集群成员运行时表（v3.12 M3.2 ⑥，OP_GET_PEERS）。
+
+    ⚠ 诚实标注：boot_id / applied_offset / lag 是协议**预留字段**，当前恒为 0
+    —— IR1 全量补齐与 IR6 重启语义尚未实现，不得让界面假装有同步进度。
+    """
+    if not _authed(token, authorization):
+        return _deny()
+    try:
+        peers = api_client.get_peers()
+    except Exception as e:  # noqa: BLE001
+        return _err({"error": str(e)}, 400)
+    return {
+        "peers": peers,
+        "count": len(peers),
+        "channels": _vsoa_channel_info(),
+        "notes": "boot_id / applied_offset / lag 为协议预留字段，当前恒为 0："
+                 "IR1 全量补齐与 IR6 重启语义尚未实现，不代表真实同步状态。"
+                 "本节点地址由 rtdbd --sync-self-addr 配置，SET_PEERS 含该地址会被拒绝且旧表不变。"
+                 "VSOA 管控 URL /sync/peers/{set,get} 限 role=sync_admin + loopback，token 由 --vsoa-token-file 配置。"
+                 "新成员经循环尾延迟动作 JOINING->ACTIVE（成员接纳状态机已闭环）；RECONNECT 执行器仍预留。",
+    }
+
+
 @app.get("/api/points/{point_id}")
 def api_point(point_id: int, token: str | None = Query(default=None),
              authorization: str | None = Header(default=None)):
@@ -392,12 +441,24 @@ def _run_cmd(line: str) -> list[str]:
                 "  del <id|name>                     删除点位",
                 "  rename <id|name> <newname>        重命名点位",
                 "  logs [n]                          查看运行日志（默认全部，上限 128）",
+                "  peers get                         查看集群成员表",
+                "  peers set <addr...>               整组替换成员表（1..32 个 IPv4）",
             ]
         if cmd == "ping":
             return ["PONG" if api_client.ping() else "ERR: ping failed"]
         if cmd == "list":
             pts = api_client.list_points()
             return [f"{p['id']}\t{p['name']}\t{p['typeName']}" for p in pts] or ["(空)"]
+        if cmd == "peers" and args and args[0].lower() == "get":
+            peers = api_client.get_peers()
+            return [f"{p['addr']}\t{p['node_id']}\tstate={p['state']}" for p in peers] or ["(空)"]
+        if cmd == "peers" and args and args[0].lower() == "set":
+            addrs = args[1:]
+            if not addrs or len(addrs) > 32:
+                return ["ERR: peers set 需要 1..32 个 IPv4 地址"]
+            peers = [{"addr": a, "node_id": a, "state": 2} for a in addrs]
+            api_client.set_peers(peers)
+            return [f"OK: 已设置 {len(peers)} 个成员（整组替换）"]
         if cmd == "find":
             if not args:
                 return ["用法: find <name>"]

@@ -86,6 +86,10 @@ BAD_CARD_CONCLUSION_PIPE = GOOD_CARD.replace(
 BAD_CARD_CONDITION_NONE = GOOD_CARD.replace(
     "- 结论: 通过", "- 结论: 有条件通过（条件：无）")
 
+# 「有条件通过」是独立第三类结论：既不是 approve 也不是 reject。
+GOOD_CARD_CONDITIONAL = GOOD_CARD.replace(
+    "- 结论: 通过", "- 结论: 有条件通过（硬条件 1–4 全部闭环并经复验前不得发布）")
+
 GOOD_REVIEW = """# Review Evidence: demo
 
 - reviewer_type: ai-independent
@@ -114,6 +118,10 @@ BAD_REVIEW_PENDING = GOOD_REVIEW.replace(
 
 BAD_REVIEW_REWORK = GOOD_REVIEW.replace(
     "通过；窄窗已文档化，工具按 409 处理。", "返工：修复前不得发布。")
+
+GOOD_REVIEW_CONDITIONAL = GOOD_REVIEW.replace(
+    "通过；窄窗已文档化，工具按 409 处理。",
+    "有条件通过（硬条件 1–4 闭环前不得发布）：须补命令取证与 B 段机械出口。")
 
 
 def run(script, args):
@@ -279,6 +287,221 @@ def main():
                                    "--md5", md5_upper, "--json"])
         failed += check(r.returncode == 0 and result_ok(r) is True,
                         "uppercase md5 accepted")
+
+        # 「有条件通过」必须是独立第三类，不得等价无条件 approve（复评硬条件 3）
+        sys.path.insert(0, str(HERE))
+        from release_gate import verdict_class as _verdict_class
+        failed += check(_verdict_class("有条件通过（硬条件未闭环）") == "conditional",
+                        "conditional verdict classified separately from approve")
+        card.write_text(GOOD_CARD_CONDITIONAL, encoding="utf-8")
+        review.write_text(GOOD_REVIEW_CONDITIONAL, encoding="utf-8")
+        r = run("release_gate.py", [str(artifact), "--marker", "GET /version",
+                                   "--change-card", str(card),
+                                   "--review-evidence", str(review), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional verdict without closed conditions rejected")
+
+        # 条件闭环台账：硬条件未全闭环 / B 段数字未落库 / IR 未注册 / 全量门禁有 SKIP 均须 FAIL
+        ev = d / "hc-evidence.md"
+        ev.write_text("hard condition evidence\n", encoding="utf-8")
+        numbers = d / "b-numbers.json"
+        # 全 measured 且证据齐备的合法台账（判据由 check_release_conditions.py 复用）
+        numbers.write_text(json.dumps({
+            "schema": 1, "status": "measured",
+            "items": [{"id": i, "status": "measured", "ctest_case": f"IR_{i}",
+                       "fields": {"metric": 1}, "evidence": str(ev),
+                       "verified_by": str(ev), "verified_at": "2026-11-07"}
+                      for i in ("P3", "P6", "P7", "P8", "P9", "P10", "P11")],
+        }), encoding="utf-8")
+        ir_snap = d / "ctest-snapshot.txt"
+        ir_snap.write_text("Test #43: IR1_分区收敛\nTest #44: IR7_迁移\n", encoding="utf-8")
+        gate_log = d / "check-all.log"
+        gate_log.write_text("[OK] canary（0s）\nALL GREEN\n", encoding="utf-8")
+
+        verified_ev = d / "independent-review.md"
+        verified_ev.write_text("""# Review Evidence: independent re-review
+
+- reviewer_type: ai-independent
+- reviewer_context: independent
+- date: 2026-11-07
+
+## 验证了什么
+
+运行发布门自检与条件闭环台账复核，逐条核验硬条件证据。
+
+## 风险点
+
+- 硬条件未闭环时发布门可能误放行。
+
+## 结论与整改
+
+- 结论: 通过（硬条件已闭环）：按台账复验方式继续。
+""", encoding="utf-8")
+
+        def ledger(hc_closed, b_numbers, irs, gate_text, verified=True):
+            gate_log.write_text(gate_text, encoding="utf-8")
+            ir_snap.write_text(irs, encoding="utf-8")
+            hc = {"id": "H1", "closed": hc_closed, "evidence": str(ev)}
+            if verified:
+                hc["verified_by"] = str(verified_ev)
+                hc["verified_at"] = "2026-11-07"
+            obj = {
+                "hard_conditions": [hc],
+                "b_segment": {
+                    "numbers_ledger": str(numbers) if b_numbers else "",
+                    "ir_snapshot": str(ir_snap),
+                    "required_irs": ["IR1", "IR7"],
+                    "full_gate_log": str(gate_log),
+                },
+            }
+            path = d / "conditions.json"
+            path.write_text(json.dumps(obj), encoding="utf-8")
+            return str(path)
+
+        base = [str(artifact), "--marker", "GET /version",
+                "--change-card", str(card), "--review-evidence", str(review), "--json"]
+        r = run("release_gate.py", base + ["--conditions", ledger(True, True, ir_snap.read_text(), "[OK] canary（0s）\nALL GREEN\n")])
+        failed += check(r.returncode == 0 and result_ok(r) is True,
+                        "conditional with fully closed conditions accepted")
+        r = run("release_gate.py", base + ["--conditions", ledger(False, True, ir_snap.read_text(), "ALL GREEN\n")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional with open hard condition rejected")
+        # closed=true 但无独立复验证据 = 自审自批，必须被拒（§11 承诺）
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, ir_snap.read_text(), "ALL GREEN\n", verified=False)])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "self-closed condition without independent re-review rejected")
+
+        def ledger_with(vb, vat):
+            obj = {"hard_conditions": [{"id": "H1", "closed": True, "evidence": str(ev),
+                                        "verified_by": vb, "verified_at": vat}],
+                   "b_segment": {"numbers_ledger": str(numbers), "ir_snapshot": str(ir_snap),
+                                 "required_irs": ["IR1", "IR7"], "full_gate_log": str(gate_log)}}
+            path = d / "bad-conditions.json"
+            path.write_text(json.dumps(obj), encoding="utf-8")
+            return str(path)
+
+        # 存在但不是独立复验证据的文件（含 /etc/hostname 类）必须被拒（第三签 H-1）
+        r = run("release_gate.py", base + ["--conditions", ledger_with("/etc/hostname", "2026-11-07")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "non-review file as independent evidence rejected")
+        fake_review = d / "fake-review.md"
+        fake_review.write_text("# 随手写的说明\n\n没有评审三要素。\n", encoding="utf-8")
+        r = run("release_gate.py", base + ["--conditions", ledger_with(str(fake_review), "2026-11-07")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "existing but non-review evidence rejected")
+        # 日历上不存在的日期必须被拒
+        r = run("release_gate.py", base + ["--conditions", ledger_with(str(verified_ev), "9999-99-99")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "impossible verified_at rejected")
+        r = run("release_gate.py", base + ["--conditions", ledger_with("/no/such/review.md", "2026-11-07")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "missing independent-review evidence rejected")
+        # 第四签 H-2 纵深：reviewer_type=human 的伪证据即使其余格式合规也必须被拒
+        # （require_second 仅强制 reviewer_context=independent，不拒绝 human，会留自审自批口子）
+        human_review = d / "human-review.md"
+        human_review.write_text("""# Review Evidence
+
+- reviewer_type: human
+- reviewer_context: independent
+- date: 2026-11-07
+
+## 验证了什么
+
+冒充独立复验。
+
+## 风险点
+
+- 风险点占位。
+
+## 结论与整改
+
+- 结论: 通过（冒充独立）：就这么着。
+""", encoding="utf-8")
+        r = run("release_gate.py", base + ["--conditions", ledger_with(str(human_review), "2026-11-07")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "human-type evidence not accepted as independent re-review")
+        r = run("release_gate.py", base + ["--conditions", ledger(True, False, ir_snap.read_text(), "ALL GREEN\n")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional without B-segment numbers rejected")
+        # 台账文件存在但仍是 pending：不得因「文件存在」就放行
+        saved = numbers.read_text(encoding="utf-8")
+        numbers.write_text(json.dumps({"schema": 1, "status": "pending", "items": [
+            {"id": i, "status": "pending", "ctest_case": f"IR_{i}", "fields": {},
+             "evidence": "", "verified_by": "", "verified_at": ""}
+            for i in ("P3", "P6", "P7", "P8", "P9", "P10", "P11")]}), encoding="utf-8")
+        r = run("release_gate.py", base + ["--conditions", ledger(True, True, ir_snap.read_text(), "ALL GREEN\n")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional with pending B-segment ledger rejected")
+        numbers.write_text(saved, encoding="utf-8")
+        r = run("release_gate.py", base + ["--conditions", ledger(True, True, "Test #1: test_c_shm\n", "ALL GREEN\n")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional with missing IR tests rejected")
+        r = run("release_gate.py", base + ["--conditions", ledger(True, True, ir_snap.read_text(), "[SKIP] canary\nALL GREEN\n")])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "conditional with quick gate log rejected")
+
+        # D8 计划新增 API 台账：方案已决定加公开 API，门禁须显式登记而非静默按旧数校验
+        r = run("check_api_count.py", ["--json"])
+        failed += check(r.returncode == 0 and "planned_v2_apis" in r.stdout
+                        and '"target_v2": 56' in r.stdout and '"target_total": 118' in r.stdout,
+                        "api count declares D8 planned API and target baseline")
+        r = run("check_api_count.py", ["--self-test"])
+        failed += check(r.returncode == 0, "api count planned-ledger self-test passes")
+
+        # B 段数字落库校验器：pending 台账须 FAIL，全 measured 且字段非空才 PASS
+        r = run("check_release_conditions.py", ["--ledger",
+                str(HERE.parent / "docs/08-验证记录/v3.12-B段数字落库.json"), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "pending B-segment numbers ledger rejected")
+        r = run("check_release_conditions.py", ["--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "B-segment checker fails on real pending ledger by default")
+        r = run("check_release_conditions.py", ["--self-test"])
+        failed += check(r.returncode == 0, "B-segment checker self-test passes")
+
+        # ---- VSOA SDK 探测门禁（M1.3a）：缺任一项必须报错，不得静默降级 ----
+        def make_sdk(root, headers=True, libs=True, version="1.9.1"):
+            inc = root / "include" / "libvsoa"
+            inc.mkdir(parents=True, exist_ok=True)
+            if headers:
+                (inc / "vsoa_server.h").write_text("/* fake */\n", encoding="utf-8")
+                (inc / "vsoa_client.h").write_text("/* fake */\n", encoding="utf-8")
+                (inc / "vsoa_version.h").write_text(
+                    f'#define VSOA_LIB_VERSION    "{version}"\n', encoding="utf-8")
+            libdir = root / "lib" / "linux" / "x86_64"
+            libdir.mkdir(parents=True, exist_ok=True)
+            if libs:
+                for n in ("libvsoa-server.so", "libvsoa-client.so"):
+                    (libdir / n).write_bytes(b"\x7fELF fake\n")
+
+        sdk = d / "sdk-ok"
+        make_sdk(sdk)
+        r = run("check_vsoa_sdk.py", ["--root", str(sdk), "--json"])
+        failed += check(r.returncode == 0 and result_ok(r) is True,
+                        "complete VSOA SDK layout accepted")
+
+        sdk_no_hdr = d / "sdk-no-hdr"
+        make_sdk(sdk_no_hdr, headers=False)
+        r = run("check_vsoa_sdk.py", ["--root", str(sdk_no_hdr), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "VSOA SDK missing headers rejected")
+
+        sdk_no_lib = d / "sdk-no-lib"
+        make_sdk(sdk_no_lib, libs=False)
+        r = run("check_vsoa_sdk.py", ["--root", str(sdk_no_lib), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "VSOA SDK missing libraries rejected")
+
+        sdk_bad_ver = d / "sdk-bad-ver"
+        make_sdk(sdk_bad_ver, version="1.8.0")
+        r = run("check_vsoa_sdk.py", ["--root", str(sdk_bad_ver), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "VSOA SDK version mismatch rejected")
+
+        r = run("check_vsoa_sdk.py", ["--root", str(d / "no-such-sdk"), "--json"])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "missing VSOA SDK root rejected")
 
         design = d / "design.md"
         design.write_text("design plan\n", encoding="utf-8")

@@ -10,15 +10,55 @@ add_executable(rtdbd
     src/audit.c
     src/logbuf.c
     src/subtab.c
+    src/dispatch/rtdbd_dispatch.c
+    src/cluster/rtdbd_peer_table.c
+    src/cluster/rtdbd_peers_global.c
+    src/cluster/rtdbd_defer_global.c
+    src/cluster/rtdbd_peers_apply.c
+    src/cluster/rtdbd_peers_file.c
+    src/cluster/rtdbd_defer_actions.c
+    src/session/rtdbd_session.c
     src/stats.c
 )
 
 target_include_directories(rtdbd PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${PROJECT_SOURCE_DIR}/include
 )
 
 target_link_libraries(rtdbd PRIVATE indurtdb)
+
+# --- VSOA 双栈前端（v3.12 M1.3）---
+# 仅在顶层显式开启且 SDK 探测通过时接入（探测在顶层 CMakeLists.txt 完成，
+# 缺项/版本不符一律 FATAL_ERROR，绝不静默降级）。
+# 头文件用**裸名**（vsoa_server.h 等）引入，与 scripts/check_arch_layers.py 的
+# vsoa ring 规则一致：只有 server 层（rtdbd/、client/）可依赖 vsoa。
+if(INDURTDB_ENABLE_VSOA)
+    # VSOA 适配层（唯一引用 vsoa_* 的文件）；transport 无关 dispatch 纯模块已在
+    # add_executable 中无条件编入（UDS 侧同样使用，见 op_caps 迁移）。
+    # dispatch 层保持零 vsoa 符号（check_dispatch_boundary），vsoa 层单向依赖它。
+    target_sources(rtdbd PRIVATE
+        src/vsoa/vsoa_adapter.c)
+    target_include_directories(rtdbd PRIVATE
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_directories(rtdbd PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    # 用**明确文件名**形式（-l:libX.so）：避免 --as-needed 把「当前未直接引用符号」
+    # 的 SDK 库丢弃（adapter 只用 server API，client/parser/json 会被误丢）。
+    target_link_libraries(rtdbd PRIVATE
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    # 运行期可定位 SDK 动态库（无 LD_LIBRARY_PATH 也能起服务）。
+    # 必须用 DT_RPATH 而非 DT_RUNPATH：libvsoa-server.so 自身依赖 parser/json，
+    # DT_RUNPATH 不参与**传递依赖**查找，会导致 ldd 报 "not found"。
+    target_link_options(rtdbd PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(rtdbd PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}")
+    target_compile_definitions(rtdbd PRIVATE INDURTDB_ENABLE_VSOA=1)
+endif()
 
 # getopt_long / POSIX 扩展
 target_compile_definitions(rtdbd PRIVATE _GNU_SOURCE)

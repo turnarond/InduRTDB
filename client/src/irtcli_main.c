@@ -41,7 +41,7 @@ static void print_usage(FILE* out)
 {
     fputs(
         "用法: irtcli [--sock PATH] [--partition N] [--help] "
-        "(select N | find NAME | list) [...]\n"
+        "(select N | find NAME | list | peers set N ADDR... | peers get) [...]\n"
         "\n"
         "选项:\n"
         "  --sock PATH     连接的 rtdbd Unix socket（默认 /run/indurtdb/default.sock）\n"
@@ -51,7 +51,9 @@ static void print_usage(FILE* out)
         "命令（按从左到右顺序在同一连接上执行）:\n"
         "  select N        切换本连接默认分区为 N（成功静默）\n"
         "  find NAME       在当前默认分区按名查找，stdout 打印 id\n"
-        "  list            列出当前默认分区的全部点位（每行: id partition name）\n",
+        "  list            列出当前默认分区的全部点位（每行: id partition name）\n"
+        "  peers set N ADDR...  整组替换成员表（N<=32，随后 N 个 IPv4 地址）\n"
+        "  peers get       打印成员表（每行: addr node_id state）\n",
         out);
 }
 
@@ -196,6 +198,48 @@ int main(int argc, char** argv)
                 fprintf(stderr, "irtcli: list 失败\n");
                 irtcli_close(&c);
                 return cli_to_exit(rc);
+            }
+        } else if (strcmp(cmd, "peers") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "irtcli: peers 需要子命令 set/get\n");
+                print_usage(stderr); irtcli_close(&c); return 1;
+            }
+            const char* sub = argv[++i];
+            if (strcmp(sub, "set") == 0) {
+                uint32_t n = 0;
+                if (i + 1 >= argc || parse_u32(argv[i + 1], &n) != 0 ||
+                    n > IRTCLI_PEER_MAX || i + 1 + (int)n >= argc) {
+                    fprintf(stderr, "irtcli: peers set 需要 <N> 与 N 个地址（N<=32）\n");
+                    irtcli_close(&c); return 1;
+                }
+                ++i; /* 消耗 N */
+                irtcli_peer_t peers[IRTCLI_PEER_MAX];
+                memset(peers, 0, sizeof(peers));
+                for (uint32_t k = 0; k < n; ++k) {
+                    const char* a = argv[++i];
+                    snprintf(peers[k].addr, sizeof(peers[k].addr), "%s", a);
+                    snprintf(peers[k].node_id, sizeof(peers[k].node_id), "%s", a);
+                    peers[k].state = IRTCLI_PEER_ST_ACTIVE;
+                }
+                rc = irtcli_set_peers(&c, peers, n);
+                if (rc != IRTCLI_OK) {
+                    fprintf(stderr, "irtcli: peers set 失败\n");
+                    irtcli_close(&c); return cli_to_exit(rc);
+                }
+            } else if (strcmp(sub, "get") == 0) {
+                irtcli_peer_t out[IRTCLI_PEER_MAX];
+                uint32_t cnt = 0;
+                rc = irtcli_get_peers(&c, out, IRTCLI_PEER_MAX, &cnt);
+                if (rc != IRTCLI_OK) {
+                    fprintf(stderr, "irtcli: peers get 失败\n");
+                    irtcli_close(&c); return cli_to_exit(rc);
+                }
+                for (uint32_t k = 0; k < cnt; ++k) {
+                    printf("%s %s %u\n", out[k].addr, out[k].node_id, out[k].state);
+                }
+            } else {
+                fprintf(stderr, "irtcli: 未知 peers 子命令: %s\n", sub);
+                irtcli_close(&c); return 1;
             }
         } else {
             fprintf(stderr, "irtcli: 未知命令: %s\n", cmd);

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-06T10:24:11.470398+00:00",
+  "capturedAtNs": 1793960651470397923,
+  "artifacts": [
+    {
+      "path": "v3.12-集群同步与VSOA双栈前端.md",
+      "md5": "99020c92a9527853bd055a7cd0e24230",
+      "size": 5269,
+      "mtimeNs": 1793960641346052021,
+      "birthNs": null
+    }
+  ]
+}

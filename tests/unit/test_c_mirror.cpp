@@ -271,8 +271,11 @@ emit("PARTITION_ALL", P.PARTITION_ALL)
 for name in ("REQ_HDR", "RESP_HDR", "WRITE_REQ", "GET_REQ", "GET_RESP",
              "LIST_REQ", "POINT_INFO", "NOTIFY", "FIND_REQ", "FIND_RESP",
              "META_REQ", "META_PAYLOAD", "CREATE_REQ", "DELETE_REQ",
-             "RENAME_REQ", "LOG_REQ", "LOG_ENTRY"):
+             "RENAME_REQ", "LOG_REQ", "LOG_ENTRY",
+             "PEER"):  # v3.12 M3.2：成员 POD 的 C/Python 尺寸交叉比对
     emit("PROTO_" + name, getattr(P, name).size)
+# 整组替换线结构：8B 头 + 32*128B，跨语言必须一致
+emit("PROTO_PEERS_RESP", P.PEERS_HDR.size + P.RTDBD_PEER_MAX * P.PEER.size)
 
 # ---- Header 字段偏移 / CRC 区间：行为推导 ----
 # 对 build_v2_header() 的每个字节翻转 1 bit，观察解析结果中哪个字段变化；
@@ -577,6 +580,8 @@ emit("DIAG_HDR_SCAN_SKIPPED", d["scan_skipped"])
     m.eq("PROTO_RENAME_REQ", sizeof(rtdbd_rename_req_t));
     m.eq("PROTO_LOG_REQ", sizeof(rtdbd_log_req_t));
     m.eq("PROTO_LOG_ENTRY", sizeof(rtdbd_log_entry_t));
+    m.eq("PROTO_PEER", sizeof(rtdbd_peer_t));  /* v3.12 M3.2：C/Python 真实交叉比对 */
+    m.eq("PROTO_PEERS_RESP", sizeof(rtdbd_peers_resp_t));
 
     EXPECT_TRUE(m.ok()) << m.report();
     if (m.ok()) {
@@ -592,6 +597,11 @@ TEST(Mirror, V311ProtocolLayout)
     EXPECT_EQ(RTDBD_OP_BATCH_WRITE, 20u);
     EXPECT_EQ(RTDBD_OP_CAPS, 21u);
     EXPECT_EQ(RTDBD_OP_SNAPSHOT_DONE, 22u);
+    /* v3.12 M3.2：尾部可加的成员管控 opcode 与协议 POD（RED → GREEN） */
+    EXPECT_EQ(RTDBD_OP_SET_PEERS, 23u);
+    EXPECT_EQ(RTDBD_OP_GET_PEERS, 24u);
+    EXPECT_EQ(sizeof(rtdbd_peer_t), 128u);
+    EXPECT_EQ(sizeof(rtdbd_peers_resp_t), 4104u); /* 8B 头(含显式 reserved) + 32*128B */
     EXPECT_EQ(RTDBD_ST_NO_MEM, 5u);
     EXPECT_EQ(RTDBD_SUB_MAX_PER_CONN, 10000u);
     EXPECT_EQ(RTDBD_BATCH_MAX, 1024u);

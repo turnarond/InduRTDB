@@ -47,6 +47,8 @@ RINGS = {
 }
 
 # 头文件 include 前缀 -> ring（构建系统把各目录加入 include path，故用前缀判层）。
+# v3.12 §9.5：libvsoa 是外部 SDK，只链到 rtdbd 可执行文件；
+# libindurtdb.a / irtcli 不碰 VSOA，故把 vsoa_* / libvsoa/ 归入独立 ring。
 HEADER_PREFIX_RING = {
     "indurtdb/": "public",
     "core/": "core",
@@ -55,16 +57,19 @@ HEADER_PREFIX_RING = {
     "rtdbd/": "server",
     "irtcli/": "server",
     "api/": "api",
+    "libvsoa/": "vsoa",
+    "vsoa_": "vsoa",
 }
 
 # 合法依赖（from ring -> 允许的 to ring 集合）。未列出的边一律违规。
 ALLOWED = {
     "public": set(),
     "api": {"core", "internal", "public"},
-    "server": {"public"},
+    "server": {"public", "vsoa"},
     "core": {"internal", "osal", "public"},
     "internal": {"public"},
     "osal": set(),
+    "vsoa": set(),
 }
 
 SKIP_DIR_PARTS = {"build", "node_modules", "__pycache__", ".git", "tools", "tests", "examples", "demo", "templates"}
@@ -84,8 +89,11 @@ def ring_of_include(inc, from_ring):
     for prefix, ring in HEADER_PREFIX_RING.items():
         if inc.startswith(prefix):
             return ring
-    # 裸文件名：视为同目录（同 ring）引用，不参与跨层判定。
+    # 裸文件名 vsoa_*.h（SDK 头文件常以裸名 include）：归入 vsoa ring，
+    # 使 server 之外任何层引入 VSOA 头都被抓出，而不是被当作同目录引用忽略。
     if "/" not in inc:
+        if inc.startswith("vsoa_"):
+            return "vsoa"
         return from_ring
     # 其他带路径的（如 "core/xxx.h" 已覆盖）：无法归类则忽略，避免误判。
     return None
@@ -126,7 +134,10 @@ def scan(root):
                     "to": to_ring,
                     "message": f"{from_ring} 不得依赖 {to_ring}",
                 })
-    return {"ok": not violations, "scanned": scanned, "violations": violations}
+    return {"ok": not violations, "scanned": scanned, "violations": violations,
+            "rings": len(RINGS) + 1,  # +1: 外部 SDK ring "vsoa"（仅出现在 include 映射中）
+            "header_prefix_rules": len(HEADER_PREFIX_RING),
+            "allowed_edges": sum(len(v) for v in ALLOWED.values())}
 
 
 def self_test():
@@ -142,18 +153,24 @@ def self_test():
             '#include <indurtdb/indurtdb.h>\n#include "core/irt_shm.h"\n', encoding="utf-8")
         (root / "src/osal/good.c").write_text('#include <string.h>\n', encoding="utf-8")
         (root / "rtdbd/good.c").write_text('#include <indurtdb/indurtdb.h>\n', encoding="utf-8")
+        # v3.12 §9.5：VSOA 只链到 rtdbd，server 层允许引入 libvsoa 头。
+        (root / "rtdbd/vsoa_adapter.c").write_text('#include <vsoa_server.h>\n', encoding="utf-8")
 
         ok_result = scan(root)
 
         (root / "src/osal/bad.c").write_text('#include "core/irt_shm.h"\n', encoding="utf-8")
         (root / "rtdbd/bad.c").write_text('#include "core/irt_config.h"\n', encoding="utf-8")
         (root / "include/indurtdb/bad.h").write_text('#include "core/irt_shm.h"\n', encoding="utf-8")
+        # 核心层/静态库不得碰 VSOA（否则 libindurtdb.a 会被污染）
+        (root / "src/core/vsoa_leak.c").write_text('#include <libvsoa/vsoa_client.h>\n', encoding="utf-8")
         bad_result = scan(root)
 
     cases = [
         ("合法依赖应 PASS", ok_result["ok"] is True),
+        ("rtdbd 引入 libvsoa 应 PASS", ok_result["ok"] is True),
         ("osal→core 应被抓出", bad_result["ok"] is False),
-        ("违规边数应为 3", len(bad_result["violations"]) == 3),
+        ("core→libvsoa 应被抓出", any(v["to"] == "vsoa" for v in bad_result["violations"])),
+        ("违规边数应为 4", len(bad_result["violations"]) == 4),
     ]
     for name, passed in cases:
         print(f"  [{'OK' if passed else 'FAIL'}] {name}")

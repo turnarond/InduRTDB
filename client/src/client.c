@@ -486,3 +486,95 @@ int irtcli_set_meta(irtcli_t* c, uint32_t id, const indurtdb_meta_t* m)
     if (rc != IRTCLI_OK) return rc;
     return status_to_cli(st);
 }
+
+/* ---- v3.12 M3.2 ④：集群成员运行时配置（OP_SET_PEERS / OP_GET_PEERS） ----
+ * 公共头 client.h 刻意不引 rtdbd/protocol.h，故这里用编译期断言把「镜像结构」
+ * 与「协议线结构」的逐字段布局锁死；任何一侧改动都会在此处编译失败。 */
+IRTCLI_STATIC_ASSERT(sizeof(irtcli_peer_t) == sizeof(rtdbd_peer_t),
+                     "irtcli_peer_t / rtdbd_peer_t size mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, addr) == offsetof(rtdbd_peer_t, addr),
+                     "peer addr offset mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, node_id) == offsetof(rtdbd_peer_t, node_id),
+                     "peer node_id offset mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, state) == offsetof(rtdbd_peer_t, state),
+                     "peer state offset mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, boot_id) == offsetof(rtdbd_peer_t, boot_id),
+                     "peer boot_id offset mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, applied_offset) ==
+                     offsetof(rtdbd_peer_t, applied_offset),
+                     "peer applied_offset offset mismatch");
+IRTCLI_STATIC_ASSERT(offsetof(irtcli_peer_t, lag) == offsetof(rtdbd_peer_t, lag),
+                     "peer lag offset mismatch");
+IRTCLI_STATIC_ASSERT(sizeof(rtdbd_peers_resp_t) ==
+                     sizeof(uint32_t) + sizeof(uint32_t) +
+                     RTDBD_PEER_MAX * sizeof(rtdbd_peer_t),
+                     "peers response must be header + 32 PODs");
+
+int irtcli_set_peers(irtcli_t* c, const irtcli_peer_t* peers, uint32_t n)
+{
+    if (!c || (!peers && n > 0u) || n > IRTCLI_PEER_MAX) return IRTCLI_ERR_ARG;
+
+    /* 线结构定长 4104B：count + reserved(0) + 32 条 POD。 */
+    rtdbd_peers_resp_t req;
+    memset(&req, 0, sizeof(req));
+    req.count = n;
+    if (n > 0u) {
+        memcpy(req.peers, peers, (size_t)n * sizeof(irtcli_peer_t));
+    }
+
+    uint16_t st = RTDBD_ST_INTERNAL;
+    int rc = rt_submit(c, RTDBD_OP_SET_PEERS, &req, (uint32_t)sizeof(req),
+                       NULL, 0, &st);
+    if (rc != IRTCLI_OK) return rc;
+    return status_to_cli(st);
+}
+
+int irtcli_get_peers(irtcli_t* c, irtcli_peer_t* out, uint32_t cap,
+                     uint32_t* out_count)
+{
+    if (!c || !out || !out_count) return IRTCLI_ERR_ARG;
+    *out_count = 0;
+
+    /* 照 irtcli_list_in 手写收发：显式校验 payload_len，避免 rt_submit 的
+     * 「按固定 resp_len 读」在服务端口径变化时阻塞或读错位。 */
+    if (!c->connected && irtcli_connect(c) != IRTCLI_OK) return IRTCLI_ERR_IO;
+
+    rtdbd_req_hdr_t req;
+    memset(&req, 0, sizeof(req));
+    req.magic       = RTDBD_MAGIC;
+    req.version     = RTDBD_PROTO_VERSION;
+    req.opcode      = RTDBD_OP_GET_PEERS;
+    req.payload_len = 0;
+    if (send_all(c->fd, &req, sizeof(req)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+
+    rtdbd_resp_hdr_t resp;
+    if (recv_all(c->fd, &resp, sizeof(resp)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (resp.magic != RTDBD_MAGIC || resp.version != RTDBD_PROTO_VERSION) {
+        return IRTCLI_ERR_PROTO;
+    }
+    if (resp.status != RTDBD_ST_OK) {
+        return status_to_cli(resp.status);
+    }
+    if (resp.payload_len != sizeof(rtdbd_peers_resp_t)) {
+        return IRTCLI_ERR_PROTO;
+    }
+
+    rtdbd_peers_resp_t body;
+    if (recv_all(c->fd, &body, sizeof(body)) != 0) {
+        c->connected = false;
+        return IRTCLI_ERR_IO;
+    }
+    if (body.count > RTDBD_PEER_MAX) return IRTCLI_ERR_PROTO;
+    if (body.count > cap) return IRTCLI_ERR_ARG; /* 不截断、不越界，*out_count 保持 0 */
+    if (body.count > 0u) {
+        memcpy(out, body.peers, (size_t)body.count * sizeof(irtcli_peer_t));
+    }
+    *out_count = body.count;
+    return IRTCLI_OK;
+}

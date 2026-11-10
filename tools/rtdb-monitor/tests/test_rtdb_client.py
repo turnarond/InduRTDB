@@ -16,6 +16,8 @@ from rtdb_client import (  # noqa: E402
     LOG_REQ, LOG_ENTRY, LOG_LEVEL_NAME, LOG_INFO, LOG_WARN, LOG_ERROR,
     OP_CREATE_POINT, OP_DELETE_POINT, OP_RENAME_POINT, OP_GET_LOG,
     OP_SET_SUBS, OP_BATCH_READ, OP_BATCH_WRITE, OP_CAPS, OP_SNAPSHOT_DONE,
+    OP_SET_PEERS, OP_GET_PEERS, PEER, PEERS_HDR, RTDBD_PEER_MAX,
+    _pack_peers, _unpack_peers,  # v3.12 M3.2 成员管控镜像
     RTDBD_MAGIC, RTDBD_PROTO_VERSION, PARTITION_ALL,
     RTDBD_SET_SUBS_MAX, RTDBD_LEGACY_SET_SUBS_MAX, RTDBD_BATCH_MAX,
     RtdbClient, NotifyListener,
@@ -57,6 +59,54 @@ def test_struct_sizes_match_c_layout():
     assert BATCH_READ_ITEM.size + GET_RESP.size == 72
     assert BATCH_WRITE_ITEM.size == 8
     assert SNAPSHOT_DONE.size == 8
+
+
+def test_v312_peers_opcodes():
+    assert (OP_SET_PEERS, OP_GET_PEERS) == (23, 24)
+    assert PEER.size == 128
+
+
+def test_v312_peers_codec_roundtrip():
+    # 与 C 侧 rtdbd_peers_resp_t（4104B）逐字节一致：8B 头 + 32*128B
+    assert PEERS_HDR.size == 8
+    assert PEER.size == 128
+    assert RTDBD_PEER_MAX == 32
+    peers = [
+        {"addr": "10.0.0.1", "node_id": "n1", "state": 2,
+         "boot_id": 7, "applied_offset": 99, "lag": 3},
+        {"addr": "10.0.0.2", "node_id": "n2", "state": 1,
+         "boot_id": 0, "applied_offset": 0, "lag": 0},
+    ]
+    body = _pack_peers(peers)
+    assert len(body) == 8 + 32 * 128
+    got = _unpack_peers(body)
+    assert len(got) == 2
+    assert got[0]["addr"] == "10.0.0.1"
+    assert got[0]["node_id"] == "n1"
+    assert got[0]["state"] == 2
+    assert got[0]["boot_id"] == 7
+    assert got[0]["applied_offset"] == 99
+    assert got[0]["lag"] == 3
+    assert got[1]["addr"] == "10.0.0.2"
+    assert got[1]["state"] == 1
+
+
+def test_v312_peers_codec_empty_and_limits():
+    empty = _pack_peers([])
+    assert len(empty) == 8 + 32 * 128
+    assert PEERS_HDR.unpack_from(empty, 0)[0] == 0
+    assert _unpack_peers(empty) == []
+    too_many = [{"addr": "10.0.0.%d" % i, "node_id": "n"} for i in range(33)]
+    try:
+        _pack_peers(too_many)
+        assert False, "超过 32 条必须拒绝"
+    except ValueError:
+        pass
+    try:
+        _unpack_peers(b"\x00" * 16)
+        assert False, "长度不符必须拒绝"
+    except Exception:
+        pass
 
 
 def test_v311_opcodes_and_flags():
