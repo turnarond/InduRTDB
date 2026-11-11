@@ -15,6 +15,7 @@
 #include "dispatch/rtdbd_dispatch.h"
 #include "cluster/rtdbd_peers_global.h"
 #include "session/rtdbd_session.h" /* per-cli 传输无关会话（§8.3-3） */
+#include "session/rtdbd_authz.h"   /* §8.3-4 身份/来源授权判据（M3.x P7） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -145,25 +146,24 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
         return RTDBD_ST_DENIED; /* token 不匹配 */
     }
 
-    /* 来源强校验（§8.3-4）：plc 必须来自 loopback；sync_peer 必须来自
-     * sync.peers（peer 表尚未实现 → 显式拒绝，不放行）。 */
+    /* 来源强校验（§8.3-4）：判据下沉到传输无关纯逻辑 rtdbd_authz，
+     * 由 fixture IR2_AuthDeny 以构造地址覆盖现场才有的非 loopback 条件。
+     * plc / sync_admin 仅 127/8；sync_peer 成员表校验未实现 → 显式 NOT_IMPLEMENTED。 */
     struct sockaddr_storage peer_addr;
     socklen_t plen = sizeof(peer_addr);
     memset(&peer_addr, 0, sizeof(peer_addr));
     if (!vsoa_server_cli_address(server, id, (struct sockaddr *)&peer_addr, &plen)) {
         return RTDBD_ST_DENIED;
     }
-    if (ent->role == RTDBD_ROLE_PLC || ent->role == RTDBD_ROLE_SYNC_ADMIN) {
-        /* §197：sync_admin 与 plc 一样只接受 loopback（成员管控不得跨机）。 */
-        if (peer_addr.ss_family != AF_INET) {
-            return RTDBD_ST_DENIED;
-        }
+    const bool is_ipv4 = (peer_addr.ss_family == AF_INET);
+    uint32_t addr_host = 0;
+    if (is_ipv4) {
         const struct sockaddr_in *in4 = (const struct sockaddr_in *)&peer_addr;
-        if ((ntohl(in4->sin_addr.s_addr) & 0xFF000000u) != 0x7F000000u) {
-            return RTDBD_ST_DENIED; /* plc / sync_admin 必须 loopback */
-        }
-    } else {
-        return RTDBD_ST_NOT_IMPLEMENTED; /* sync_peer 来源校验依赖成员表（未实现） */
+        addr_host = ntohl(in4->sin_addr.s_addr);
+    }
+    const uint16_t src_st = rtdbd_authz_source_allowed(ent->role, is_ipv4, addr_host);
+    if (src_st != RTDBD_ST_OK) {
+        return src_st;
     }
 
     rtdbd_session_t *sess = cli_session(a, id);
@@ -340,6 +340,25 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
     uint16_t opcode = 0;
     if (rtdbd_opcode_from_url(bare, &opcode) != 0) {
         return; /* 非镜像能力：不处理（也不落错误 reply，避免半实现误导） */
+    }
+
+    /* §8.3-4 role→URL 授权（M3.x P7）：镜像能力公共分派路径的 deny-by-default。
+     * /hello 与 /sync/peers/{set,get} 已在上面按专有 URL 处理，不会走到这里。
+     * 仅对「真握手」会话生效：role 由 token 表赋值（非 UNKNOWN）。
+     * allow_unauthenticated + default_uid 的本机联调会话 role 仍是 UNKNOWN，
+     * 沿用既有 cred_ok 判据，不受本门禁影响（避免误伤既有 e2e 用例）。 */
+    rtdbd_session_t *gate_sess = cli_session(a, id);
+    if (gate_sess && gate_sess->cred.cred_ok &&
+        gate_sess->role != RTDBD_ROLE_UNKNOWN &&
+        !rtdbd_authz_url_allowed(gate_sess->role, bare)) {
+        vsoa_payload_t denied;
+        memset(&denied, 0, sizeof(denied));
+        uint32_t dseq = hdr ? ntohl(hdr->seqno) : 0u;
+        uint16_t dtun = hdr ? ntohs(hdr->tunid) : 0u;
+        (void)vsoa_server_cli_reply(server, id,
+                                    (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_DENIED),
+                                    dseq, dtun, &denied);
+        return;
     }
 
     size_t resp_len = 0;
