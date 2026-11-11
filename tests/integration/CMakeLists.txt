@@ -321,7 +321,8 @@ add_test(NAME IR3_DeferredQueue COMMAND IR3_DeferredQueue)
 # ---- v3.12 M3/IR4：成员运行时表语义（纯逻辑，默认构建即可运行）----
 # 用例名固定为 IR4_PeersRuntime（§11.1 required_irs 之一，不得改名）。
 add_executable(IR4_PeersRuntime IR4_PeersRuntime.cpp
-    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c)
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c)
 target_include_directories(IR4_PeersRuntime PRIVATE
     ${PROJECT_SOURCE_DIR}/rtdbd/include
     ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)

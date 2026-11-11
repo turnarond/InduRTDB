@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include "rtdbd_peer_table.h"
+#include "rtdbd_peers_global.h"
 
 #include <cstring>
 
@@ -157,4 +158,28 @@ TEST(IR4_PeersRuntime, DeduplicatesRepeatedIp)
     ASSERT_EQ(rtdbd_peer_table_set(&t, peers, 3, "10.0.0.9"), 0);
     EXPECT_EQ(t.count, 2u); /* 重复 IP 去重 */
     EXPECT_STREQ(t.peers[0].node_id, "a"); /* 保留首次出现 */
+}
+
+/* v3.12 M3.3 切片3：最小 lag 计算（§8.3-6 lag 精确语义未裁决，仅落地差值）。
+ * 纯函数 rtdbd_peer_lag 由 rtdbd_peers_apply.c 在 SET_PEERS 时调用写入 peer.lag；
+ * 此处单测纯函数逻辑，apply.c 集成（SET_PEERS→写 lag）留 rtdbd 进程级/ON 验证。 */
+TEST(IR4_PeersRuntime, LagComputedAsLocalMinusApplied)
+{
+    EXPECT_EQ(rtdbd_peer_lag(150, 100), 50u);  /* local150 - applied100 */
+    EXPECT_EQ(rtdbd_peer_lag(150, 200), 0u);   /* 不落后 → 饱和 0 */
+    EXPECT_EQ(rtdbd_peer_lag(150, 150), 0u);   /* 恰好追上 → 0 */
+    EXPECT_EQ(rtdbd_peer_lag(0, 100), 0u);     /* local 0 → 饱和 0 */
+}
+
+/* 切片3：boot_id 生成非 0（重启变化的前置；进程级「变化」验证留 IR6 env）。 */
+TEST(IR4_PeersRuntime, BootIdGeneratedNonZero)
+{
+    EXPECT_NE(rtdbd_boot_id_generate(), 0u);
+}
+
+/* 切片3：boot_id 存取器往返。 */
+TEST(IR4_PeersRuntime, BootIdRoundtrip)
+{
+    rtdbd_peers_set_boot_id(0xDEADBEEFCAFEULL);
+    EXPECT_EQ(rtdbd_peers_boot_id(), 0xDEADBEEFCAFEULL);
 }

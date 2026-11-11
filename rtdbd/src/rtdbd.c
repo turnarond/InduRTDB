@@ -2199,6 +2199,8 @@ static void drain_deferred_actions(void)
 int main(int argc, char** argv)
 {
     rtdbd_defer_queue_init(rtdbd_defer_global());
+    /* v3.12 M3.3 切片3：启动生成本节点 boot_id（IR6 proc_restart_no_fullsync 判定用）。 */
+    rtdbd_peers_set_boot_id(rtdbd_boot_id_generate());
     const char* sock_path  = "/run/indurtdb/default.sock";
     const char* instance   = "default";
     const char* policy_path = NULL;
