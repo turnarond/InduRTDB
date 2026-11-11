@@ -263,12 +263,12 @@ TEST(VsoaAuth, SyncPeerSourceNotInTableDenied)
      * 锁定接线：证明 adapter 确实查了成员表，空表 → DENIED，而非恒 OK（防恒绿）。 */
     VsoaCli peer;
     ASSERT_TRUE(peer.connect(proc.port));
-    rtdb_hello_t h;
+    rtdbd_vsoa_hello_req_t h;
     std::memset(&h, 0, sizeof(h));
     std::snprintf(h.token, sizeof(h.token), "tok-peer-1");
     std::snprintf(h.service_id, sizeof(h.service_id), "peer-node-1");
     RpcResult phr;
     ASSERT_TRUE(peer.call("/indurtdb/v1/hello", &h, sizeof(h), phr));
-    EXPECT_EQ(phr.status, 0x89)
-        << "§8.3-4：sync_peer 来源不在成员表应拒绝（锁定接线，防恒绿）";
+    EXPECT_EQ(phr.status, 0x80 + RTDBD_ST_DENIED)
+        << "§8.3-4：sync_peer 来源不在成员表应拒绝（DENIED=2 → 0x82；锁定接线，防恒绿）";
 }
