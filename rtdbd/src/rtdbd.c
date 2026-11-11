@@ -2139,6 +2139,19 @@ static void defer_on_rebuild_subs(void* owner, uint32_t sid, uint32_t arg)
     (void)rtdbd_session_install_subs(&c->session, NULL, 0);
 }
 
+static void defer_on_reconnect(void* owner, uint32_t sid, uint32_t arg)
+{
+    (void)owner; (void)arg;
+    /* 会话重连（§8.3-3 RECONNECT）：UDS 侧重连即新连接，无历史订阅可重建，
+     * 重置会话订阅为空——与 defer_on_rebuild_subs 同语义。VSOA 侧重建属 M3.3+，
+     * 且 VSOA 会话不映射 g_conns，本执行器仅对 UDS 客户端有效（VSOA 断链入队
+     * 点未接入，留后续）。非空副作用：rtdbd_session_install_subs(NULL,0)。 */
+    if (sid >= g_max_clients) return;
+    rtdbd_conn_t* c = g_conns[sid];
+    if (!c || c->fd < 0) return;
+    (void)rtdbd_session_install_subs(&c->session, NULL, 0);
+}
+
 static void defer_on_peer_add(void* owner, uint32_t sid, uint32_t arg)
 {
     (void)owner; (void)sid;
@@ -2186,8 +2199,10 @@ static void drain_deferred_actions(void)
     exec.on_peer_del        = defer_on_peer_del;
     /* TRIGGER_FULLSYNC 已闭环（JOINING->ACTIVE，成员接纳状态机）。 */
     exec.on_trigger_fullsync = defer_on_trigger_fullsync;
-    /* RECONNECT 依赖 sync.peers 连接管理与 IR1 全量补齐（M3.3+）：
-     * 执行器故意留 NULL —— 入队不丢，drain 只计 unavailable，绝不假装执行。 */
+    /* RECONNECT（§8.3-3）：UDS 侧重连重置会话订阅为空（与 rebuild_subs 同语义）。
+     * VSOA 侧重建属 M3.3+ 且 VSOA 会话不映射 g_conns，本执行器仅对 UDS 有效；
+     * 当前 VSOA 断链入队点未接入（留后续），但执行器已就绪，UDS RECONNECT 入队即执行。 */
+    exec.on_reconnect = defer_on_reconnect;
     exec.executed     = &g_defer_executed;
     exec.stale        = &g_defer_stale;
     exec.unavailable  = &g_defer_unavailable;
