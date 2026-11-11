@@ -146,9 +146,10 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
         return RTDBD_ST_DENIED; /* token 不匹配 */
     }
 
-    /* 来源强校验（§8.3-4）：判据下沉到传输无关纯逻辑 rtdbd_authz，
-     * 由 fixture IR2_AuthDeny 以构造地址覆盖现场才有的非 loopback 条件。
-     * plc / sync_admin 仅 127/8；sync_peer 成员表校验未实现 → 显式 NOT_IMPLEMENTED。 */
+    /* 来源强校验（§8.3-4）：判据下沉到传输无关纯逻辑 rtdbd_authz。
+     * - plc / sync_admin 仅 127/8（由 rtdbd_authz_source_allowed 处理）；
+     * - sync_peer 必须是已知集群成员（来源 addr 落在运行时成员表 addr 集合，
+     *   由 rtdbd_authz_sync_peer_source_allowed 查 rtdbd_peers_global()）。 */
     struct sockaddr_storage peer_addr;
     socklen_t plen = sizeof(peer_addr);
     memset(&peer_addr, 0, sizeof(peer_addr));
@@ -157,11 +158,16 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
     }
     const bool is_ipv4 = (peer_addr.ss_family == AF_INET);
     uint32_t addr_host = 0;
+    char srcbuf[INET_ADDRSTRLEN];
+    srcbuf[0] = '\0';
     if (is_ipv4) {
         const struct sockaddr_in *in4 = (const struct sockaddr_in *)&peer_addr;
         addr_host = ntohl(in4->sin_addr.s_addr);
+        inet_ntop(AF_INET, &in4->sin_addr, srcbuf, sizeof(srcbuf));
     }
-    const uint16_t src_st = rtdbd_authz_source_allowed(ent->role, is_ipv4, addr_host);
+    const uint16_t src_st = (ent->role == RTDBD_ROLE_SYNC_PEER)
+        ? rtdbd_authz_sync_peer_source_allowed(rtdbd_peers_global(), srcbuf)
+        : rtdbd_authz_source_allowed(ent->role, is_ipv4, addr_host);
     if (src_st != RTDBD_ST_OK) {
         return src_st;
     }

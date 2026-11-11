@@ -16,6 +16,8 @@
 
 #include <rtdbd/protocol.h>
 #include "session/rtdbd_authz.h"
+#include <cstring>
+#include <cstdio>
 
 namespace {
 
@@ -95,4 +97,26 @@ TEST(IR2_AuthDeny, DenyByDefaultAndHelloAlwaysReachable)
     EXPECT_FALSE(rtdbd_authz_url_allowed(RTDBD_ROLE_PLC, ""));
     EXPECT_TRUE(rtdbd_authz_url_allowed(RTDBD_ROLE_UNKNOWN, "/hello"));
     EXPECT_TRUE(rtdbd_authz_url_allowed(RTDBD_ROLE_SYNC_ADMIN, "/hello"));
+}
+
+TEST(IR2_AuthDeny, SyncPeerSourceInMemberTable)
+{
+    /* §8.3-4：sync_peer 来源必须是已知集群成员（落在成员表 addr 集合）。 */
+    rtdbd_peer_table_t tbl;
+    rtdbd_peer_table_init(&tbl);
+    rtdbd_peer_t p;
+    std::memset(&p, 0, sizeof(p));
+    std::snprintf(p.addr, sizeof(p.addr), "127.0.0.1");
+    std::snprintf(p.node_id, sizeof(p.node_id), "n0");
+    p.state = RTDBD_PEER_ST_ACTIVE;
+    EXPECT_EQ(rtdbd_peer_table_add(&tbl, &p, nullptr), 0)
+        << "127.0.0.1 应成功加入成员表";
+
+    EXPECT_EQ(rtdbd_authz_sync_peer_source_allowed(&tbl, "127.0.0.1"), RTDBD_ST_OK);
+    EXPECT_EQ(rtdbd_authz_sync_peer_source_allowed(&tbl, "10.0.0.9"), RTDBD_ST_DENIED);
+    rtdbd_peer_table_t empty;
+    rtdbd_peer_table_init(&empty);
+    EXPECT_EQ(rtdbd_authz_sync_peer_source_allowed(&empty, "127.0.0.1"), RTDBD_ST_DENIED);
+    EXPECT_EQ(rtdbd_authz_sync_peer_source_allowed(nullptr, "127.0.0.1"), RTDBD_ST_DENIED);
+    EXPECT_EQ(rtdbd_authz_sync_peer_source_allowed(&tbl, "not-an-ip"), RTDBD_ST_DENIED);
 }

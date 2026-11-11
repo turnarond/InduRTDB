@@ -289,11 +289,13 @@ endif()
 # ---- v3.12 M3.x / P7：鉴权判据（纯逻辑，默认构建即可运行）----
 # 用例名固定 IR2_AuthDeny（§11.1 required_irs 之一，不得改名）。
 add_executable(IR2_AuthDeny IR2_AuthDeny.cpp
-    ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c)
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c)
 target_include_directories(IR2_AuthDeny PRIVATE
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/rtdbd/include
-    ${PROJECT_SOURCE_DIR}/rtdbd/src)
+    ${PROJECT_SOURCE_DIR}/rtdbd/src
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
 target_link_libraries(IR2_AuthDeny PRIVATE GTest::gtest GTest::gtest_main)
 set_target_properties(IR2_AuthDeny PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)

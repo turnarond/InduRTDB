@@ -57,7 +57,8 @@ struct Proc {
         config = tmp_file("vsoa_auth_cfg.yaml", "points: []\n");
         tokens = tmp_file("vsoa_auth_tokens.txt",
                           "tok-admin-1 0 0 admin-console sync_admin\n"
-                          "tok-plc-1 0 0 plc-line-1 plc\n");
+                          "tok-plc-1 0 0 plc-line-1 plc\n"
+                          "tok-peer-1 0 0 peer-node-1 sync_peer\n");
         port_file = "/tmp/indurtdb_vsoa_auth.port";
         ::unlink(sock.c_str()); ::unlink(port_file.c_str());
         pid = fork();
@@ -219,4 +220,55 @@ TEST(VsoaAuth, PlcMirrorUrlStillOk)
     RpcResult ping;
     ASSERT_TRUE(cli.call("/indurtdb/v1/ping", nullptr, 0, ping));
     EXPECT_EQ(ping.status, 0x80) << "正向：plc 的镜像能力不得被新门禁误伤";
+}
+
+TEST(VsoaAuth, SyncPeerSourceInTable)
+{
+    ::signal(SIGPIPE, SIG_IGN);
+    Proc proc;
+    ASSERT_TRUE(proc.start());
+    VsoaCli admin;
+    ASSERT_TRUE(admin.connect(proc.port));
+    RpcResult hr;
+    ASSERT_TRUE(hello(admin, "tok-admin-1", "admin-console", hr));
+    ASSERT_EQ(hr.status, 0x80) << "admin 握手应先成功";
+
+    /* admin 把 127.0.0.1 注入成员表（sync_peer 客户端来源即 loopback 127.0.0.1）。 */
+    rtdbd_peers_resp_t set;
+    std::memset(&set, 0, sizeof(set));
+    set.count = 1;
+    std::snprintf(set.peers[0].addr, sizeof(set.peers[0].addr), "127.0.0.1");
+    std::snprintf(set.peers[0].node_id, sizeof(set.peers[0].node_id), "n0");
+    set.peers[0].state = RTDBD_PEER_ST_ACTIVE;
+    RpcResult setr;
+    ASSERT_TRUE(admin.call("/indurtdb/v1/sync/peers/set", &set, sizeof(set), setr));
+    ASSERT_EQ(setr.status, 0x80) << "admin 注入成员表应成功";
+
+    /* sync_peer 从 127.0.0.1 握手：来源命中成员表 → 期望 OK。
+     * 接线前 vsoa_hello 对 SYNC_PEER 仍返回 NOT_IMPLEMENTED（真实 RED）。 */
+    VsoaCli peer;
+    ASSERT_TRUE(peer.connect(proc.port));
+    RpcResult phr;
+    ASSERT_TRUE(hello(peer, "tok-peer-1", "peer-node-1", phr));
+    EXPECT_EQ(phr.status, 0x80)
+        << "§8.3-4：sync_peer 来源命中成员表应放行（接线前真实 RED）";
+}
+
+TEST(VsoaAuth, SyncPeerSourceNotInTableDenied)
+{
+    ::signal(SIGPIPE, SIG_IGN);
+    Proc proc;
+    ASSERT_TRUE(proc.start());
+    /* 成员表为空时，sync_peer 从 127.0.0.1 握手应被拒（DENIED，非 OK）。
+     * 锁定接线：证明 adapter 确实查了成员表，空表 → DENIED，而非恒 OK（防恒绿）。 */
+    VsoaCli peer;
+    ASSERT_TRUE(peer.connect(proc.port));
+    rtdb_hello_t h;
+    std::memset(&h, 0, sizeof(h));
+    std::snprintf(h.token, sizeof(h.token), "tok-peer-1");
+    std::snprintf(h.service_id, sizeof(h.service_id), "peer-node-1");
+    RpcResult phr;
+    ASSERT_TRUE(peer.call("/indurtdb/v1/hello", &h, sizeof(h), phr));
+    EXPECT_EQ(phr.status, 0x89)
+        << "§8.3-4：sync_peer 来源不在成员表应拒绝（锁定接线，防恒绿）";
 }

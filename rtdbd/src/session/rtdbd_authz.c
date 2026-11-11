@@ -25,7 +25,9 @@ uint16_t rtdbd_authz_source_allowed(rtdbd_session_role_t role,
                    ? RTDBD_ST_OK
                    : RTDBD_ST_DENIED;
     case RTDBD_ROLE_SYNC_PEER:
-        /* 成员表来源校验尚未实现：显式未实现，绝不默认放行。 */
+        /* 不可达占位：vsoa_adapter 已对 SYNC_PEER 特判并直接调用
+         * rtdbd_authz_sync_peer_source_allowed()（需运行时成员表），本分支
+         * 实际不会被调用；保留为「无成员表上下文」显式 deny 兜底，绝不默认放行。 */
         return RTDBD_ST_NOT_IMPLEMENTED;
     case RTDBD_ROLE_UNKNOWN:
     default:
@@ -59,4 +61,16 @@ bool rtdbd_authz_url_allowed(rtdbd_session_role_t role, const char *bare_url)
     default:
         return false; /* deny-by-default */
     }
+}
+
+uint16_t rtdbd_authz_sync_peer_source_allowed(const rtdbd_peer_table_t *tbl,
+                                              const char *addr_str)
+{
+    if (!tbl || !rtdbd_peer_addr_valid(addr_str)) {
+        return RTDBD_ST_DENIED;
+    }
+    /* §8.3-4：sync_peer 必须是已知集群成员（来源地址落在运行时成员表 addr 集合），
+     * 防止任意主机伪装成同步对等节点。 */
+    return (rtdbd_peer_table_get(tbl, addr_str) != NULL) ? RTDBD_ST_OK
+                                                         : RTDBD_ST_DENIED;
 }
