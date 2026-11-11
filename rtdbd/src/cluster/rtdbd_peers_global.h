@@ -37,17 +37,6 @@ int rtdbd_peers_apply_set(const rtdbd_peer_t *peers, uint32_t n);
 int rtdbd_peers_load_file(const char *path);
 
 
-/* 从 --peers-file 加载**初始成员表**（配置来源，非运行时状态）。返回 0 成功；
- * -1 表示文件无法打开 / 解析失败 / 含自地址 / 超限。走与运行态相同的
- * rtdbd_peers_apply_set（整组替换 + 自地址拒绝 + diff 入延迟队列）。 */
-int rtdbd_peers_load_file(const char *path);
-
-
-/* 从 --peers-file 加载**初始成员表**（配置来源，非运行时状态）。返回 0 成功；
- * -1 表示文件无法打开 / 解析失败 / 含自地址 / 超限。走与运行态相同的
- * rtdbd_peers_apply_set（整组替换 + 自地址拒绝 + diff 入延迟队列）。 */
-int rtdbd_peers_load_file(const char *path);
-
 
 #ifdef __cplusplus
 }

@@ -50,9 +50,11 @@ TEST(IR2_AuthDeny, AllowOnly127Slash8ForLocalRoles)
               RTDBD_ST_OK);
 }
 
-TEST(IR2_AuthDeny, SyncPeerSourceIsExplicitlyNotImplemented)
+TEST(IR2_AuthDeny, SyncPeerSourceAllowedFallsBackToPlaceholder)
 {
-    /* 成员表来源校验未实现：必须显式 NOT_IMPLEMENTED，不得默认放行。 */
+    /* rtdbd_authz_source_allowed 的 SYNC_PEER 分支是「不可达占位」（真实来源校验
+     * 在 rtdbd_authz_sync_peer_source_allowed，需运行时成员表上下文，vsoa_adapter
+     * 已特判调用）。此处断言占位显式返回 NOT_IMPLEMENTED，不得默认放行。 */
     EXPECT_EQ(rtdbd_authz_source_allowed(RTDBD_ROLE_SYNC_PEER, true, kRemote),
               RTDBD_ST_NOT_IMPLEMENTED);
     EXPECT_EQ(rtdbd_authz_source_allowed(RTDBD_ROLE_SYNC_PEER, true, kLoopback),
