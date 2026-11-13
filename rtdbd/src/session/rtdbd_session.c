@@ -250,3 +250,87 @@ const char *rtdbd_defer_kind_name(rtdbd_defer_kind_t kind)
         default:                           return "none";
     }
 }
+
+/* ---- v3.12 M3.3 切片4：NOTIFY 门控诊断计数（纯逻辑，普通 ++）----
+ * 与 defer_queue 的 dropped/enqueued/executed 同范式：doc 13 §8.3-3 单线程
+ * 统一 poll、零线程零锁，故不引入原子操作。
+ * ctr 只是诊断出口：NULL 时仍须正常完成门控判定并允许发送，仅在 ++ 处判空。 */
+
+rtdbd_notify_gate_t rtdbd_session_notify_gate(rtdbd_session_t *s, uint32_t point_id,
+        rtdbd_notify_rbe_fn rbe, void *rbe_ctx, rtdbd_notify_counters_t *ctr)
+{
+    if (!s) {
+        return RTDBD_NOTIFY_GATE_SKIP; /* 空会话：安全拒绝（ctr 为诊断出口，不改控制流） */
+    }
+    /* 顺序不可变：先过滤，再调 RBE。rtdbd_dispatch_notify_rbe 有副作用
+     * （推进 subtab 状态），绝不能提前，否则未订阅 / sync_peer 会消耗 RBE 状态。 */
+    if (rtdbd_session_is_sync_peer(s)) {
+        return RTDBD_NOTIFY_GATE_SKIP; /* 防回环：sync_peer 不得收 NOTIFY */
+    }
+    if (!rtdbd_session_subs_contains(s, point_id)) {
+        return RTDBD_NOTIFY_GATE_SKIP; /* 未订阅该点 */
+    }
+    /* 缺少 RBE 判定器属调用方契约违约：归入 SKIP 且不触碰任何计数，
+     * 不得伪装成 RBE 死区抑制而计 rbe_gate_misses。 */
+    if (!rbe) {
+        return RTDBD_NOTIFY_GATE_SKIP;
+    }
+    const bool pass = rbe(rbe_ctx, s, point_id); /* 仅合法会话算 RBE */
+    if (!pass) {
+        if (ctr) {
+            ctr->rbe_gate_misses++;
+        }
+        return RTDBD_NOTIFY_GATE_MISS; /* RBE 死区抑制 */
+    }
+    if (ctr) {
+        ctr->rbe_gate_hits++;
+    }
+    return RTDBD_NOTIFY_GATE_HIT;
+}
+
+/* 发送点护栏：正常路径不可达（gate 已过滤非法会话），仅作防御 +
+ * 使 peer_notify_leak 计数出口可观测。保留合理，不删除（评审 M-4）。 */
+bool rtdbd_session_notify_deliver_guard(const rtdbd_session_t *s, uint32_t point_id,
+        rtdbd_notify_counters_t *ctr)
+{
+    if (!s) {
+        return false; /* 空会话：安全拒绝（ctr 为诊断出口，不改控制流） */
+    }
+    if (rtdbd_session_is_sync_peer(s) ||
+        !rtdbd_session_subs_contains(s, point_id)) {
+        if (ctr) {
+            ctr->peer_notify_leak++; /* 非订阅者/sync_peer 差点收包 → 记泄露，绝不外发 */
+        }
+        return false;
+    }
+    return true;
+}
+
+/* VSOA 生产路径未接线，当前恒 0；当前无生产调用点；属切片 5/IR1，见变更卡留白。
+ * 本函数是供验收取证的纯逻辑 API，不由任何生产路径调用。 */
+void rtdbd_notify_counters_record_snapshot_done_caps_only(rtdbd_notify_counters_t *ctr)
+{
+    if (ctr) {
+        ctr->snapshot_done_caps_only++;
+    }
+}
+
+void rtdbd_notify_counters_snapshot(const rtdbd_notify_counters_t *ctr,
+                                    rtdbd_notify_counters_t *out)
+{
+    if (!out) {
+        return;
+    }
+    if (!ctr) {
+        memset(out, 0, sizeof(*out));
+        return;
+    }
+    *out = *ctr; /* 纯标量逐字段值拷贝，非别名 */
+}
+
+void rtdbd_notify_counters_reset(rtdbd_notify_counters_t *ctr)
+{
+    if (ctr) {
+        memset(ctr, 0, sizeof(*ctr));
+    }
+}

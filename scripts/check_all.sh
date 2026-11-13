@@ -106,13 +106,19 @@ run_stage self_test bash -c "python3 scripts/test_checkers.py \
   && python3 scripts/check_arch_layers.py --self-test \
   && python3 scripts/check_dispatch_boundary.py --self-test \
   && python3 scripts/check_api_count.py --self-test \
-  && python3 scripts/check_release_conditions.py --self-test" || exit 1
+  && python3 scripts/check_release_conditions.py --self-test \
+  && python3 scripts/check_t1t2_bench.py --self-test" || exit 1
 
 # 0.7 架构分层方向（机制 C）
 run_stage arch_layers python3 scripts/check_arch_layers.py || exit 1
 
 # 0.7b dispatch 层传输无关性（机制 D：符号级，分层边检查抓不到）
 run_stage dispatch_boundary python3 scripts/check_dispatch_boundary.py || exit 1
+
+# 0.7c T1/T2 本机实测框架（方案 B 载体，机制 B 可证伪门禁）
+# 正常模式：编译运行 bench.c 自解析 P99 ≤ 10μs 回归守卫（见 check_t1t2_bench.py）。
+# 退出码即门禁；不得 || true，否则吞掉假绿失败。
+run_stage bench_t1t2 python3 scripts/check_t1t2_bench.py || exit 1
 
 # 0.8 门禁金丝雀：坏样本必须被抓出（机制 B），全量模式必跑
 if [[ $QUICK -eq 1 ]]; then

@@ -61,6 +61,9 @@ struct rtdbd_vsoa_adapter {
         bool            used;
         rtdbd_session_t session;
     } cli[RTDBD_VSOA_MAX_CLI];
+    /* v3.12 M3.3 切片4：NOTIFY 门控诊断计数（adapter 全局聚合，非 per-session）。
+     * calloc 创建时自动零初始化；纯标量、单线程普通 ++（doc 13 §8.3-3）。 */
+    rtdbd_notify_counters_t notify_counters;
     /* 回调内使用的响应缓冲：SDK 规定 payload 在回调返回后失效，故必须自备。 */
     uint8_t            resp[RTDBD_VSOA_RESP_MAX];
 };
@@ -190,9 +193,35 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
     return RTDBD_ST_OK;
 }
 
+/* v3.12 M3.3 切片4：RBE 判定回调包装。rtdbd_dispatch_notify_rbe 有副作用
+ * （推进 subtab 状态），由 session 层门控纯函数在「sync_peer / 未订阅」过滤后
+ * 才调用，保证未订阅 / 回环连接不消耗 RBE 状态（与 UDS 侧同顺序）。 */
+typedef struct {
+    const rtdbd_write_req_t *w;
+    const indurtdb_meta_t   *meta;
+} vsoa_rbe_ctx_t;
+
+static bool vsoa_rbe_decide(void *ctx, rtdbd_session_t *s, uint32_t point_id)
+{
+    vsoa_rbe_ctx_t *c = (vsoa_rbe_ctx_t *)ctx;
+    /* 同源不变量（评审 M-2）：gate 用入参 point_id 判订阅
+     * （rtdbd_session_subs_contains），而 rtdbd_dispatch_notify_rbe 内部用
+     * c->w->point_id 推进 subtab 的 RBE 状态。接线处 vsoa_notify_dispatch 把
+     * 同一个 w 同时作为 gate 的 point_id 来源（w->point_id）与 rctx.w，故二者
+     * 必须同源；否则订阅判定与状态推进会对错点，破坏门控语义。
+     * 项目无运行时 assert 范式（仅编译期 _Static_assert；引入 <assert.h> 会
+     * 破坏本文件的分层边界），改用等价的「不同源返回 false」防御：正确路径
+     * （同源）返回值不变，不同源时抑制发送而非继续推进 RBE 状态。 */
+    if (c->w->point_id != point_id) {
+        return false;
+    }
+    return rtdbd_dispatch_notify_rbe(&s->sub, c->w, c->meta);
+}
+
 /* 变更通知定向投递（§8.3-5）：对每个**订阅了该点**的 per-cli 会话做 RBE 门控，
  * 通过者用 cli_datagram 逐连接定向发送（**禁用** publish / quick_datagram）。
- * role=sync_peer 的会话不得接收 NOTIFY（防回环，§8.3-4/§8.3-5）。 */
+ * role=sync_peer 的会话不得接收 NOTIFY（防回环，§8.3-4/§8.3-5）。
+ * 门控 + 计数走 session 层传输无关纯函数，adapter 全局计数由本循环推进。 */
 static void vsoa_notify_dispatch(rtdbd_vsoa_adapter_t *a,
                                  const rtdbd_write_req_t *w,
                                  const indurtdb_meta_t *meta)
@@ -212,18 +241,18 @@ static void vsoa_notify_dispatch(rtdbd_vsoa_adapter_t *a,
 
     for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
         if (!a->cli[i].used) {
-            continue;
+            continue; /* ① 空槽 */
         }
         rtdbd_session_t *sess = &a->cli[i].session;
-        if (rtdbd_session_is_sync_peer(sess)) {
-            continue; /* sync_peer 不得收 NOTIFY（防回环） */
+        vsoa_rbe_ctx_t rctx = { w, meta };
+        rtdbd_notify_gate_t g = rtdbd_session_notify_gate(
+            sess, w->point_id, vsoa_rbe_decide, &rctx, &a->notify_counters);
+        if (g != RTDBD_NOTIFY_GATE_HIT) {
+            continue; /* ②③ sync_peer / 未订阅 SKIP；④ RBE 抑制 MISS */
         }
-        if (!rtdbd_session_subs_contains(sess, w->point_id)) {
-            continue; /* 未订阅该点 */
-        }
-        /* RBE 门控：死区未越过则抑制（共享语义，与 UDS 同一状态机） */
-        if (!rtdbd_dispatch_notify_rbe(&sess->sub, w, meta)) {
-            continue;
+        if (!rtdbd_session_notify_deliver_guard(sess, w->point_id,
+                                                &a->notify_counters)) {
+            continue; /* 发送点护栏：非订阅者/sync_peer 差点收包 → 记泄露并拒发 */
         }
         vsoa_payload_t pl;
         memset(&pl, 0, sizeof(pl));
@@ -620,6 +649,17 @@ void rtdbd_vsoa_adapter_input(rtdbd_vsoa_adapter_t *a, const void *rfds)
 uint16_t rtdbd_vsoa_adapter_port(const rtdbd_vsoa_adapter_t *a)
 {
     return a ? a->port : 0u;
+}
+
+rtdbd_notify_counters_t rtdbd_vsoa_adapter_notify_counters(const rtdbd_vsoa_adapter_t *a)
+{
+    rtdbd_notify_counters_t out;
+    if (!a) {
+        memset(&out, 0, sizeof(out));
+        return out;
+    }
+    rtdbd_notify_counters_snapshot(&a->notify_counters, &out);
+    return out;
 }
 
 void rtdbd_vsoa_adapter_set_cfg(rtdbd_vsoa_adapter_t *a, const rtdbd_dispatch_cfg_t *cfg)

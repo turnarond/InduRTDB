@@ -14,8 +14,9 @@
  *
  * 传输无关约束（自律，守卫脚本尚未覆盖本目录）：
  * 本模块**禁止**出现 fd、socket、poll、select、vsoa 头或 vsoa 类型、
- * rtdbd_conn_t、outq_push、SO_PEERCRED 等传输/VSOA 符号；对外只暴露
- * `rtdbd_session_sink_t` 的 C 函数指针表（仅在 rtdbd 进程内有效，§8.3-3）。
+ * rtdbd_conn_t、outq_push、SO_PEERCRED 等传输/VSOA 符号；对外暴露
+ * `rtdbd_session_sink_t`（sink 表）与 `rtdbd_notify_rbe_fn`（RBE 判定回调）
+ * 两张 C 函数指针表，均不含传输/VSOA 类型（仅在 rtdbd 进程内有效，§8.3-3）。
  *
  * 零动态分配：延迟动作队列为定长环形（RTDBD_DEFER_QUEUE_CAP）；订阅表复用
  * 既有纯叶子模块 subtab（订阅成员 + RBE 状态合并表）。
@@ -190,6 +191,55 @@ uint32_t rtdbd_defer_count(const rtdbd_defer_queue_t *q);
 
 /* 动作类型名（诊断用）。 */
 const char *rtdbd_defer_kind_name(rtdbd_defer_kind_t kind);
+
+/* ---- v3.12 M3.3 切片4：NOTIFY 门控诊断计数（传输无关）----
+ *
+ * 只含 uint64_t 纯标量 + 函数指针回调，不含任何 fd/socket/poll/vsoa 类型。
+ * 实例由各前端持有（VSOA 侧为 adapter 全局聚合），**不进 rtdbd_session_t**，
+ * 故不改会话布局 / 共享内存布局。4 个计数是整个前端的投递诊断量（非 per-session
+ * 属性），用于 IR 验收区分「RBE 抑制」与「未订阅」，并证伪「回环泄露」。 */
+typedef struct {
+    uint64_t rbe_gate_hits;            /* RBE 通过并定向发送 */
+    uint64_t rbe_gate_misses;          /* RBE 死区/量程未越过被抑制 */
+    /* SNAPSHOT_DONE 仅投 caps_negotiated 会话。**VSOA 生产路径未接线，当前恒 0；
+     * 当前无生产调用点；属切片 5/IR1，见变更卡留白**。IR 验收/运维读取时勿误认为
+     * 已实现生产定向（getter 是本切片的唯一读出口，务必注意该字段恒 0）。 */
+    uint64_t snapshot_done_caps_only;
+    uint64_t peer_notify_leak;         /* 非订阅者/sync_peer 被判可发（须恒 0） */
+} rtdbd_notify_counters_t;
+
+typedef enum {
+    /* 空槽 / sync_peer / 未订阅；以及 rbe==NULL 契约违约（见下，不计数）。 */
+    RTDBD_NOTIFY_GATE_SKIP = 0,
+    RTDBD_NOTIFY_GATE_MISS,      /* RBE 抑制 */
+    RTDBD_NOTIFY_GATE_HIT        /* 命中：应定向发送 */
+} rtdbd_notify_gate_t;
+
+/* RBE 判定回调：**仅在会话通过 SKIP 过滤后**才调用（保证未订阅 / sync_peer
+ * 不消耗 RBE 状态 —— rtdbd_dispatch_notify_rbe 内部推进 subtab 状态，有副作用）。
+ * 由前端包装 rtdbd_dispatch_notify_rbe 提供，本模块零 dispatch 类型依赖。 */
+typedef bool (*rtdbd_notify_rbe_fn)(void *ctx, rtdbd_session_t *s, uint32_t point_id);
+
+/* 门控纯函数：严格按「空会话 → sync_peer → 未订阅 → 才调 RBE」顺序，SKIP 类
+ * 绝不触碰 RBE。ctr 只是诊断出口：NULL 时仍正常完成判定并允许发送，仅在 ++ 处判空。
+ * **rbe 为 NULL 视为调用方契约违约，返回 SKIP 且不递增任何计数**（不得伪装成
+ * 死区抑制）。 */
+rtdbd_notify_gate_t rtdbd_session_notify_gate(rtdbd_session_t *s, uint32_t point_id,
+    rtdbd_notify_rbe_fn rbe, void *rbe_ctx, rtdbd_notify_counters_t *ctr);
+
+/* 发送点护栏：正常路径不可达（gate 已过滤非法会话），仅作防御 +
+ * 使 peer_notify_leak（「实际发给非订阅者的次数」）计数出口可观测且正常恒 0；
+ * 保留合理，不删除（评审 M-4）。ctr 为 NULL 时同样正常判定、仅 ++ 处判空。 */
+bool rtdbd_session_notify_deliver_guard(const rtdbd_session_t *s, uint32_t point_id,
+    rtdbd_notify_counters_t *ctr);
+
+/* VSOA 生产路径未接线，当前恒 0；当前无生产调用点；属切片 5/IR1，见变更卡留白。
+ * 供验收取证的纯逻辑 API，不由任何生产路径调用。 */
+void rtdbd_notify_counters_record_snapshot_done_caps_only(rtdbd_notify_counters_t *ctr);
+void rtdbd_notify_counters_snapshot(const rtdbd_notify_counters_t *ctr,
+                                    rtdbd_notify_counters_t *out);
+/* reset 为供验收取证的纯逻辑清零 API，当前无生产调用点（见变更卡留白）。 */
+void rtdbd_notify_counters_reset(rtdbd_notify_counters_t *ctr);
 
 #ifdef __cplusplus
 }

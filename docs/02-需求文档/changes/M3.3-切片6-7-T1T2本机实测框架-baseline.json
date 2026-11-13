@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-13T01:53:58.353709+00:00",
+  "capturedAtNs": 1794534838353708827,
+  "artifacts": [
+    {
+      "path": "M3.3-切片6-7-T1T2本机实测框架.md",
+      "md5": "590c44784d16085d96149e0488ed0341",
+      "size": 9302,
+      "mtimeNs": 1794534829684924112,
+      "birthNs": null
+    },
+    {
+      "path": "../../../scripts/check_all.sh",
+      "md5": "92fc7056d88410fcfa520670ae276ed4",
+      "size": 4673,
+      "mtimeNs": 1794359236964475788,
+      "birthNs": null
+    },
+    {
+      "path": "../../../scripts/gate_canary.py",
+      "md5": "9d90feacf0599d20c3719d06e842a414",
+      "size": 11180,
+      "mtimeNs": 1794359236965809716,
+      "birthNs": null
+    }
+  ]
+}

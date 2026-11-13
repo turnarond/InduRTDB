@@ -23,7 +23,8 @@
 #include <stdint.h>
 
 #include "dispatch/rtdbd_dispatch.h"     /* rtdbd_dispatch_cfg_t（业务语义配置快照） */
-#include "session/rtdbd_session.h"      /* rtdbd_session_role_t（角色枚举，§8.3-4） */
+#include "session/rtdbd_session.h"      /* 角色枚举 rtdbd_session_role_t（§8.3-4）及
+                                         * rtdbd_notify_counters_t（NOTIFY 门控诊断计数） */
 
 #ifdef __cplusplus
 extern "C" {
@@ -62,6 +63,16 @@ void rtdbd_vsoa_adapter_input(rtdbd_vsoa_adapter_t *a, const void *rfds /* fd_se
 
 /* 已绑定端口（未启动返回 0）。 */
 uint16_t rtdbd_vsoa_adapter_port(const rtdbd_vsoa_adapter_t *a);
+
+/* v3.12 M3.3 切片4：NOTIFY 门控诊断计数快照（adapter 全局聚合，传输无关纯标量）。
+ * 返回 4 个计数的逐字段值拷贝；NULL 输入返回全 0。供 IR 验收 / 运维读取。
+ * 类型 rtdbd_notify_counters_t 由已 include 的 session/rtdbd_session.h 提供。
+ * **注意：其中 snapshot_done_caps_only 的 VSOA 生产路径未接线，当前恒 0；
+ * 当前无生产调用点；属切片 5/IR1，见变更卡留白**。本 getter 是 IR 验收/运维
+ * 唯一读的出口，读取时务必注意该字段恒 0、勿误认为已实现生产定向。
+ * 本 getter 本身当前无自动化用例实跑（代码审查确认，未实跑；ON 侧冒烟测试
+ * 属切片 5 待办，见 TDD 证据留白节）。 */
+rtdbd_notify_counters_t rtdbd_vsoa_adapter_notify_counters(const rtdbd_vsoa_adapter_t *a);
 
 /* 设置服务端能力配置快照（/caps 用）。由上层（rtdbd 主循环）从运行配置填充。
  * 未设置时 /caps 回 NOT_IMPLEMENTED —— 宁可显式未实现，也不用零值糊弄对端。 */
