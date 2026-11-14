@@ -50,6 +50,13 @@ const rtdbd_peer_t *rtdbd_peer_table_get(const rtdbd_peer_table_t *t, const char
 /* 地址合法性（非空、长度合法、IPv4 点分十进制）。纯函数，供上层与单测复用。 */
 bool rtdbd_peer_addr_valid(const char *addr);
 
+/* 最小 lag 计算（§8.3-6 lag 精确语义未裁决）：lag = (local > applied) ? (local - applied) : 0。
+ * 抽为纯函数，供 rtdbd_peers_apply.c 与单测共用，避免依赖全局状态。 */
+static inline uint32_t rtdbd_peer_lag(uint64_t local_offset, uint64_t applied_offset)
+{
+    return (local_offset > applied_offset) ? (uint32_t)(local_offset - applied_offset) : 0u;
+}
+
 #ifdef __cplusplus
 }
 #endif

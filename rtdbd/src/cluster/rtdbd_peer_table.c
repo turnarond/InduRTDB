@@ -38,7 +38,15 @@ static bool peer_copy_checked(rtdbd_peer_t *dst, const rtdbd_peer_t *src,
         return false;
     }
     memset(dst, 0, sizeof(*dst));
-    memcpy(dst->addr, src->addr, strlen(src->addr) + 1);
+    /* 规范化 addr：inet_pton 接受前导零等非规范形式（如 192.168.001.001），而比对
+     * 端 inet_ntop 只产出规范 192.168.1.1，非规范输入会静默 DENIED。写入前统一
+     * 规范化为规范点分十进制，消除比对歧义。 */
+    struct in_addr in4;
+    if (inet_pton(AF_INET, src->addr, &in4) == 1) {
+        inet_ntop(AF_INET, &in4, dst->addr, sizeof(dst->addr));
+    } else {
+        memcpy(dst->addr, src->addr, strlen(src->addr) + 1);
+    }
     memcpy(dst->node_id, src->node_id, strlen(src->node_id) + 1);
     dst->state          = src->state;
     dst->boot_id        = src->boot_id;

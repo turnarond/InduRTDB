@@ -12,12 +12,24 @@ static rtdbd_peer_table_t g_peers_prev;
 
 int rtdbd_peers_apply_set(const rtdbd_peer_t *peers, uint32_t n)
 {
+    if (n > RTDBD_PEER_MAX) {
+        return -1;
+    }
     rtdbd_peer_table_t *tbl = rtdbd_peers_global();
     const char *self = rtdbd_peers_self_addr();
     rtdbd_defer_queue_t *dq = rtdbd_defer_global();
 
+    /* 最小 lag 计算（§8.3-6 lag 精确语义未裁决，仅落地本节点视角滞后量：
+     * lag = local_offset − peer.applied_offset，饱和 0）。boot_id 透传（来自上报节点）。 */
+    uint64_t local = rtdbd_peers_local_offset();
+    rtdbd_peer_t buf[RTDBD_PEER_MAX];
+    for (uint32_t i = 0; i < n; ++i) {
+        buf[i] = peers[i];
+        buf[i].lag = rtdbd_peer_lag(local, buf[i].applied_offset); /* 最小 lag（§8.3-6 语义未裁决） */
+    }
+
     g_peers_prev = *tbl;
-    if (rtdbd_peer_table_set(tbl, peers, n, self[0] ? self : NULL) != 0) {
+    if (rtdbd_peer_table_set(tbl, buf, n, self[0] ? self : NULL) != 0) {
         return -1; /* 旧表保持不变（§8.3-6） */
     }
 

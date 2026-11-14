@@ -2138,7 +2138,6 @@ static void defer_on_rebuild_subs(void* owner, uint32_t sid, uint32_t arg)
     if (!c || c->fd < 0) return;
     (void)rtdbd_session_install_subs(&c->session, NULL, 0);
 }
-
 static void defer_on_peer_add(void* owner, uint32_t sid, uint32_t arg)
 {
     (void)owner; (void)sid;
@@ -2186,8 +2185,11 @@ static void drain_deferred_actions(void)
     exec.on_peer_del        = defer_on_peer_del;
     /* TRIGGER_FULLSYNC 已闭环（JOINING->ACTIVE，成员接纳状态机）。 */
     exec.on_trigger_fullsync = defer_on_trigger_fullsync;
-    /* RECONNECT 依赖 sync.peers 连接管理与 IR1 全量补齐（M3.3+）：
-     * 执行器故意留 NULL —— 入队不丢，drain 只计 unavailable，绝不假装执行。 */
+    /* RECONNECT（§8.3-3）：UDS 侧重连重置会话订阅为空，与 rebuild_subs 同语义，
+     * 故直接复用 defer_on_rebuild_subs（去重，不另立同名函数）。VSOA 侧重建属
+     * M3.3+ 且 VSOA 会话不映射 g_conns，RECONNECT 仅对 UDS 有效；当前 VSOA 断链
+     * 入队点未接入（留后续），但执行器已就绪，UDS RECONNECT 入队即执行。 */
+    exec.on_reconnect = defer_on_rebuild_subs;
     exec.executed     = &g_defer_executed;
     exec.stale        = &g_defer_stale;
     exec.unavailable  = &g_defer_unavailable;
@@ -2197,6 +2199,8 @@ static void drain_deferred_actions(void)
 int main(int argc, char** argv)
 {
     rtdbd_defer_queue_init(rtdbd_defer_global());
+    /* v3.12 M3.3 切片3：启动生成本节点 boot_id（IR6 proc_restart_no_fullsync 判定用）。 */
+    rtdbd_peers_set_boot_id(rtdbd_boot_id_generate());
     const char* sock_path  = "/run/indurtdb/default.sock";
     const char* instance   = "default";
     const char* policy_path = NULL;

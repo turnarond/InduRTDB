@@ -189,3 +189,28 @@ TEST(IR3_DeferredQueue, PeerActionsAndFifoArePreserved)
     EXPECT_EQ(s.order[1], 1u);
     EXPECT_EQ(s.order[2], 2u);
 }
+
+TEST(IR3_DeferredQueue, ReconnectIsSessionScopedAndDispatched)
+{
+    /* §8.3-3 RECONNECT 是会话级动作（targets_session 包含它），须受 generation
+     * 约束；且 drain 须把它分派到 on_reconnect 执行器（切片2 接线后）。 */
+    rtdbd_defer_queue_t q;
+    rtdbd_defer_queue_init(&q);
+    Spy s;
+    rtdbd_defer_exec_t e = make_exec(&s, true); /* 含 on_reconnect spy */
+    ASSERT_TRUE(rtdbd_defer_push_gen(&q, RTDBD_DEFER_RECONNECT, 5, 0, 7u));
+    EXPECT_EQ(rtdbd_defer_actions_drain(&q, 32u, &e), 1u);
+    EXPECT_EQ(s.reconnect, 1);
+    EXPECT_EQ(s.executed, 1u);
+
+    /* generation 失配（会话已失效/槽位复用）→ no-op（stale），绝不执行 */
+    Spy s2;
+    rtdbd_defer_queue_t q2;
+    rtdbd_defer_queue_init(&q2);
+    rtdbd_defer_exec_t e2 = make_exec(&s2, true);
+    ASSERT_TRUE(rtdbd_defer_push_gen(&q2, RTDBD_DEFER_RECONNECT, 5, 0, 7u));
+    s2.generation = 8u;
+    EXPECT_EQ(rtdbd_defer_actions_drain(&q2, 32u, &e2), 0u);
+    EXPECT_EQ(s2.reconnect, 0);
+    EXPECT_EQ(s2.stale, 1u);
+}

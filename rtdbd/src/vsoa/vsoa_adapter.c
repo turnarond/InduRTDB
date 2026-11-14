@@ -15,6 +15,7 @@
 #include "dispatch/rtdbd_dispatch.h"
 #include "cluster/rtdbd_peers_global.h"
 #include "session/rtdbd_session.h" /* per-cli 传输无关会话（§8.3-3） */
+#include "session/rtdbd_authz.h"   /* §8.3-4 身份/来源授权判据（M3.x P7） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -60,6 +61,9 @@ struct rtdbd_vsoa_adapter {
         bool            used;
         rtdbd_session_t session;
     } cli[RTDBD_VSOA_MAX_CLI];
+    /* v3.12 M3.3 切片4：NOTIFY 门控诊断计数（adapter 全局聚合，非 per-session）。
+     * calloc 创建时自动零初始化；纯标量、单线程普通 ++（doc 13 §8.3-3）。 */
+    rtdbd_notify_counters_t notify_counters;
     /* 回调内使用的响应缓冲：SDK 规定 payload 在回调返回后失效，故必须自备。 */
     uint8_t            resp[RTDBD_VSOA_RESP_MAX];
 };
@@ -145,25 +149,30 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
         return RTDBD_ST_DENIED; /* token 不匹配 */
     }
 
-    /* 来源强校验（§8.3-4）：plc 必须来自 loopback；sync_peer 必须来自
-     * sync.peers（peer 表尚未实现 → 显式拒绝，不放行）。 */
+    /* 来源强校验（§8.3-4）：判据下沉到传输无关纯逻辑 rtdbd_authz。
+     * - plc / sync_admin 仅 127/8（由 rtdbd_authz_source_allowed 处理）；
+     * - sync_peer 必须是已知集群成员（来源 addr 落在运行时成员表 addr 集合，
+     *   由 rtdbd_authz_sync_peer_source_allowed 查 rtdbd_peers_global()）。 */
     struct sockaddr_storage peer_addr;
     socklen_t plen = sizeof(peer_addr);
     memset(&peer_addr, 0, sizeof(peer_addr));
     if (!vsoa_server_cli_address(server, id, (struct sockaddr *)&peer_addr, &plen)) {
         return RTDBD_ST_DENIED;
     }
-    if (ent->role == RTDBD_ROLE_PLC || ent->role == RTDBD_ROLE_SYNC_ADMIN) {
-        /* §197：sync_admin 与 plc 一样只接受 loopback（成员管控不得跨机）。 */
-        if (peer_addr.ss_family != AF_INET) {
-            return RTDBD_ST_DENIED;
-        }
+    const bool is_ipv4 = (peer_addr.ss_family == AF_INET);
+    uint32_t addr_host = 0;
+    char srcbuf[INET_ADDRSTRLEN];
+    srcbuf[0] = '\0';
+    if (is_ipv4) {
         const struct sockaddr_in *in4 = (const struct sockaddr_in *)&peer_addr;
-        if ((ntohl(in4->sin_addr.s_addr) & 0xFF000000u) != 0x7F000000u) {
-            return RTDBD_ST_DENIED; /* plc / sync_admin 必须 loopback */
-        }
-    } else {
-        return RTDBD_ST_NOT_IMPLEMENTED; /* sync_peer 来源校验依赖成员表（未实现） */
+        addr_host = ntohl(in4->sin_addr.s_addr);
+        inet_ntop(AF_INET, &in4->sin_addr, srcbuf, sizeof(srcbuf));
+    }
+    const uint16_t src_st = (ent->role == RTDBD_ROLE_SYNC_PEER)
+        ? rtdbd_authz_sync_peer_source_allowed(rtdbd_peers_global(), srcbuf)
+        : rtdbd_authz_source_allowed(ent->role, is_ipv4, addr_host);
+    if (src_st != RTDBD_ST_OK) {
+        return src_st;
     }
 
     rtdbd_session_t *sess = cli_session(a, id);
@@ -184,9 +193,35 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
     return RTDBD_ST_OK;
 }
 
+/* v3.12 M3.3 切片4：RBE 判定回调包装。rtdbd_dispatch_notify_rbe 有副作用
+ * （推进 subtab 状态），由 session 层门控纯函数在「sync_peer / 未订阅」过滤后
+ * 才调用，保证未订阅 / 回环连接不消耗 RBE 状态（与 UDS 侧同顺序）。 */
+typedef struct {
+    const rtdbd_write_req_t *w;
+    const indurtdb_meta_t   *meta;
+} vsoa_rbe_ctx_t;
+
+static bool vsoa_rbe_decide(void *ctx, rtdbd_session_t *s, uint32_t point_id)
+{
+    vsoa_rbe_ctx_t *c = (vsoa_rbe_ctx_t *)ctx;
+    /* 同源不变量（评审 M-2）：gate 用入参 point_id 判订阅
+     * （rtdbd_session_subs_contains），而 rtdbd_dispatch_notify_rbe 内部用
+     * c->w->point_id 推进 subtab 的 RBE 状态。接线处 vsoa_notify_dispatch 把
+     * 同一个 w 同时作为 gate 的 point_id 来源（w->point_id）与 rctx.w，故二者
+     * 必须同源；否则订阅判定与状态推进会对错点，破坏门控语义。
+     * 项目无运行时 assert 范式（仅编译期 _Static_assert；引入 <assert.h> 会
+     * 破坏本文件的分层边界），改用等价的「不同源返回 false」防御：正确路径
+     * （同源）返回值不变，不同源时抑制发送而非继续推进 RBE 状态。 */
+    if (c->w->point_id != point_id) {
+        return false;
+    }
+    return rtdbd_dispatch_notify_rbe(&s->sub, c->w, c->meta);
+}
+
 /* 变更通知定向投递（§8.3-5）：对每个**订阅了该点**的 per-cli 会话做 RBE 门控，
  * 通过者用 cli_datagram 逐连接定向发送（**禁用** publish / quick_datagram）。
- * role=sync_peer 的会话不得接收 NOTIFY（防回环，§8.3-4/§8.3-5）。 */
+ * role=sync_peer 的会话不得接收 NOTIFY（防回环，§8.3-4/§8.3-5）。
+ * 门控 + 计数走 session 层传输无关纯函数，adapter 全局计数由本循环推进。 */
 static void vsoa_notify_dispatch(rtdbd_vsoa_adapter_t *a,
                                  const rtdbd_write_req_t *w,
                                  const indurtdb_meta_t *meta)
@@ -206,18 +241,18 @@ static void vsoa_notify_dispatch(rtdbd_vsoa_adapter_t *a,
 
     for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
         if (!a->cli[i].used) {
-            continue;
+            continue; /* ① 空槽 */
         }
         rtdbd_session_t *sess = &a->cli[i].session;
-        if (rtdbd_session_is_sync_peer(sess)) {
-            continue; /* sync_peer 不得收 NOTIFY（防回环） */
+        vsoa_rbe_ctx_t rctx = { w, meta };
+        rtdbd_notify_gate_t g = rtdbd_session_notify_gate(
+            sess, w->point_id, vsoa_rbe_decide, &rctx, &a->notify_counters);
+        if (g != RTDBD_NOTIFY_GATE_HIT) {
+            continue; /* ②③ sync_peer / 未订阅 SKIP；④ RBE 抑制 MISS */
         }
-        if (!rtdbd_session_subs_contains(sess, w->point_id)) {
-            continue; /* 未订阅该点 */
-        }
-        /* RBE 门控：死区未越过则抑制（共享语义，与 UDS 同一状态机） */
-        if (!rtdbd_dispatch_notify_rbe(&sess->sub, w, meta)) {
-            continue;
+        if (!rtdbd_session_notify_deliver_guard(sess, w->point_id,
+                                                &a->notify_counters)) {
+            continue; /* 发送点护栏：非订阅者/sync_peer 差点收包 → 记泄露并拒发 */
         }
         vsoa_payload_t pl;
         memset(&pl, 0, sizeof(pl));
@@ -340,6 +375,25 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
     uint16_t opcode = 0;
     if (rtdbd_opcode_from_url(bare, &opcode) != 0) {
         return; /* 非镜像能力：不处理（也不落错误 reply，避免半实现误导） */
+    }
+
+    /* §8.3-4 role→URL 授权（M3.x P7）：镜像能力公共分派路径的 deny-by-default。
+     * /hello 与 /sync/peers/{set,get} 已在上面按专有 URL 处理，不会走到这里。
+     * 仅对「真握手」会话生效：role 由 token 表赋值（非 UNKNOWN）。
+     * allow_unauthenticated + default_uid 的本机联调会话 role 仍是 UNKNOWN，
+     * 沿用既有 cred_ok 判据，不受本门禁影响（避免误伤既有 e2e 用例）。 */
+    rtdbd_session_t *gate_sess = cli_session(a, id);
+    if (gate_sess && gate_sess->cred.cred_ok &&
+        gate_sess->role != RTDBD_ROLE_UNKNOWN &&
+        !rtdbd_authz_url_allowed(gate_sess->role, bare)) {
+        vsoa_payload_t denied;
+        memset(&denied, 0, sizeof(denied));
+        uint32_t dseq = hdr ? ntohl(hdr->seqno) : 0u;
+        uint16_t dtun = hdr ? ntohs(hdr->tunid) : 0u;
+        (void)vsoa_server_cli_reply(server, id,
+                                    (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_DENIED),
+                                    dseq, dtun, &denied);
+        return;
     }
 
     size_t resp_len = 0;
@@ -595,6 +649,17 @@ void rtdbd_vsoa_adapter_input(rtdbd_vsoa_adapter_t *a, const void *rfds)
 uint16_t rtdbd_vsoa_adapter_port(const rtdbd_vsoa_adapter_t *a)
 {
     return a ? a->port : 0u;
+}
+
+rtdbd_notify_counters_t rtdbd_vsoa_adapter_notify_counters(const rtdbd_vsoa_adapter_t *a)
+{
+    rtdbd_notify_counters_t out;
+    if (!a) {
+        memset(&out, 0, sizeof(out));
+        return out;
+    }
+    rtdbd_notify_counters_snapshot(&a->notify_counters, &out);
+    return out;
 }
 
 void rtdbd_vsoa_adapter_set_cfg(rtdbd_vsoa_adapter_t *a, const rtdbd_dispatch_cfg_t *cfg)

@@ -220,6 +220,27 @@ def case_dispatch_boundary(tmp):
     return code != 0, "dispatch 层出现 VSOA/fd 符号", out
 
 
+def case_t1t2(tmp):
+    """坏样本：篡改 check_t1t2_bench.py 的 ≤10 μs 阈值为 ≤0.001 μs
+    （篡改 Stage 输入值），本机真实 ~0.3μs 也应判 FAIL；工具须返回非 0。
+
+    覆盖 v2 §6 判据 3 / 评审 M2：新增守卫能对坏样本返回非 0，否则即假绿。
+    """
+    src = HERE / "check_t1t2_bench.py"
+    if not src.is_file():
+        return False, "T1/T2 基准守卫", "缺少 scripts/check_t1t2_bench.py"
+    d = tmp / "t1t2"
+    d.mkdir(parents=True, exist_ok=True)
+    tampered = d / "check_t1t2_bench_tampered.py"
+    text = src.read_text(encoding="utf-8")
+    tampered_text = text.replace("P99_THRESHOLD_US = 10.0", "P99_THRESHOLD_US = 0.001")
+    if tampered_text == text:
+        return False, "阈值常量未被替换", "未找到 'P99_THRESHOLD_US = 10.0'"
+    tampered.write_text(tampered_text, encoding="utf-8")
+    code, out = run([sys.executable, str(tampered), "--root", str(REPO)])
+    return code != 0, "篡改阈值≤0.001μs仍绿(假绿)", out
+
+
 CASES = [
     ("版本号守卫", case_version),
     ("架构分层守卫", case_arch),
@@ -229,6 +250,7 @@ CASES = [
     ("发布门条件闭环守卫", case_conditional_gate),
     ("B 段数字落库守卫", case_release_conditions),
     ("dispatch 符号边界守卫", case_dispatch_boundary),
+    ("T1/T2 基准守卫", case_t1t2),
 ]
 
 

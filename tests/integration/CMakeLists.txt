@@ -286,6 +286,21 @@ if(TARGET rtdbd AND TARGET irtcli AND TARGET irtcli_cli)
     add_test(NAME test_irtcli_peers COMMAND test_irtcli_peers)
 endif()
 
+# ---- v3.12 M3.x / P7：鉴权判据（纯逻辑，默认构建即可运行）----
+# 用例名固定 IR2_AuthDeny（§11.1 required_irs 之一，不得改名）。
+add_executable(IR2_AuthDeny IR2_AuthDeny.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c)
+target_include_directories(IR2_AuthDeny PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/src
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
+target_link_libraries(IR2_AuthDeny PRIVATE GTest::gtest GTest::gtest_main)
+set_target_properties(IR2_AuthDeny PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME IR2_AuthDeny COMMAND IR2_AuthDeny)
+
 # ---- v3.12 M3.2 ③：延迟动作队列循环尾执行器（纯逻辑，默认构建即可运行）----
 # 用例名固定 IR3_DeferredQueue（§11.1 required_irs 之一，不得改名）。
 add_executable(IR3_DeferredQueue IR3_DeferredQueue.cpp
@@ -306,7 +321,8 @@ add_test(NAME IR3_DeferredQueue COMMAND IR3_DeferredQueue)
 # ---- v3.12 M3/IR4：成员运行时表语义（纯逻辑，默认构建即可运行）----
 # 用例名固定为 IR4_PeersRuntime（§11.1 required_irs 之一，不得改名）。
 add_executable(IR4_PeersRuntime IR4_PeersRuntime.cpp
-    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c)
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c)
 target_include_directories(IR4_PeersRuntime PRIVATE
     ${PROJECT_SOURCE_DIR}/rtdbd/include
     ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster)
@@ -314,6 +330,22 @@ target_link_libraries(IR4_PeersRuntime PRIVATE GTest::gtest GTest::gtest_main)
 set_target_properties(IR4_PeersRuntime PROPERTIES
     CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 add_test(NAME IR4_PeersRuntime COMMAND IR4_PeersRuntime)
+
+# ---- v3.12 M3.3 切片4：NOTIFY 门控 RBE 计数暴露（纯逻辑，OFF/ON 均编译）----
+# ctest 名固定 IR4_RbeCounters（不占用切片 5 的 IR5_NotifyDirection 名）。
+# 放在 if(INDURTDB_ENABLE_VSOA) 块之外：默认 OFF 构建也注册并运行。
+add_executable(IR4_RbeCounters IR4_RbeCounters.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
+target_include_directories(IR4_RbeCounters PRIVATE
+    ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/include
+    ${PROJECT_SOURCE_DIR}/rtdbd/src
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/session)
+target_link_libraries(IR4_RbeCounters PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(IR4_RbeCounters PROPERTIES
+    CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME IR4_RbeCounters COMMAND IR4_RbeCounters)
 
 # ---- v3.12 M1.3c：VSOA 端到端联调用例（server 子进程 + client 父进程）----
 # 仅在 INDURTDB_ENABLE_VSOA=ON 时注册 —— 干净树默认构建不含此用例，也不引入
@@ -327,6 +359,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
@@ -398,6 +431,31 @@ if(INDURTDB_ENABLE_VSOA)
     add_dependencies(test_vsoa_peers_admin rtdbd)
     add_test(NAME test_vsoa_peers_admin COMMAND test_vsoa_peers_admin)
 
+    # ---- v3.12 M3.x / P7：鉴权端到端（真实 rtdbd + token 表，ON-only）----
+    # 与默认构建的 IR2_AuthDeny 纯逻辑判据互补：证明约束真的接进生产路径。
+    add_executable(test_vsoa_auth test_vsoa_auth.cpp)
+    target_include_directories(test_vsoa_auth PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_compile_definitions(test_vsoa_auth PRIVATE
+        _GNU_SOURCE RTDBD_BIN="$<TARGET_FILE:rtdbd>")
+    target_link_libraries(test_vsoa_auth PRIVATE
+        GTest::gtest GTest::gtest_main
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_auth PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(test_vsoa_auth PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_auth PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_dependencies(test_vsoa_auth rtdbd)
+    add_test(NAME test_vsoa_auth COMMAND test_vsoa_auth)
+
     # ---- v3.12 M2：6 节点编排 + 故障注入 harness（IR1–IR7 的基础设施）----
     add_executable(test_vsoa_cluster test_vsoa_cluster.cpp
         vsoa_cluster_harness.cpp
@@ -408,6 +466,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
@@ -430,4 +489,41 @@ if(INDURTDB_ENABLE_VSOA)
         BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME test_vsoa_cluster COMMAND test_vsoa_cluster)
+
+    # ---- v3.12 M3.3 切片5（IR5 = P9 部分闭环）：NOTIFY 端到端定向 ----
+    # ctest 名固定 IR5_NotifyDirection（doc 13 §11.1 表 P9）。仅 NOTIFY 定向；
+    # SNAPSHOT_DONE 生产定向按用户裁决 q1 移出本切片。仓库无 file(GLOB)，显式注册。
+    # 须重新 `cmake -S . -B build-vsoa` 才会收录；OFF 构建不注册（不编 adapter）。
+    add_executable(IR5_NotifyDirection test_vsoa_notify.cpp
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+    target_include_directories(IR5_NotifyDirection PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include
+        ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_compile_definitions(IR5_NotifyDirection PRIVATE _GNU_SOURCE)
+    target_link_libraries(IR5_NotifyDirection PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb
+        "-l:libvsoa-server.so"
+        "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so"
+        "-l:libvsoa-json.so")
+    target_link_directories(IR5_NotifyDirection PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(IR5_NotifyDirection PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(IR5_NotifyDirection PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME IR5_NotifyDirection COMMAND IR5_NotifyDirection)
 endif()
