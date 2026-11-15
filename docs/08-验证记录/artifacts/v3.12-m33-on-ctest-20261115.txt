@@ -1,0 +1,126 @@
+Internal ctest changing into directory: /home/yanchaodong/work/my_open_source/InduRTDB/build-vsoa
+Test project /home/yanchaodong/work/my_open_source/InduRTDB/build-vsoa
+      Start  1: test_c_api
+ 1/60 Test  #1: test_c_api .......................   Passed    0.01 sec
+      Start  2: test_c_api_v2
+ 2/60 Test  #2: test_c_api_v2 ....................   Passed    0.01 sec
+      Start  3: test_c_boundary
+ 3/60 Test  #3: test_c_boundary ..................   Passed    0.01 sec
+      Start  4: test_c_concurrency
+ 4/60 Test  #4: test_c_concurrency ...............   Passed    0.01 sec
+      Start  5: test_c_config
+ 5/60 Test  #5: test_c_config ....................   Passed    0.01 sec
+      Start  6: test_c_data_model
+ 6/60 Test  #6: test_c_data_model ................   Passed    0.01 sec
+      Start  7: test_c_delta
+ 7/60 Test  #7: test_c_delta .....................   Passed    0.01 sec
+      Start  8: test_c_diag
+ 8/60 Test  #8: test_c_diag ......................   Passed    3.96 sec
+      Start  9: test_c_dispatch
+ 9/60 Test  #9: test_c_dispatch ..................   Passed    0.01 sec
+      Start 10: test_c_edge_cases
+10/60 Test #10: test_c_edge_cases ................   Passed    0.01 sec
+      Start 11: test_c_index
+11/60 Test #11: test_c_index .....................   Passed    0.01 sec
+      Start 12: test_c_layout_seqlock
+12/60 Test #12: test_c_layout_seqlock ............   Passed    0.01 sec
+      Start 13: test_c_layout_v2
+13/60 Test #13: test_c_layout_v2 .................   Passed    0.01 sec
+      Start 14: test_c_meta
+14/60 Test #14: test_c_meta ......................   Passed    0.01 sec
+      Start 15: test_c_migration
+15/60 Test #15: test_c_migration .................   Passed    0.52 sec
+      Start 16: test_c_mirror
+16/60 Test #16: test_c_mirror ....................   Passed    0.12 sec
+      Start 17: test_c_multi_instance
+17/60 Test #17: test_c_multi_instance ............   Passed    0.01 sec
+      Start 18: test_c_osal
+18/60 Test #18: test_c_osal ......................   Passed    0.01 sec
+      Start 19: test_c_performance
+19/60 Test #19: test_c_performance ...............   Passed    0.01 sec
+      Start 20: test_c_pm
+20/60 Test #20: test_c_pm ........................   Passed    0.26 sec
+      Start 21: test_c_point_fields
+21/60 Test #21: test_c_point_fields ..............   Passed    0.01 sec
+      Start 22: test_c_policy
+22/60 Test #22: test_c_policy ....................   Passed    0.01 sec
+      Start 23: test_c_quality
+23/60 Test #23: test_c_quality ...................   Passed    0.02 sec
+      Start 24: test_c_rbe
+24/60 Test #24: test_c_rbe .......................   Passed    0.01 sec
+      Start 25: test_c_reliability
+25/60 Test #25: test_c_reliability ...............   Passed    0.02 sec
+      Start 26: test_c_semantics
+26/60 Test #26: test_c_semantics .................   Passed    0.01 sec
+      Start 27: test_c_session
+27/60 Test #27: test_c_session ...................   Passed    0.01 sec
+      Start 28: test_c_shm
+28/60 Test #28: test_c_shm .......................   Passed    0.01 sec
+      Start 29: test_c_sub
+29/60 Test #29: test_c_sub .......................   Passed    0.01 sec
+      Start 30: test_c_version
+30/60 Test #30: test_c_version ...................   Passed    0.01 sec
+      Start 31: Gate.ApiCountMatches
+31/60 Test #31: Gate.ApiCountMatches .............   Passed    0.08 sec
+      Start 32: test_c_multi_process
+32/60 Test #32: test_c_multi_process .............   Passed    0.01 sec
+      Start 33: test_rtdbd_core
+33/60 Test #33: test_rtdbd_core ..................   Passed    0.19 sec
+      Start 34: test_rtdbd_recovery
+34/60 Test #34: test_rtdbd_recovery ..............   Passed    0.68 sec
+      Start 35: test_rtdbd_notify
+35/60 Test #35: test_rtdbd_notify ................   Passed    8.45 sec
+      Start 36: test_irtcli_queue
+36/60 Test #36: test_irtcli_queue ................   Passed    0.18 sec
+      Start 37: test_e2e_mixed
+37/60 Test #37: test_e2e_mixed ...................   Passed    0.50 sec
+      Start 38: test_rtdbd_proto_v2
+38/60 Test #38: test_rtdbd_proto_v2 ..............   Passed    4.22 sec
+      Start 39: test_rtdbd_proto_v3
+39/60 Test #39: test_rtdbd_proto_v3 ..............   Passed    0.39 sec
+      Start 40: test_irtcli_cli
+40/60 Test #40: test_irtcli_cli ..................   Passed    0.09 sec
+      Start 41: test_rtdbd_health
+41/60 Test #41: test_rtdbd_health ................   Passed    2.14 sec
+      Start 42: test_rtdbd_config
+42/60 Test #42: test_rtdbd_config ................   Passed    0.44 sec
+      Start 43: test_rtdbd_backpressure
+43/60 Test #43: test_rtdbd_backpressure ..........   Passed    2.38 sec
+      Start 44: test_rtdbd_delta
+44/60 Test #44: test_rtdbd_delta .................   Passed    0.27 sec
+      Start 45: test_rtdbd_peers
+45/60 Test #45: test_rtdbd_peers .................   Passed    8.11 sec
+      Start 46: test_peers_global
+46/60 Test #46: test_peers_global ................   Passed    0.01 sec
+      Start 47: test_sync_self_addr
+47/60 Test #47: test_sync_self_addr ..............   Passed    0.02 sec
+      Start 48: test_irtcli_peers
+48/60 Test #48: test_irtcli_peers ................   Passed    0.06 sec
+      Start 49: IR2_AuthDeny
+49/60 Test #49: IR2_AuthDeny .....................   Passed    0.01 sec
+      Start 50: IR3_DeferredQueue
+50/60 Test #50: IR3_DeferredQueue ................   Passed    0.01 sec
+      Start 51: IR4_PeersRuntime
+51/60 Test #51: IR4_PeersRuntime .................   Passed    0.01 sec
+      Start 52: IR4_RbeCounters
+52/60 Test #52: IR4_RbeCounters ..................   Passed    0.01 sec
+      Start 53: test_vsoa_e2e
+53/60 Test #53: test_vsoa_e2e ....................   Passed    0.09 sec
+      Start 54: test_vsoa_main_loop
+54/60 Test #54: test_vsoa_main_loop ..............   Passed    0.22 sec
+      Start 55: test_vsoa_peers_admin
+55/60 Test #55: test_vsoa_peers_admin ............   Passed    3.43 sec
+      Start 56: test_vsoa_auth
+56/60 Test #56: test_vsoa_auth ...................   Passed    0.65 sec
+      Start 57: test_vsoa_cluster
+57/60 Test #57: test_vsoa_cluster ................   Passed    1.16 sec
+      Start 58: IR5_NotifyDirection
+58/60 Test #58: IR5_NotifyDirection ..............   Passed   10.30 sec
+      Start 59: peers_example
+59/60 Test #59: peers_example ....................   Passed    1.52 sec
+      Start 60: vsoa_dualstack_example
+60/60 Test #60: vsoa_dualstack_example ...........   Passed    0.11 sec
+
+100% tests passed, 0 tests failed out of 60
+
+Total Test time (real) =  50.83 sec
