@@ -4,15 +4,17 @@
  * @version 3.12.0
  * @date 2026-11-19
  *
- * 覆盖可单台验证的四类语义：
- *   1. OSAL 时间单调性 / 墙钟可用性
- *   2. 点位写入-读回一致性（v2 句柄 API）
- *   3. fork 后子进程 attach 同一共享内存段（owner vs attacher）
- *   4. 遗留奇数 write_seq 的崩溃恢复
+ * 覆盖可单台验证的五类语义（SylixOS 平台适配版）：
+ *   1. OSAL 时间单调性 / 墙钟非零非递减（不假设 Unix epoch——PLC RTC 可为 2000）
+ *   2. 点位写入-读回一致性（v2 句柄 API）—— v3.12 atomic64 修复的核心验证点
+ *   3. fork 子进程 attach（SylixOS 无 fork → 标 N/A，非产品缺陷）
+ *   4. reopen 一致性（崩溃恢复后的读回）
+ *   5. 多线程并发写（3 线程各 40 次）写锁串行 + write_count 精确累加
+ *      —— v3.12 atomic64 修复（非对齐 8 字节原子）的可证伪用例
  *
  * 用法：sylixos_smoke <instance_id>
- * 每类以 "[CASE n] PASS/FAIL" 打印；全部通过打印 "SMOKE_RESULT: PASS" 并 exit 0，
- * 任一失败打印 "SMOKE_RESULT: FAIL" 并 exit 1。字符串回显不作为证据，断言+退出码才是。
+ * 每类以 "[CASE n] PASS/FAIL/N/A" 打印；无 FAIL 打印 "SMOKE_RESULT: PASS" 并 exit 0
+ * （N/A 不计失败），有 FAIL 打印 "SMOKE_RESULT: FAIL" 并 exit 1。断言+退出码才是证据。
  *
  * 注意：SylixOS shell 不支持 '<'/'>' 重定向与 '&&'，输出直接到终端，由 telnet 回显取证。
  */
@@ -25,6 +27,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 static int g_fail = 0;
 
@@ -34,7 +37,17 @@ static void case_result(int idx, int ok, const char* detail) {
     if (!ok) g_fail++;
 }
 
-/* 1. OSAL 时间：单调钟非递减、墙钟为 Unix epoch 量级、sleep 后单调钟前进 */
+/* 平台不支持的用例标 N/A，不计入失败（如实记录，不伪造 PASS） */
+static int g_na = 0;
+static void case_na(int idx, const char* reason) {
+    printf("[CASE %d] N/A : %s\n", idx, reason);
+    g_na++;
+}
+
+/* 1. OSAL 时间：单调钟非递减且 sleep 后前进；墙钟非零且非递减。
+ *    v3.12 修正：不假设墙钟是 Unix epoch——19 号方案明确「PLC 设备时钟不可信，
+ *    物理时间戳不参与排序」，实测设备 RTC=2000-01-01（掉电后无电池/NTP）。
+ *    墙钟仅用于对外展示的入库时刻，业务排序用单调钟。 */
 static void test_time(void) {
     uint64_t t0 = irt_time_now_ns();
     uint64_t w0 = irt_time_realtime_ns();
@@ -43,11 +56,11 @@ static void test_time(void) {
     uint64_t w1 = irt_time_realtime_ns();
 
     int mono_ok = (t1 >= t0);
-    int wall_ok = (w0 > 1600000000000000000ULL && w1 >= w0); /* 2020 年后且非递减：是 epoch 而非单调起点 */
+    int wall_ok = (w0 != 0 && w1 >= w0); /* 非零 + 非递减，不断言 epoch 起点 */
     int adv_ok = (t1 > t0);
     char detail[160];
     snprintf(detail, sizeof(detail),
-             "mono t0=%llu t1=%llu wall0=%llu wall1=%llu",
+             "mono t0=%llu t1=%llu wall0=%llu wall1=%llu(rtc-as-is)",
              (unsigned long long)t0, (unsigned long long)t1,
              (unsigned long long)w0, (unsigned long long)w1);
     case_result(1, mono_ok && wall_ok && adv_ok, detail);
@@ -90,7 +103,8 @@ static void test_fork_attach(const char* instance) {
 
     pid_t pid = fork();
     if (pid < 0) {
-        case_result(3, 0, "fork failed");
+        /* SylixOS 3.6.5 无 fork（进程由 servermgr 管理），非产品缺陷，标 N/A */
+        case_na(3, "fork unavailable on SylixOS 3.6.5 (process model = servermgr)");
         indurtdb_h_close(db);
         return;
     }
@@ -141,6 +155,76 @@ static void test_reopen_consistency(const char* instance) {
     case_result(4, ok, ok ? "reopen readback consistent" : "reopen failed");
 }
 
+/* 5. 多线程并发写（判据 4）：SylixOS 无 fork，改用 3 线程共享句柄各写 40 次，
+ *    写锁冲突时退避重试直到成功；验证无崩溃且 write_count 增量 == 3*40。
+ *    并发写触及修复点（锁内普通自增）：若仍有非对齐 8 字节原子必崩（可证伪）；
+ *    若锁内自增在并发下丢失更新，增量 < 期望（可证伪）。
+ *    注：多线程与多进程共用同一 seqlock+stats 语义（同一共享 header），
+ *    此用例验证修复核心（并发下计数正确），跨平台进程模型的差异另记。 */
+#define SMOKE_NTHREAD 3
+#define SMOKE_NWRITES 40
+
+typedef struct {
+    indurtdb_t* db;
+    int idx;
+    int done;
+} smoke_writer_t;
+
+static void* smoke_writer_thread(void* arg) {
+    smoke_writer_t* w = (smoke_writer_t*)arg;
+    for (int t = 0; t < SMOKE_NWRITES * 20 && w->done < SMOKE_NWRITES; ++t) {
+        int32_t v = (int32_t)(w->idx * 1000 + w->done);
+        /* 各线程写独立点位 id=10+idx；只关心计数，不读回值 */
+        if (indurtdb_h_write_int32(w->db, (uint32_t)(10 + w->idx), v) == 0) {
+            ++w->done;
+        } else {
+            irt_time_sleep_ns(1000000ULL); /* 1ms 退避，写锁冲突重试 */
+        }
+    }
+    return NULL;
+}
+
+static void test_concurrent_writes(const char* instance) {
+    indurtdb_t* db = NULL;
+    indurtdb_cfg_t cfg = { .max_points = 64, .max_subscribers = 8 };
+    if (indurtdb_h_open(&db, instance, &cfg) != 0) {
+        case_result(5, 0, indurtdb_get_last_error());
+        return;
+    }
+    uint64_t base = indurtdb_h_get_write_count(db);
+
+    pthread_t tids[SMOKE_NTHREAD];
+    smoke_writer_t writers[SMOKE_NTHREAD];
+    int created = 0;
+    for (int i = 0; i < SMOKE_NTHREAD; ++i) {
+        writers[i].db = db;
+        writers[i].idx = i;
+        writers[i].done = 0;
+        if (pthread_create(&tids[i], NULL, smoke_writer_thread, &writers[i]) == 0) {
+            ++created;
+        } else {
+            break;
+        }
+    }
+
+    int threads_ok = (created == SMOKE_NTHREAD);
+    for (int i = 0; i < created; ++i) {
+        pthread_join(tids[i], NULL);
+        if (writers[i].done != SMOKE_NWRITES) threads_ok = 0;
+    }
+
+    uint64_t after = indurtdb_h_get_write_count(db);
+    uint64_t delta = after - base;
+    uint64_t expect = (uint64_t)(SMOKE_NTHREAD * SMOKE_NWRITES);
+    int ok = threads_ok && (delta == expect);
+
+    char detail[160];
+    snprintf(detail, sizeof(detail), "delta=%llu expect=%llu threads_ok=%d",
+             (unsigned long long)delta, (unsigned long long)expect, threads_ok);
+    case_result(5, ok, detail);
+    indurtdb_h_close(db);
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
         printf("usage: sylixos_smoke <instance_id>\n");
@@ -154,11 +238,12 @@ int main(int argc, char** argv) {
     test_rw(instance);
     test_fork_attach(instance);
     test_reopen_consistency(instance);
+    test_concurrent_writes(instance);
 
     if (g_fail == 0) {
-        printf("SMOKE_RESULT: PASS (4/4)\n");
+        printf("SMOKE_RESULT: PASS (%d passed, %d N/A)\n", 5 - g_na, g_na);
         return 0;
     }
-    printf("SMOKE_RESULT: FAIL (%d case(s) failed)\n", g_fail);
+    printf("SMOKE_RESULT: FAIL (%d failed, %d N/A)\n", g_fail, g_na);
     return 1;
 }

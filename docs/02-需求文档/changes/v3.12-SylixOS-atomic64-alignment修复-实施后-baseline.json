@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-19T07:21:35.991938+00:00",
+  "capturedAtNs": 1795072895991937606,
+  "artifacts": [
+    {
+      "path": "v3.12-SylixOS-atomic64-alignment修复.md",
+      "md5": "d62544c3d2e51dc0bd6ceceb0f25b758",
+      "size": 11647,
+      "mtimeNs": 1795072857130567360,
+      "birthNs": null
+    }
+  ]
+}

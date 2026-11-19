@@ -77,9 +77,14 @@ static int pm_write_impl_q(irt_pm_t* pm, uint32_t id,
      * ARM weak memory ordering: 保证所有数据写入 (type/value/timestamp/
      * quality) 在 seqlock 释放前对其它 CPU 可见. x86 TSO 下是 no-op.
      */
+    /* v3.12 SylixOS atomic64 修复：stats.writes 在 packed header 偏移 28
+     * （仅 4 字节对齐），AArch64 上 64 位 __atomic_fetch_add 会生成
+     * __aarch64_ldadd8_relax helper，于 SylixOS 3.6.5 触发内核异常。
+     * 改在 seqlock 写锁内用普通自增：写者已被写锁串行，无写-写竞争；
+     * 普通 ldr/str 支持非对齐；stats 被 Header CRC 刻意排除（irt_shm.c）。 */
+    hdr->stats.writes += 1;
     __atomic_thread_fence(__ATOMIC_RELEASE);
     irt_seqlock_write_end(&hdr->write_seq, seq0);
-    __atomic_fetch_add(&hdr->stats.writes, 1, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -273,9 +278,11 @@ int irt_pm_check_timeouts(irt_pm_t* pm, uint64_t timeout_ns) {
         /* 超时刻保留量程位（T6：量程位与可用性正交，不得被基础码覆盖） */
         p->quality = INDURTDB_QUALITY_MAKE(INDURTDB_QUALITY_TIMEOUT,
                                            INDURTDB_QUALITY_LIMIT(p->quality));
+        /* v3.12 SylixOS atomic64 修复：同 writes，stats.timeouts@36 非 8 对齐，
+         * 改在写锁内普通自增（32 位 scan_skipped@264 用原 fetch_add 不受影响）。 */
+        hdr->stats.timeouts += 1;
         __atomic_thread_fence(__ATOMIC_RELEASE);
         irt_seqlock_write_end(&hdr->write_seq, seq0);
-        __atomic_fetch_add(&hdr->stats.timeouts, 1, __ATOMIC_RELAXED);
         detected++;
     }
     return detected;
