@@ -31,3 +31,4 @@
 | `v3.12-B段数字落库.json` | v3.12 B 段 | 7 项（P3/P6–P11）实现/现场验收数字落库台账，当前全 `pending`（诚实留白）；字段、ctest 用例映射与校验器见 13 号 §11 |
 | `v3.12-M3-IR证据.md` | v3.12 M3 | IR1–IR7 逐步落地证据：M3.1 成员运行时表（`rtdbd_peer_table`）+ `IR4_PeersRuntime` ctest 用例注册（7 项语义断言）；含「发布门读静态 `ir_snapshot` 而非实时 ctest」的机制现状与不手改快照的放行边界说明 |
 | `v3.12-M3.3合入全量门禁证据.md` | v3.12 M3.3 合入 | 2026-11-15 重跑终态：OFF full `ALL GREEN` 53/53 + 9 个 canary 守卫、ON 构建零警告 + 60/60（50.83 s），原始 ON 日志见 `artifacts/v3.12-m33-on-ctest-20261115.txt`；仅回归证据，发布门仍 FAIL 8、B 段 7 项 `pending`、静态快照未刷新 |
+| `v3.12-SylixOS-G0G1单台测试实施报告.md` | v3.12 SylixOS G0/G1 | 2026-11-19 单台 ARM64 SylixOS 3.6.5 实测：G0 交叉编译通过（`libindurtdb.a`+`sylixos_smoke` 均 AArch64、零警告、静态断言通过）；G1 时间/OSAL PASS，写路径 8 字节原子 `__aarch64_ldadd8_relax` 触发内核异常（阻塞缺陷，FAIL 如实记录）；平台标识 ARM64_GENERIC、shell 无 GNU 语法等实测修正；设备临时产物与段已清理；发布门仍 FAIL 8 |

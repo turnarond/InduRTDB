@@ -155,6 +155,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 endif()
 
+# --- SylixOS 单台功能测试 harness（G0/G1；仅顶层 + SylixOS，非 ctest 交付） ---
+# 变更卡 v3.12-SylixOS-G0G1单台功能测试.md；不进 install、不进 Linux 构建。
+if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL)
+    add_executable(sylixos_smoke tests/sylixos/sylixos_smoke.c)
+    target_link_libraries(sylixos_smoke PRIVATE indurtdb)
+endif()
+
 # --- 覆盖率目标（T8）：仅当开启插桩且构建测试时可用 ---
 if(INDURTDB_ENABLE_COVERAGE AND INDURTDB_BUILD_TESTS)
     find_program(GCOVR gcovr)
