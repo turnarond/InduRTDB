@@ -51,7 +51,13 @@
       "IR4_PeersRuntime",
       "IR5_NotifyDirection",
       "IR6_RestartSemantics",
-      "IR7_PartitionConverge"
+      "IR7_PartitionConverge",
+      "Gate_T1_SyncOverhead",
+      "Gate_T2_LocalP99",
+      "Gate_T3_WallClock",
+      "Gate_T3_RSS",
+      "IR4_NetworkPartition",
+      "IR5_StaleEpoch"
     ],
     "full_gate_log": "build/check-all-20261107-113830.log",
     "note": "B 段 7 项全为 pending，须 rtdbd 实现 + 6 节点编排 + 现场取证。ir_snapshot = ctest --test-dir build -N 输出（当前 0 个 IR 用例）；full_gate_log 实存、含 ALL GREEN 且无 [SKIP] canary，判据只认内容不认时间戳。第三签风险点指出静态快照可被手写绕过，H-2 已记录为实现期纵深项（实时 ctest 复核 + 日志新鲜度）。即使 HC1–HC4 全部 closed，发布门仍须因 B 段 pending + IR 未注册而 FAIL——这是设计意图。"

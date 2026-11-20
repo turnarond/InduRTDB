@@ -338,7 +338,8 @@ def main():
 - 结论: 通过（硬条件已闭环）：按台账复验方式继续。
 """, encoding="utf-8")
 
-        def ledger(hc_closed, b_numbers, irs, gate_text, verified=True):
+        def ledger(hc_closed, b_numbers, irs, gate_text, verified=True,
+                   required=None):
             gate_log.write_text(gate_text, encoding="utf-8")
             ir_snap.write_text(irs, encoding="utf-8")
             hc = {"id": "H1", "closed": hc_closed, "evidence": str(ev)}
@@ -350,7 +351,7 @@ def main():
                 "b_segment": {
                     "numbers_ledger": str(numbers) if b_numbers else "",
                     "ir_snapshot": str(ir_snap),
-                    "required_irs": ["IR1", "IR7"],
+                    "required_irs": required if required is not None else ["IR1", "IR7"],
                     "full_gate_log": str(gate_log),
                 },
             }
@@ -437,6 +438,33 @@ def main():
         r = run("release_gate.py", base + ["--conditions", ledger(True, True, "Test #1: test_c_shm\n", "ALL GREEN\n")])
         failed += check(r.returncode != 0 and result_ok(r) is False,
                         "conditional with missing IR tests rejected")
+
+        # q2（2026-11-20 k-A 批准提前实施）：required_irs 扩到 13 名（7 IR + 6 个
+        # 13号§11.1 冻结的 Gate/T 名）。坏样本须证明「恰好缺一个 Gate 名即 FAIL」，
+        # 而非现有 :438 的「全缺」；正向样本证明 13 名齐时不因缺名 FAIL。
+        q2_required = [
+            "IR1_FullSnapshot", "IR2_AuthDeny", "IR3_DeferredQueue",
+            "IR4_PeersRuntime", "IR5_NotifyDirection", "IR6_RestartSemantics",
+            "IR7_PartitionConverge", "Gate_T1_SyncOverhead", "Gate_T2_LocalP99",
+            "Gate_T3_WallClock", "Gate_T3_RSS", "IR4_NetworkPartition",
+            "IR5_StaleEpoch",
+        ]
+        # 13 名互不为子串：快照逐行列出除 Gate_T2_LocalP99 外的 12 名。
+        q2_snap_missing_one = "\n".join(n for n in q2_required
+                                         if n != "Gate_T2_LocalP99") + "\n"
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, q2_snap_missing_one, "ALL GREEN\n",
+                       required=q2_required)])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "q2: exactly one Gate name missing rejected")
+        # 正向：13 名齐（其余条件全合规）⇒ ok=True，证明不因缺名误判。
+        q2_snap_all = "\n".join(q2_required) + "\n"
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, q2_snap_all, "ALL GREEN\n",
+                       required=q2_required)])
+        failed += check(r.returncode == 0 and result_ok(r) is True,
+                        "q2: all 13 required names accepted")
+
         r = run("release_gate.py", base + ["--conditions", ledger(True, True, ir_snap.read_text(), "[SKIP] canary\nALL GREEN\n")])
         failed += check(r.returncode != 0 and result_ok(r) is False,
                         "conditional with quick gate log rejected")
