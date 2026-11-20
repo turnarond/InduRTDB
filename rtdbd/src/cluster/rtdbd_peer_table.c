@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include <arpa/inet.h>
+#include <netinet/in.h>   /* AF_INET/in_addr：SylixOS 不经 arpa/inet.h 间接引入（G2） */
 
 void rtdbd_peer_table_init(rtdbd_peer_table_t *t)
 {

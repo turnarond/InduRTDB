@@ -63,9 +63,15 @@ endif()
 # 开启时必须给出 VSOA_SDK_ROOT（libvsoa 树根），并在配置期做**硬探测**：
 # 头/库缺失或版本不符一律 FATAL_ERROR，绝不静默降级为「以为接了 VSOA 实际没接」。
 option(INDURTDB_ENABLE_VSOA "Build rtdbd with VSOA dual-stack frontend" OFF)
-set(VSOA_SDK_ROOT "" CACHE PATH "libvsoa SDK root (contains include/libvsoa and lib/linux/x86_64)")
-set(VSOA_LIB_SUBDIR "lib/linux/x86_64" CACHE STRING "VSOA library subdir under VSOA_SDK_ROOT")
-if(INDURTDB_ENABLE_VSOA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+set(VSOA_SDK_ROOT "" CACHE PATH "libvsoa SDK root (contains include/libvsoa and lib/<os>/<arch>)")
+# v3.12 G2：平台化默认库子目录（Linux 零回归；SylixOS 默认 aarch64 交叉库）
+if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS")
+    set(_vsoa_default_subdir "lib/sylixos/aarch64")
+else()
+    set(_vsoa_default_subdir "lib/linux/x86_64")
+endif()
+set(VSOA_LIB_SUBDIR "${_vsoa_default_subdir}" CACHE STRING "VSOA library subdir under VSOA_SDK_ROOT")
+if(INDURTDB_ENABLE_VSOA AND (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "SylixOS"))
     if(NOT VSOA_SDK_ROOT)
         message(FATAL_ERROR
             "INDURTDB_ENABLE_VSOA=ON 需要 -DVSOA_SDK_ROOT=<libvsoa 树根>；"
@@ -73,10 +79,17 @@ if(INDURTDB_ENABLE_VSOA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
+        # 透传平台库子目录；SylixOS 追加符号级探测 + 交叉 nm（从 CMAKE_NM 派生，不硬编码）
+        set(_vsoa_probe_args --root ${VSOA_SDK_ROOT} --lib-subdir ${VSOA_LIB_SUBDIR} --json)
+        if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS")
+            if(NOT CMAKE_NM)
+                message(FATAL_ERROR "SylixOS VSOA 符号探测需要 CMAKE_NM（交叉工具链 nm）。")
+            endif()
+            list(APPEND _vsoa_probe_args --check-symbols --nm ${CMAKE_NM})
+        endif()
         execute_process(
             COMMAND ${Python3_EXECUTABLE}
-                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_vsoa_sdk.py
-                    --root ${VSOA_SDK_ROOT} --json
+                    ${CMAKE_CURRENT_SOURCE_DIR}/scripts/check_vsoa_sdk.py ${_vsoa_probe_args}
             OUTPUT_VARIABLE _vsoa_probe
             ERROR_VARIABLE _vsoa_probe_err
             RESULT_VARIABLE _vsoa_probe_rc
@@ -85,7 +98,7 @@ if(INDURTDB_ENABLE_VSOA AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
             message(FATAL_ERROR
                 "VSOA SDK 探测失败（不得静默降级）：\n${_vsoa_probe}\n${_vsoa_probe_err}")
         endif()
-        message(STATUS "VSOA SDK 探测通过：${VSOA_SDK_ROOT}")
+        message(STATUS "VSOA SDK 探测通过：${VSOA_SDK_ROOT} (${VSOA_LIB_SUBDIR})")
     else()
         message(FATAL_ERROR
             "INDURTDB_ENABLE_VSOA=ON 需要 Python3 解释器运行 scripts/check_vsoa_sdk.py 硬探测。")
@@ -105,9 +118,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
 endif()
 
 # --- rtdbd 写权威服务进程（v3.3 读写分离） ---
-# 仅 Linux；作为子项目引入时默认关闭，不污染消费方构建。
-if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    if(INDURTDB_IS_TOP_LEVEL)
+# Linux 默认构建；SylixOS 须显式 -DINDURTDB_BUILD_RTDBD=ON（G2，q-B UDS 写裁撤分支）；
+# 作为子项目引入时默认关闭，不污染消费方构建。
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "SylixOS")
+    if(INDURTDB_IS_TOP_LEVEL AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
         set(_rtdbd_default ON)
     else()
         set(_rtdbd_default OFF)
@@ -155,11 +169,22 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     endif()
 endif()
 
-# --- SylixOS 单台功能测试 harness（G0/G1；仅顶层 + SylixOS，非 ctest 交付） ---
-# 变更卡 v3.12-SylixOS-G0G1单台功能测试.md；不进 install、不进 Linux 构建。
+# --- SylixOS 单台功能测试 harness（仅顶层 + SylixOS，非 ctest 交付） ---
+# G0/G1: sylixos_smoke（核心库）；G2: sylixos_vsoa_e2e（VSOA 写入+定向 NOTIFY）。
 if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL)
     add_executable(sylixos_smoke tests/sylixos/sylixos_smoke.c)
     target_link_libraries(sylixos_smoke PRIVATE indurtdb)
+endif()
+# G2 VSOA e2e harness：仅 VSOA ON 构建，链 VSOA client API（e2e client 端）
+if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL AND INDURTDB_ENABLE_VSOA)
+    add_executable(sylixos_vsoa_e2e tests/sylixos/sylixos_vsoa_e2e.c)
+    target_include_directories(sylixos_vsoa_e2e PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/include
+        ${VSOA_SDK_ROOT}/include ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_directories(sylixos_vsoa_e2e PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_libraries(sylixos_vsoa_e2e PRIVATE indurtdb
+        "-l:libvsoa-client.so" "-l:libvsoa-server.so"
+        "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
 endif()
 
 # --- 覆盖率目标（T8）：仅当开启插桩且构建测试时可用 ---

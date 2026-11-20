@@ -55,9 +55,13 @@ if(INDURTDB_ENABLE_VSOA)
     # 运行期可定位 SDK 动态库（无 LD_LIBRARY_PATH 也能起服务）。
     # 必须用 DT_RPATH 而非 DT_RUNPATH：libvsoa-server.so 自身依赖 parser/json，
     # DT_RUNPATH 不参与**传递依赖**查找，会导致 ldd 报 "not found"。
-    target_link_options(rtdbd PRIVATE "LINKER:--disable-new-dtags")
-    set_target_properties(rtdbd PROPERTIES
-        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}")
+    # v3.12 G2：--disable-new-dtags 是 GNU ld 专属，仅 Linux；SylixOS 侧由
+    # 外部 toolchain rpath 或部署期 LD_LIBRARY_PATH 定位设备端 .so（见变更卡决策 5）。
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(rtdbd PRIVATE "LINKER:--disable-new-dtags")
+        set_target_properties(rtdbd PROPERTIES
+            BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}")
+    endif()
     target_compile_definitions(rtdbd PRIVATE INDURTDB_ENABLE_VSOA=1)
 endif()
 

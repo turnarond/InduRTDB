@@ -1886,6 +1886,9 @@ static int handle_request(int fd, rtdbd_ctx_t* cx)
     return 1;
 }
 
+/* v3.12 G2：supervisor（-S 模式）依赖 fork/execv/waitpid + /proc/self/exe，
+ * SylixOS 无 fork（G1 实证），整段条件编译隔离；Linux 分支行为零变化。 */
+#ifdef INDURTDB_OS_LINUX
 /* 写 worker pid 文件，供运维与测试观测当前 worker */
 static void write_pidfile(const char* path, pid_t pid)
 {
@@ -2052,6 +2055,7 @@ supervisor_done:
     irt_logbuf_emit(&g_logbuf, RTDBD_LOG_INFO, "rtdbd supervisor stopped");
     return 0;
 }
+#endif /* INDURTDB_OS_LINUX */
 
 /* 严格解析 CLI 数值参数：拒绝空串、负号、非数字、尾随字符与溢出/超 uint32。
  * 直接用 strtoul(optarg, NULL, 10) 会把 "-1" 变成 UINT32_MAX、把 "abc" 变 0。 */
@@ -2219,6 +2223,12 @@ int main(int argc, char** argv)
     bool        cli_initial_subs = false;
     bool        cli_max_batch = false;
     const char* pidfile    = NULL;
+#ifndef INDURTDB_OS_LINUX
+    /* v3.12 G2：supervisor 隔离后，这两个变量在 SylixOS 下仅被 getopt 写、不再读，
+     * 显式 (void) 消除 -Werror=unused-but-set（Linux 侧 supervisor 仍读取，无此问题）。 */
+    (void)supervise;
+    (void)pidfile;
+#endif
     /* v3.7 B4：运行时变更 delta 日志。**默认关闭**（未指定则不启用），
      * 以保持既有部署"运行时点位重启即丢"的语义不变。 */
     const char* delta_path = NULL;
@@ -2384,9 +2394,11 @@ int main(int argc, char** argv)
         return RTDBD_EXIT_ERROR;
     }
 
+#ifdef INDURTDB_OS_LINUX
     if (supervise) {
         return supervise_loop(argc, argv, pidfile, sock_path);
     }
+#endif
 
     signal(SIGPIPE, SIG_IGN);
     signal(SIGINT, on_signal);

@@ -472,7 +472,10 @@ def main():
             libdir = root / "lib" / "linux" / "x86_64"
             libdir.mkdir(parents=True, exist_ok=True)
             if libs:
-                for n in ("libvsoa-server.so", "libvsoa-client.so"):
+                # v3.12 G2：check_vsoa_sdk.py REQUIRED_LIBS 扩为 4 个（+parser/json），
+                # 白样本同步补齐，否则"complete layout"会因缺库误判 FAIL。
+                for n in ("libvsoa-server.so", "libvsoa-client.so",
+                          "libvsoa-parser.so", "libvsoa-json.so"):
                     (libdir / n).write_bytes(b"\x7fELF fake\n")
 
         sdk = d / "sdk-ok"
