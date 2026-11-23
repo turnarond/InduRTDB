@@ -30,6 +30,7 @@
 #include "cluster/rtdbd_defer_actions.h"
 #include "cluster/rtdbd_sub_snapshot.h" /* h-A：断链订阅快照 */
 #include "dispatch/rtdbd_dispatch.h"
+#include "hB_audit_adapter.h" /* h-B：生产审计回调（独立可测 TU） */
 #ifdef INDURTDB_ENABLE_VSOA
 #include "vsoa/vsoa_adapter.h"
 #include <sys/select.h>   /* FD_SETSIZE / fd_set：§8.3-3 单线程统一 poll 用 */
@@ -1533,31 +1534,32 @@ static int op_health(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
 
-    /* 返回前刷新自检：核心段头 + 错误计数分类 + 连接表完整性 */
+    /* h-B：72B 健康快照走共享真纯函数（所有时变/传输输入由本调用方注入）。
+     * UDS 侧语义保持：self_check_core 刷新核心段+计数分类+uptime；连接表完整性
+     * 由 conn_table_check 注入布尔（异常抬 UNHEALTHY，并写回 g_stats.health 供
+     * 运维/SIGUSR1 dump 读取——纯函数本身不碰全局）。 */
     int health = rtdbd_self_check_core(cx->h);
-    if (health != RTDBD_HEALTH_UNHEALTHY &&
-        conn_table_check(cx->conns, (int)g_max_clients) != 0) {
-        health = RTDBD_HEALTH_UNHEALTHY;
+    bool conn_table_ok = (conn_table_check(cx->conns, (int)g_max_clients) == 0);
+    if (!conn_table_ok && health != RTDBD_HEALTH_UNHEALTHY) {
         g_stats.health = RTDBD_HEALTH_UNHEALTHY;
     }
-
-    rtdbd_health_t h;
-    memset(&h, 0, sizeof(h));
-    h.n_writes         = g_stats.n_writes;
-    h.n_notifies       = g_stats.n_notifies;
-    h.decode_fail      = g_stats.decode_fail;
-    h.write_rejected   = g_stats.write_rejected;
-    h.write_error      = g_stats.write_error;
-    h.notify_drop      = g_stats.notify_drop;
-    h.notify_send_fail = g_stats.notify_send_fail;
-    h.uptime_ns        = g_stats.uptime_ns;
-    h.health           = (uint32_t)health;
+    rtdbd_health_counts_t counts;
+    memset(&counts, 0, sizeof(counts));
+    counts.n_writes         = g_stats.n_writes;
+    counts.n_notifies       = g_stats.n_notifies;
+    counts.decode_fail      = g_stats.decode_fail;
+    counts.write_rejected   = g_stats.write_rejected;
+    counts.write_error      = g_stats.write_error;
+    counts.notify_drop      = g_stats.notify_drop;
+    counts.notify_send_fail = g_stats.notify_send_fail;
+    counts.uptime_ns        = g_stats.uptime_ns;
     uint32_t nc = 0;
     for (int i = 0; i < cx->nconns; ++i) {
         rtdbd_conn_t* c = cx->conns[i];
         if (c && c->fd >= 0) nc++;
     }
-    h.n_conns = nc;
+    rtdbd_health_t h;
+    rtdbd_dispatch_health_fill(health, &counts, nc, conn_table_ok, &h);
 
     cx->resp.status      = RTDBD_ST_OK;
     cx->resp.payload_len = (uint32_t)sizeof(h);
@@ -2700,6 +2702,16 @@ int main(int argc, char** argv)
         rtdbd_vsoa_adapter_set_handle(g_vsoa, g_h);
         rtdbd_vsoa_adapter_set_policy(g_vsoa, &policy);
         rtdbd_vsoa_adapter_set_conf(g_vsoa, &conf);
+        /* h-B：生产审计回调注入（t-B 可追溯，service_id 走纯内存 sid 环）。
+         * prod_ctx 指向 main 栈上的 &audit（main 全程不返回）与文件域 sid 环。 */
+        {
+            static hB_audit_sid_ring_t hb_sid_ring;
+            static hB_audit_ctx_t hb_ctx;
+            hB_audit_sid_ring_init(&hb_sid_ring);
+            hb_ctx.audit = &audit;
+            hb_ctx.sid_ring = &hb_sid_ring;
+            rtdbd_vsoa_adapter_set_audit(g_vsoa, hB_audit_callback, &hb_ctx);
+        }
         if (g_vsoa_token_file) {
             int ntok = load_vsoa_token_file(g_vsoa_token_file, g_vsoa);
             if (ntok < 0) {

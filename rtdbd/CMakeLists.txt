@@ -8,6 +8,8 @@ add_executable(rtdbd
     src/rtdbd_conf.c
     src/policy.c
     src/audit.c
+    src/hB_audit_sid.c
+    src/hB_audit_adapter.c
     src/logbuf.c
     src/subtab.c
     src/dispatch/rtdbd_dispatch.c

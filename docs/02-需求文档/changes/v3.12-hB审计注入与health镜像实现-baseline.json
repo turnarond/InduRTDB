@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "capturedAt": "2026-11-23T04:04:13.483526+00:00",
+  "capturedAtNs": 1795406653483526121,
+  "artifacts": [
+    {
+      "path": "v3.12-hB审计注入与health镜像实现.md",
+      "md5": "b0edbd14ccb37311b098ba39e23979d7",
+      "size": 8467,
+      "mtimeNs": 1795406643127996711,
+      "birthNs": null
+    }
+  ]
+}

@@ -17,6 +17,7 @@
 #include "session/rtdbd_session.h" /* per-cli 传输无关会话（§8.3-3） */
 #include "session/rtdbd_authz.h"   /* §8.3-4 身份/来源授权判据（M3.x P7） */
 #include "cluster/rtdbd_sub_snapshot.h" /* h-A：断链订阅快照（session_id 键） */
+#include "stats.h"                      /* h-B：g_stats（health 计数快照） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -456,6 +457,57 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
         (void)vsoa_server_cli_reply(server, id,
                                     (uint8_t)rtdbd_st_to_vsoa_status((uint8_t)ast),
                                     aseq, atun, &aout);
+        return;
+    }
+
+    /* h-B：/health 专有免鉴权分支（UDS op_health 只读免鉴权，两前端一致）。
+     * 置于 opcode_from_url 之前，避开 :467 的 role→URL 门禁（health 非管控面）。 */
+    if (strcmp(bare, "/health") == 0) {
+        if (req_len != 0u) { /* 对齐 UDS 空负载校验 */
+            uint32_t hseq = hdr ? ntohl(hdr->seqno) : 0u;
+            uint16_t htun = hdr ? ntohs(hdr->tunid) : 0u;
+            vsoa_payload_t bad;
+            memset(&bad, 0, sizeof(bad));
+            (void)vsoa_server_cli_reply(server, id,
+                (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_BAD_REQUEST), hseq, htun, &bad);
+            return;
+        }
+        int health = a->handle ? rtdbd_self_check_core(a->handle)
+                               : RTDBD_HEALTH_UNHEALTHY;
+        /* t-E：VSOA 等价连接检查——used 会话 nsubs 越界 或 未用槽残留订阅
+         * （对齐 UDS conn_table_check 的空闲槽残留判据，不引入 cred_ok）。 */
+        bool conn_table_ok = true;
+        uint32_t nc = 0u;
+        for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
+            rtdbd_session_t *cs = &a->cli[i].session;
+            if (a->cli[i].used) {
+                nc++;
+                if (cs->nsubs > RTDBD_SUB_MAX) conn_table_ok = false;
+            } else if (cs->nsubs != 0u) {
+                conn_table_ok = false; /* 空闲槽残留订阅 */
+            }
+        }
+        rtdbd_health_counts_t counts;
+        memset(&counts, 0, sizeof(counts));
+        counts.n_writes         = g_stats.n_writes;
+        counts.n_notifies       = g_stats.n_notifies;
+        counts.decode_fail      = g_stats.decode_fail;
+        counts.write_rejected   = g_stats.write_rejected;
+        counts.write_error      = g_stats.write_error;
+        counts.notify_drop      = g_stats.notify_drop;
+        counts.notify_send_fail = g_stats.notify_send_fail;
+        counts.uptime_ns        = g_stats.uptime_ns;
+        rtdbd_health_t hout;
+        rtdbd_dispatch_health_fill(health, &counts, nc, conn_table_ok, &hout);
+        vsoa_payload_t hout_pl;
+        memset(&hout_pl, 0, sizeof(hout_pl));
+        memcpy(a->resp, &hout, sizeof(hout));
+        hout_pl.data = a->resp;
+        hout_pl.data_len = sizeof(hout);
+        uint32_t hseq = hdr ? ntohl(hdr->seqno) : 0u;
+        uint16_t htun = hdr ? ntohs(hdr->tunid) : 0u;
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), hseq, htun, &hout_pl);
         return;
     }
 

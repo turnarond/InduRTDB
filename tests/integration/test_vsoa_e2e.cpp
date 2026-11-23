@@ -993,3 +993,83 @@ TEST(VsoaE2E, ReconnectRestoresSubscriptionsBySessionId)
     waitpid(pid, &wstatus, 0);
     indurtdb_h_close(handle);
 }
+
+// ---- h-B：VSOA /health 专有免鉴权镜像（72B POD，空负载）----
+TEST(VsoaE2E, HealthReturns72BHealthSnapshot)
+{
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 8;
+    cfg.max_subscribers = 2;
+    char inst[64];
+    std::snprintf(inst, sizeof(inst), "vsoa_e2e_hb_health_%d", static_cast<int>(getpid()));
+    indurtdb_t *handle = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&handle, inst, &cfg), 0);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        close(pipefd[0]);
+        run_server(pipefd[1], handle);
+    }
+    close(pipefd[1]);
+    uint16_t port = 0;
+    ASSERT_EQ(read(pipefd[0], &port, sizeof(port)), static_cast<ssize_t>(sizeof(port)));
+    close(pipefd[0]);
+    ASSERT_NE(port, 0);
+
+    vsoa_client_t *client = vsoa_client_create(nullptr, nullptr);
+    ASSERT_NE(client, nullptr);
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    struct timespec cts;
+    cts.tv_sec = 3; cts.tv_nsec = 0;
+    char info[256] = {0};
+    ASSERT_TRUE(vsoa_client_connect(client, reinterpret_cast<struct sockaddr *>(&addr),
+                                    sizeof(addr), &cts, nullptr, info, sizeof(info)))
+        << "connect failed: " << info;
+
+    // /health：空 payload → 72B 快照，免 hello（专有分支，避开 role 门禁）
+    const char *u = "/indurtdb/v1/health";
+    vsoa_url_t url;
+    std::memset(&url, 0, sizeof(url));
+    url.url = const_cast<char *>(u);
+    url.url_len = std::strlen(u);
+    vsoa_payload_t pl;
+    std::memset(&pl, 0, sizeof(pl));
+    RpcResult res;
+    ASSERT_TRUE(vsoa_client_call(client, VSOA_CLIENT_RPC_METHOD_GET, &url, &pl,
+                                 on_rpc, &res, &cts));
+    ASSERT_TRUE(pump_client(client, &res, kReplyWaitMs)) << "no reply for /health";
+    EXPECT_EQ(res.status, 0x80);
+    ASSERT_EQ(res.data_len, sizeof(rtdbd_health_t));
+    rtdbd_health_t h;
+    std::memcpy(&h, res.data, sizeof(h));
+    EXPECT_LE(h.health, (uint32_t)RTDBD_HEALTH_UNHEALTHY); // 0/1/2
+    EXPECT_GE(h.n_conns, 1u); // 至少本 client 一连接
+
+    // 负例：带负载的 /health → BAD_REQUEST（对齐 UDS 空负载校验，判据 3）
+    {
+        uint8_t junk[4] = {1, 2, 3, 4};
+        vsoa_payload_t bad_pl;
+        std::memset(&bad_pl, 0, sizeof(bad_pl));
+        bad_pl.data = junk;
+        bad_pl.data_len = sizeof(junk);
+        RpcResult bad_res;
+        ASSERT_TRUE(vsoa_client_call(client, VSOA_CLIENT_RPC_METHOD_GET, &url, &bad_pl,
+                                     on_rpc, &bad_res, &cts));
+        ASSERT_TRUE(pump_client(client, &bad_res, kReplyWaitMs)) << "no reply for /health bad req";
+        EXPECT_EQ(bad_res.status, (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_BAD_REQUEST));
+        EXPECT_EQ(bad_res.data_len, 0u);
+    }
+
+    vsoa_client_close(client);
+    kill(pid, SIGTERM);
+    int wstatus = 0;
+    waitpid(pid, &wstatus, 0);
+    indurtdb_h_close(handle);
+}

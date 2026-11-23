@@ -143,6 +143,26 @@ uint16_t rtdbd_dispatch(uint16_t opcode,
                         const uint8_t *req, size_t req_len,
                         uint8_t *resp, size_t resp_cap, size_t *resp_len);
 
+/* h-B health 镜像：transport 无关**真纯函数**填 72B rtdbd_health_t。
+ * 所有时变/传输输入均由调用方注入：health（RTDBD_HEALTH_*）、8 个计数值、
+ * n_conns、conn_table_ok。函数体内不取时钟、不读写全局、不调 self_check。
+ * 相同输入 → 两前端 72B 逐字节一致（13 号 §7.4、变更卡判据 3）。
+ * rtdbd_health_counts_t 定义在内部头（不进 protocol.h，不碰冻结 ABI）。 */
+typedef struct {
+    uint64_t n_writes;
+    uint64_t n_notifies;
+    uint64_t decode_fail;
+    uint64_t write_rejected;
+    uint64_t write_error;
+    uint64_t notify_drop;
+    uint64_t notify_send_fail;
+    uint64_t uptime_ns;
+} rtdbd_health_counts_t;
+
+void rtdbd_dispatch_health_fill(int health, const rtdbd_health_counts_t *counts,
+                                uint32_t n_conns, bool conn_table_ok,
+                                rtdbd_health_t *out);
+
 #ifdef __cplusplus
 }
 #endif

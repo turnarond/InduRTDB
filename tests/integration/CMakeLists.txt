@@ -531,3 +531,26 @@ if(INDURTDB_ENABLE_VSOA)
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME IR5_NotifyDirection COMMAND IR5_NotifyDirection)
 endif()
+
+# ---- h-B：审计生产回调直测 + health 真纯函数逐字节一致（纯逻辑，默认构建可跑）----
+add_executable(test_hB_audit test_hB_audit.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/audit.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/hB_audit_sid.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/hB_audit_adapter.c)
+target_include_directories(test_hB_audit PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+target_link_libraries(test_hB_audit PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(test_hB_audit PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME test_hB_audit COMMAND test_hB_audit)
+
+add_executable(test_hB_health test_hB_health.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c)
+target_include_directories(test_hB_health PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+target_link_libraries(test_hB_health PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(test_hB_health PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME test_hB_health COMMAND test_hB_health)

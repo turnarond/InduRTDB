@@ -312,3 +312,30 @@ uint16_t rtdbd_dispatch(uint16_t opcode,
      * op_* 逻辑迁入此处并接入 ctx；UDS 侧 22 opcode 与 ABI 零变化（doc 13 §8.3-1）。 */
     return 9 /* RTDBD_ST_NOT_IMPLEMENTED */;
 }
+
+/* h-B health 镜像：真纯函数（所有时变/传输输入由调用方注入，见 dispatch.h）。 */
+void rtdbd_dispatch_health_fill(int health, const rtdbd_health_counts_t *counts,
+                                uint32_t n_conns, bool conn_table_ok,
+                                rtdbd_health_t *out)
+{
+    if (!out || !counts) return;
+    memset(out, 0, sizeof(*out));
+    out->n_writes         = counts->n_writes;
+    out->n_notifies       = counts->n_notifies;
+    out->decode_fail      = counts->decode_fail;
+    out->write_rejected   = counts->write_rejected;
+    out->write_error      = counts->write_error;
+    out->notify_drop      = counts->notify_drop;
+    out->notify_send_fail = counts->notify_send_fail;
+    out->uptime_ns        = counts->uptime_ns;
+    /* 连接表异常 → health 抬 UNHEALTHY（UDS conn_table_check / VSOA 等价检查语义）。 */
+    if (!conn_table_ok) {
+        out->health = RTDBD_HEALTH_UNHEALTHY;
+    } else if (health == RTDBD_HEALTH_OK || health == RTDBD_HEALTH_DEGRADED ||
+               health == RTDBD_HEALTH_UNHEALTHY) {
+        out->health = (uint32_t)health;
+    } else {
+        out->health = RTDBD_HEALTH_UNHEALTHY; /* 非法 health 值保守处理 */
+    }
+    out->n_conns = n_conns;
+}
