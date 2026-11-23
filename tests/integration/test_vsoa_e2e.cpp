@@ -833,3 +833,163 @@ TEST(VsoaE2E, HelloHandshakeEstablishesIdentity)
     waitpid(pid, &wstatus, 0);
     indurtdb_h_close(handle);
 }
+
+// ---- h-A：断链重连订阅自动恢复（s-0=必须、s-A′=α session_id）----
+// A：hello 取 session_id → 订阅点位 5 → 断链；B：hello → rebind(session_id)
+// → 写点位 5 → B 收到定向 NOTIFY（证明订阅按快照恢复）。若未恢复则 B 收不到。
+TEST(VsoaE2E, ReconnectRestoresSubscriptionsBySessionId)
+{
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64;
+    cfg.max_subscribers = 4;
+    char inst[64];
+    std::snprintf(inst, sizeof(inst), "vsoa_e2e_rebuild_%d", static_cast<int>(getpid()));
+    indurtdb_t *handle = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&handle, inst, &cfg), 0);
+    ASSERT_EQ(indurtdb_h_create_point(handle, 5, "p5", INDURTDB_TYPE_INT32,
+                                      INDURTDB_ACCESS_READ_WRITE), 0);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) {
+        close(pipefd[0]);
+        run_server(pipefd[1], handle);
+    }
+    close(pipefd[1]);
+    uint16_t port = 0;
+    ASSERT_EQ(read(pipefd[0], &port, sizeof(port)), static_cast<ssize_t>(sizeof(port)));
+    close(pipefd[0]);
+    ASSERT_NE(port, 0);
+
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    struct timespec cts;
+    cts.tv_sec = 3;
+    cts.tv_nsec = 0;
+
+    auto connect_client = [&](vsoa_client_t **out, DatagramResult *dg) -> bool {
+        vsoa_client_t *c = vsoa_client_create(nullptr, nullptr);
+        if (!c) return false;
+        vsoa_client_on_datagram(c, on_datagram, dg);
+        char info[256] = {0};
+        if (!vsoa_client_connect(c, reinterpret_cast<struct sockaddr *>(&addr),
+                                 sizeof(addr), &cts, nullptr, info, sizeof(info))) {
+            vsoa_client_close(c);
+            return false;
+        }
+        *out = c;
+        return true;
+    };
+    auto call_rpc = [&](vsoa_client_t *c, const char *url_str,
+                        const void *req, size_t req_len, RpcResult *res) -> bool {
+        vsoa_url_t url;
+        std::memset(&url, 0, sizeof(url));
+        url.url = const_cast<char *>(url_str);
+        url.url_len = std::strlen(url_str);
+        vsoa_payload_t pl;
+        std::memset(&pl, 0, sizeof(pl));
+        pl.data = const_cast<void *>(req);
+        pl.data_len = req_len;
+        if (!vsoa_client_call(c, VSOA_CLIENT_RPC_METHOD_GET, &url, &pl,
+                              on_rpc, res, &cts)) return false;
+        return pump_client(c, res, kReplyWaitMs);
+    };
+
+    // A：hello 取 session_id
+    DatagramResult dgA;
+    vsoa_client_t *a = nullptr;
+    ASSERT_TRUE(connect_client(&a, &dgA));
+    rtdbd_vsoa_hello_req_t hreq;
+    std::memset(&hreq, 0, sizeof(hreq));
+    std::strncpy(hreq.token, "tok-plc-1", sizeof(hreq.token) - 1u);
+    std::strncpy(hreq.service_id, "plc-line-1", sizeof(hreq.service_id) - 1u);
+    RpcResult hres;
+    ASSERT_TRUE(call_rpc(a, "/indurtdb/v1/hello", &hreq, sizeof(hreq), &hres));
+    ASSERT_EQ(hres.status, 0x80);
+    ASSERT_GE(hres.data_len, sizeof(uint64_t));
+    uint64_t sid = 0u;
+    std::memcpy(&sid, hres.data, sizeof(sid));
+    ASSERT_NE(sid, 0u) << "hello 响应未携带 session_id";
+
+    // A：订阅 notify URL + 点位 5
+    {
+        vsoa_url_t url;
+        std::memset(&url, 0, sizeof(url));
+        const char *u = "/indurtdb/v1/notify";
+        url.url = const_cast<char *>(u);
+        url.url_len = std::strlen(u);
+        ASSERT_TRUE(vsoa_client_subscribe(a, &url, nullptr, nullptr, &cts));
+    }
+    {
+        rtdbd_sub_req_t sreq;
+        std::memset(&sreq, 0, sizeof(sreq));
+        sreq.point_id = 5;
+        RpcResult sres;
+        ASSERT_TRUE(call_rpc(a, "/indurtdb/v1/subscription/add", &sreq, sizeof(sreq), &sres));
+        ASSERT_EQ(sres.status, 0x80);
+    }
+
+    // A 断链：close 触发 server disconnect 保存快照；给 server 事件循环时间处理
+    vsoa_client_close(a);
+    usleep(250000);
+
+    // B：hello → rebind(sid) → 写点位 5 → 应收 NOTIFY
+    DatagramResult dgB;
+    vsoa_client_t *b = nullptr;
+    ASSERT_TRUE(connect_client(&b, &dgB));
+    {
+        RpcResult bres;
+        ASSERT_TRUE(call_rpc(b, "/indurtdb/v1/hello", &hreq, sizeof(hreq), &bres));
+        ASSERT_EQ(bres.status, 0x80);
+    }
+    {
+        rtdbd_vsoa_session_rebind_t rb;
+        rb.session_id = sid;
+        RpcResult rres;
+        ASSERT_TRUE(call_rpc(b, "/indurtdb/v1/session/rebind", &rb, sizeof(rb), &rres));
+        ASSERT_EQ(rres.status, 0x80) << "rebind 失败：订阅快照未恢复";
+    }
+    {
+        vsoa_url_t url;
+        std::memset(&url, 0, sizeof(url));
+        const char *u = "/indurtdb/v1/notify";
+        url.url = const_cast<char *>(u);
+        url.url_len = std::strlen(u);
+        ASSERT_TRUE(vsoa_client_subscribe(b, &url, nullptr, nullptr, &cts));
+    }
+    {
+        rtdbd_write_req_t w;
+        std::memset(&w, 0, sizeof(w));
+        w.point_id = 5;
+        w.type = RTDBD_TYPE_INT32;
+        int32_t v = 1234;
+        std::memcpy(&w.value_bits, &v, sizeof(v));
+        RpcResult wres;
+        ASSERT_TRUE(call_rpc(b, "/indurtdb/v1/point/write", &w, sizeof(w), &wres));
+        ASSERT_EQ(wres.status, 0x80);
+    }
+    for (int i = 0; i < 300 && !dgB.received; ++i) {
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        (void)vsoa_client_fds(b, &rfds);
+        struct timeval tv;
+        tv.tv_sec = 0;
+        tv.tv_usec = 10000;
+        if (select(FD_SETSIZE, &rfds, nullptr, nullptr, &tv) > 0) {
+            vsoa_client_input_fds(b, &rfds);
+        }
+    }
+    EXPECT_TRUE(dgB.received) << "重连后未收到 NOTIFY——订阅未随 session_id 恢复";
+    EXPECT_EQ(dgB.point_id, 5u);
+
+    vsoa_client_close(b);
+    kill(pid, SIGTERM);
+    int wstatus = 0;
+    waitpid(pid, &wstatus, 0);
+    indurtdb_h_close(handle);
+}

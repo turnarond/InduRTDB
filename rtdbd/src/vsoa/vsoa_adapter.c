@@ -16,6 +16,7 @@
 #include "cluster/rtdbd_peers_global.h"
 #include "session/rtdbd_session.h" /* per-cli 传输无关会话（§8.3-3） */
 #include "session/rtdbd_authz.h"   /* §8.3-4 身份/来源授权判据（M3.x P7） */
+#include "cluster/rtdbd_sub_snapshot.h" /* h-A：断链订阅快照（session_id 键） */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -64,6 +65,8 @@ struct rtdbd_vsoa_adapter {
     /* v3.12 M3.3 切片4：NOTIFY 门控诊断计数（adapter 全局聚合，非 per-session）。
      * calloc 创建时自动零初始化；纯标量、单线程普通 ++（doc 13 §8.3-3）。 */
     rtdbd_notify_counters_t notify_counters;
+    /* h-A：服务端稳定 session_id 生成器（单调递增、非零；hello 成功响应下发）。 */
+    uint64_t           next_session_id;
     /* 回调内使用的响应缓冲：SDK 规定 payload 在回调返回后失效，故必须自备。 */
     uint8_t            resp[RTDBD_VSOA_RESP_MAX];
 };
@@ -114,7 +117,21 @@ static void vsoa_on_cli(void *arg, vsoa_server_t *server, vsoa_cli_id_t id, bool
     }
     for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
         if (a->cli[i].used && a->cli[i].id == id) {
-            rtdbd_session_free(&a->cli[i].session);
+            /* h-A：断链保存订阅快照（session_id 键），重连 rebind 时恢复。
+             * 只存点集+身份校验字段，不入队、不在回调内执行恢复。 */
+            rtdbd_session_t *s = &a->cli[i].session;
+            if (s->session_id != 0u && s->cred.cred_ok) {
+                rtdbd_sub_snap_identity_t ident;
+                ident.uid = s->cred.uid;
+                ident.partition = s->partition;
+                memset(ident.service_id, 0, sizeof(ident.service_id));
+                if (s->service_id[0] != '\0') {
+                    (void)snprintf(ident.service_id, sizeof(ident.service_id), "%s",
+                                   s->service_id);
+                }
+                (void)rtdbd_sub_snapshot_save(s->session_id, &ident, s->subs, s->nsubs);
+            }
+            rtdbd_session_free(s);
             a->cli[i].used = false;
             a->cli[i].id = 0;
             return;
@@ -188,8 +205,54 @@ static uint16_t vsoa_hello(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
     sess->role = ent->role;
     sess->partition = ent->partition;
     (void)rtdbd_session_set_service_id(sess, ent->service_id);
+    /* h-A：每次 hello 成功分配新的稳定 session_id（重连标识、非凭据），
+     * 由 hello 响应下发给客户端，重连时经 /session/rebind 回传匹配订阅快照。 */
+    if (++a->next_session_id == 0u) a->next_session_id = 1u; /* 跳过 0 哨兵 */
+    sess->session_id = a->next_session_id;
     /* 握手成功才置 authed（挡 publish 订阅，§8.3-4） */
     (void)vsoa_server_cli_set_authed(server, id, true);
+    return RTDBD_ST_OK;
+}
+
+/* h-A：/session/rebind —— 重连后回传 session_id，服务端按快照恢复订阅点集。
+ * 须已 hello（cred_ok）；身份字段取当前会话（每次 hello 重建），与快照记录
+ * 比对一致（纵深防御）才恢复；成功后消费快照（remove 防重复恢复）。 */
+static uint16_t vsoa_session_rebind(rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id,
+                                    const uint8_t *req, size_t req_len,
+                                    uint32_t max_subs)
+{
+    if (req_len != sizeof(rtdbd_vsoa_session_rebind_t) || !req) {
+        return RTDBD_ST_BAD_REQUEST;
+    }
+    rtdbd_session_t *sess = cli_session(a, id);
+    if (!sess || !sess->cred.cred_ok) {
+        return RTDBD_ST_DENIED; /* 未 hello 不重放（s-A：身份必须重新建立） */
+    }
+    rtdbd_vsoa_session_rebind_t rb;
+    memcpy(&rb, req, sizeof(rb));
+    if (rb.session_id == 0u) {
+        return RTDBD_ST_BAD_REQUEST;
+    }
+
+    rtdbd_sub_snap_identity_t ident;
+    ident.uid = sess->cred.uid;
+    ident.partition = sess->partition;
+    memset(ident.service_id, 0, sizeof(ident.service_id));
+    if (sess->service_id[0] != '\0') {
+        (void)snprintf(ident.service_id, sizeof(ident.service_id), "%s",
+                       sess->service_id);
+    }
+
+    uint32_t ids[RTDBD_SUB_MAX];
+    uint32_t n = 0u;
+    if (!rtdbd_sub_snapshot_load(rb.session_id, &ident, ids, RTDBD_SUB_MAX, &n)) {
+        return RTDBD_ST_NOT_FOUND; /* 未命中/身份不符/超容量：显式失败，不误装 */
+    }
+    if (!rtdbd_session_install_subs(sess, ids, n)) {
+        return RTDBD_ST_INTERNAL;
+    }
+    (void)rtdbd_sub_snapshot_remove(rb.session_id);
+    (void)max_subs; /* install_subs 内部受 RTDBD_SUB_MAX 限，max_subs 由调用方配置 */
     return RTDBD_ST_OK;
 }
 
@@ -346,11 +409,35 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
         uint16_t hst = vsoa_hello(a, server, id, req, req_len);
         vsoa_payload_t hout;
         memset(&hout, 0, sizeof(hout));
+        /* h-A：成功响应带 session_id（老客户端忽略 body、零影响） */
+        if (hst == RTDBD_ST_OK) {
+            rtdbd_session_t *hs = cli_session(a, id);
+            if (hs && hs->session_id != 0u) {
+                rtdbd_vsoa_hello_resp_t hresp;
+                hresp.session_id = hs->session_id;
+                memcpy(a->resp, &hresp, sizeof(hresp));
+                hout.data = a->resp;
+                hout.data_len = sizeof(hresp);
+            }
+        }
         uint32_t hseq = hdr ? ntohl(hdr->seqno) : 0u;
         uint16_t htun = hdr ? ntohs(hdr->tunid) : 0u;
         (void)vsoa_server_cli_reply(server, id,
                                     (uint8_t)rtdbd_st_to_vsoa_status((uint8_t)hst),
                                     hseq, htun, &hout);
+        return;
+    }
+
+    /* h-A：/session/rebind 是 VSOA 专有 URL（仿 hello/peers），不进 opcode 表。 */
+    if (strcmp(bare, "/session/rebind") == 0) {
+        uint16_t rst = vsoa_session_rebind(a, id, req, req_len, 0u);
+        vsoa_payload_t rout;
+        memset(&rout, 0, sizeof(rout));
+        uint32_t rseq = hdr ? ntohl(hdr->seqno) : 0u;
+        uint16_t rtun = hdr ? ntohs(hdr->tunid) : 0u;
+        (void)vsoa_server_cli_reply(server, id,
+                                    (uint8_t)rtdbd_st_to_vsoa_status((uint8_t)rst),
+                                    rseq, rtun, &rout);
         return;
     }
 
@@ -547,6 +634,23 @@ rtdbd_vsoa_adapter_t *rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t *hand
             hu.url = hello_full;
             hu.url_len = strlen(hello_full);
             if (!vsoa_server_add_listener(a->server, &hu, vsoa_on_cmd, a)) {
+                vsoa_server_close(a->server);
+                free(a);
+                return NULL;
+            }
+        }
+    }
+    /* h-A：/session/rebind 专有 URL（订阅快照恢复），仿 hello 单独注册。 */
+    {
+        static char rebind_full[128];
+        int rk = snprintf(rebind_full, sizeof(rebind_full), "%s/session/rebind",
+                          RTDBD_VSOA_URL_PREFIX);
+        if (rk > 0 && (size_t)rk < sizeof(rebind_full)) {
+            vsoa_url_t ru;
+            memset(&ru, 0, sizeof(ru));
+            ru.url = rebind_full;
+            ru.url_len = strlen(rebind_full);
+            if (!vsoa_server_add_listener(a->server, &ru, vsoa_on_cmd, a)) {
                 vsoa_server_close(a->server);
                 free(a);
                 return NULL;

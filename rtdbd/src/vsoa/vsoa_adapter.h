@@ -104,6 +104,18 @@ typedef struct {
     char service_id[64];
 } rtdbd_vsoa_hello_req_t;
 
+/* h-A：hello **成功响应体**（仅成功时有 body，失败仍空；老客户端忽略 body 零影响）。
+ * session_id 是服务端下发的稳定重连标识（非鉴权凭据），重连时经
+ * /indurtdb/v1/session/rebind 回传以匹配断链订阅快照。 */
+typedef struct {
+    uint64_t session_id;
+} rtdbd_vsoa_hello_resp_t;
+
+/* h-A：rebind 请求体（VSOA 专有 URL，非 opcode 表项）。 */
+typedef struct {
+    uint64_t session_id;
+} rtdbd_vsoa_session_rebind_t;
+
 /* token 表条目（定长，零动态分配）。 */
 typedef struct {
     bool     used;

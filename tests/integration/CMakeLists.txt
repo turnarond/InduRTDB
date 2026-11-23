@@ -306,6 +306,7 @@ add_test(NAME IR2_AuthDeny COMMAND IR2_AuthDeny)
 add_executable(IR3_DeferredQueue IR3_DeferredQueue.cpp
     ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
     ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_actions.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sub_snapshot.c
     ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
 target_include_directories(IR3_DeferredQueue PRIVATE
     ${PROJECT_SOURCE_DIR}/include
@@ -353,6 +354,7 @@ add_test(NAME IR4_RbeCounters COMMAND IR4_RbeCounters)
 if(INDURTDB_ENABLE_VSOA)
     add_executable(test_vsoa_e2e test_vsoa_e2e.cpp
         ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sub_snapshot.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
@@ -460,6 +462,7 @@ if(INDURTDB_ENABLE_VSOA)
     add_executable(test_vsoa_cluster test_vsoa_cluster.cpp
         vsoa_cluster_harness.cpp
         ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sub_snapshot.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
@@ -496,6 +499,7 @@ if(INDURTDB_ENABLE_VSOA)
     # 须重新 `cmake -S . -B build-vsoa` 才会收录；OFF 构建不注册（不编 adapter）。
     add_executable(IR5_NotifyDirection test_vsoa_notify.cpp
         ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sub_snapshot.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c

@@ -37,6 +37,7 @@ void rtdbd_session_reset(rtdbd_session_t *s)
     s->snap_emitted = 0;
     s->service_id[0] = '\0';
     s->epoch = 0;
+    s->session_id = 0; /* h-A：重连即新会话，旧 session_id 失效 */
     s->role = RTDBD_ROLE_UNKNOWN;
     s->cred.uid = 0;
     s->cred.pid = 0;

@@ -12,7 +12,10 @@
 #include <gtest/gtest.h>
 
 #include "cluster/rtdbd_defer_actions.h"
+#include "cluster/rtdbd_sub_snapshot.h"
+#include "session/rtdbd_session.h"
 
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -213,4 +216,98 @@ TEST(IR3_DeferredQueue, ReconnectIsSessionScopedAndDispatched)
     EXPECT_EQ(rtdbd_defer_actions_drain(&q2, 32u, &e2), 0u);
     EXPECT_EQ(s2.reconnect, 0);
     EXPECT_EQ(s2.stale, 1u);
+}
+
+// ---- h-A：订阅真实重建（s-0=必须自动重建、s-A′=α session_id）----
+// 快照表纯逻辑：save/load 往返、身份纵深校验、A/B 同 service_id 隔离、
+// session install_subs 恢复（sub_rebuild_ok 的纯逻辑代理）。ON 侧真实断链重连
+// 由 test_vsoa_e2e 覆盖；此处只锁住传输无关快照与恢复语义。
+
+static rtdbd_sub_snap_identity_t make_ident(uint32_t uid, const char *sid)
+{
+    rtdbd_sub_snap_identity_t id;
+    std::memset(&id, 0, sizeof(id));
+    id.uid = uid;
+    id.partition = 0u;
+    if (sid) std::snprintf(id.service_id, sizeof(id.service_id), "%s", sid);
+    return id;
+}
+
+TEST(IR3_DeferredQueue, SubSnapshotSaveLoadRoundTrip)
+{
+    rtdbd_sub_snapshot_clear();
+    auto ident = make_ident(100u, "plc-line-1");
+    uint32_t pts[] = {5u, 9u, 42u};
+    ASSERT_TRUE(rtdbd_sub_snapshot_save(1234u, &ident, pts, 3u));
+
+    uint32_t out[8] = {0};
+    uint32_t n = 0u;
+    ASSERT_TRUE(rtdbd_sub_snapshot_load(1234u, &ident, out, 8u, &n));
+    EXPECT_EQ(n, 3u);
+    EXPECT_EQ(out[0], 5u);
+    EXPECT_EQ(out[1], 9u);
+    EXPECT_EQ(out[2], 42u);
+
+    auto st = rtdbd_sub_snapshot_stats();
+    EXPECT_EQ(st.saved, 1u);
+    EXPECT_EQ(st.loaded, 1u);
+}
+
+TEST(IR3_DeferredQueue, SubSnapshotIdentityMismatchRejected)
+{
+    rtdbd_sub_snapshot_clear();
+    auto ident = make_ident(100u, "plc-line-1");
+    uint32_t pts[] = {5u};
+    ASSERT_TRUE(rtdbd_sub_snapshot_save(2000u, &ident, pts, 1u));
+
+    // 同 service_id 但不同 uid（模拟 A/B 串台尝试）→ 身份不符拒绝
+    auto other = make_ident(200u, "plc-line-1");
+    uint32_t out[4] = {0};
+    uint32_t n = 0u;
+    EXPECT_FALSE(rtdbd_sub_snapshot_load(2000u, &other, out, 4u, &n));
+    EXPECT_EQ(n, 0u);
+    EXPECT_EQ(rtdbd_sub_snapshot_stats().identity_mismatch, 1u);
+
+    // 正确身份仍可恢复（快照未被误消费）
+    EXPECT_TRUE(rtdbd_sub_snapshot_load(2000u, &ident, out, 4u, &n));
+    EXPECT_EQ(n, 1u);
+}
+
+TEST(IR3_DeferredQueue, SubSnapshotRestoreIntoSession)
+{
+    rtdbd_sub_snapshot_clear();
+    auto ident = make_ident(100u, "plc-line-1");
+    uint32_t pts[] = {5u, 9u};
+    ASSERT_TRUE(rtdbd_sub_snapshot_save(3000u, &ident, pts, 2u));
+
+    rtdbd_session_t sess;
+    ASSERT_TRUE(rtdbd_session_init(&sess, RTDBD_SUBTAB_MIN_CAP));
+    uint32_t out[RTDBD_SUB_MAX] = {0};
+    uint32_t n = 0u;
+    ASSERT_TRUE(rtdbd_sub_snapshot_load(3000u, &ident, out, RTDBD_SUB_MAX, &n));
+    EXPECT_TRUE(rtdbd_session_install_subs(&sess, out, n)); // sub_rebuild_ok 纯逻辑判据
+    EXPECT_EQ(rtdbd_session_subs_count(&sess), 2u);
+    EXPECT_TRUE(rtdbd_session_subs_contains(&sess, 5u));
+    EXPECT_TRUE(rtdbd_session_subs_contains(&sess, 9u));
+    rtdbd_session_free(&sess);
+}
+
+TEST(IR3_DeferredQueue, SubSnapshotLruAndSidZeroRejected)
+{
+    rtdbd_sub_snapshot_clear();
+    auto ident = make_ident(100u, "plc-line-1");
+    uint32_t pt = 1u;
+    // sid=0 非法（0 是未启用哨兵）→ dropped
+    EXPECT_FALSE(rtdbd_sub_snapshot_save(0u, &ident, &pt, 1u));
+    EXPECT_GE(rtdbd_sub_snapshot_stats().dropped, 1u);
+
+    // 填满 32 条 + 1 条 → LRU 淘汰最早 sid=1
+    uint32_t before = rtdbd_sub_snapshot_stats().evicted;
+    for (uint64_t sid = 1u; sid <= RTDBD_SUB_SNAP_MAX + 1u; ++sid) {
+        ASSERT_TRUE(rtdbd_sub_snapshot_save(sid, &ident, &pt, 1u));
+    }
+    EXPECT_EQ(rtdbd_sub_snapshot_stats().evicted - before, 1u);
+    uint32_t out[4] = {0}, n = 0u;
+    EXPECT_FALSE(rtdbd_sub_snapshot_load(1u, &ident, out, 4u, &n)); // 已被淘汰
+    EXPECT_TRUE(rtdbd_sub_snapshot_load(RTDBD_SUB_SNAP_MAX + 1u, &ident, out, 4u, &n));
 }

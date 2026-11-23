@@ -81,6 +81,10 @@ typedef struct {
      * UDS 侧不参与纪元隔离，这两个字段恒为 0 / 空。 */
     char         service_id[64];
     uint64_t     epoch;
+    /* h-A：服务端下发的稳定重连标识（VSOA hello 成功响应携带、rebind 回传）。
+     * 非鉴权凭据（uid/partition/role 仍每次 hello 重建）；仅用于断链订阅快照匹配。
+     * UDS 侧恒 0（无 session_id 契约）。 */
+    uint64_t     session_id;
     rtdbd_session_role_t role;
     rtdbd_session_cred_t cred;
     /* 发送句柄。 */

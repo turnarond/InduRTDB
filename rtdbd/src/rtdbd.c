@@ -28,6 +28,7 @@
 #include "cluster/rtdbd_peers_global.h"
 #include "cluster/rtdbd_defer_global.h"
 #include "cluster/rtdbd_defer_actions.h"
+#include "cluster/rtdbd_sub_snapshot.h" /* h-A：断链订阅快照 */
 #include "dispatch/rtdbd_dispatch.h"
 #ifdef INDURTDB_ENABLE_VSOA
 #include "vsoa/vsoa_adapter.h"
@@ -48,6 +49,9 @@ RTDBD_STATIC_ASSERT(sizeof(rtdbd_meta_payload_t) == sizeof(indurtdb_meta_t),
 #define RTDBD_MAX_CLIENTS 128
 #define RTDBD_INITIAL_CLIENTS 32
 #define RTDBD_SHUTDOWN_DELAY_SEC 1
+/* h-A：UDS 断链快照键 = 该高位基 | slot idx，与 VSOA 服务端 session_id（从 1 递增、
+ * 远小于 2^63）隔离，防两通道键冲突。UDS 非 G2 主路径、按 slot 同槽恢复。 */
+#define RTDBD_UDS_SNAP_KEY_BASE 0x8000000000000000ULL
 
 /* --max-points 的硬上限（B3 参数校验）：点位区按 128B/点计算，
  * 100 万点 ≈ 128MB；再大既无实用意义，也会让 layout 的 uint32 偏移与
@@ -2135,8 +2139,10 @@ static void defer_on_close(void* owner, uint32_t sid, uint32_t arg)
 static void defer_on_rebuild_subs(void* owner, uint32_t sid, uint32_t arg)
 {
     (void)owner; (void)arg;
-    /* UDS 侧重连即新连接，没有历史订阅可重建；显式替换为空集是可证伪的
-     * 正确结果，不假装有历史订阅（VSOA 侧按 session.sub 重建属 M3.3+）。 */
+    /* h-A（s-0 裁决）：RECONNECT/REBUILD_SUBS 的 defer 执行器仍只装空集——
+     * 真实订阅恢复已改在「新会话就绪」路径（UDS accept / VSOA rebind），
+     * 走订阅快照按稳定 session_id / slot 恢复，不经 defer stale（跨重连会被丢弃）。
+     * 本执行器保留供既存 RECONNECT 入队点使用（空集语义=显式无快照可恢复）。 */
     if (sid >= g_max_clients) return;
     rtdbd_conn_t* c = g_conns[sid];
     if (!c || c->fd < 0) return;
@@ -2177,6 +2183,37 @@ static void defer_on_trigger_fullsync(void* owner, uint32_t sid, uint32_t arg)
     }
 }
 
+/* h-A：UDS 断链保存订阅快照（slot 键，高位命名空间与 VSOA session_id 隔离）。
+ * 在 close/conn_init 之前调用；只存点集 + 身份（uid/partition），不入队。 */
+static void uds_snapshot_save(uint32_t slot, rtdbd_conn_t *c)
+{
+    if (!c || slot >= RTDBD_MAX_CLIENTS) return;
+    if (c->session.nsubs == 0u) return; /* 空订阅无需快照 */
+    rtdbd_sub_snap_identity_t ident;
+    memset(&ident, 0, sizeof(ident));
+    ident.uid = c->session.cred.uid;
+    ident.partition = c->session.partition;
+    (void)rtdbd_sub_snapshot_save(RTDBD_UDS_SNAP_KEY_BASE | (uint64_t)slot,
+                                  &ident, c->session.subs, c->session.nsubs);
+}
+
+/* h-A：UDS 新连接（同 slot 复用）按 uid/partition 校验恢复订阅快照。 */
+static void uds_snapshot_restore(uint32_t slot, rtdbd_conn_t *c)
+{
+    if (!c || slot >= RTDBD_MAX_CLIENTS) return;
+    rtdbd_sub_snap_identity_t ident;
+    memset(&ident, 0, sizeof(ident));
+    ident.uid = c->session.cred.uid;
+    ident.partition = c->session.partition;
+    uint32_t ids[RTDBD_SUB_MAX];
+    uint32_t n = 0u;
+    if (rtdbd_sub_snapshot_load(RTDBD_UDS_SNAP_KEY_BASE | (uint64_t)slot,
+                                &ident, ids, RTDBD_SUB_MAX, &n)) {
+        (void)rtdbd_session_install_subs(&c->session, ids, n);
+        (void)rtdbd_sub_snapshot_remove(RTDBD_UDS_SNAP_KEY_BASE | (uint64_t)slot);
+    }
+}
+
 static void drain_deferred_actions(void)
 {
     rtdbd_defer_exec_t exec;
@@ -2189,10 +2226,9 @@ static void drain_deferred_actions(void)
     exec.on_peer_del        = defer_on_peer_del;
     /* TRIGGER_FULLSYNC 已闭环（JOINING->ACTIVE，成员接纳状态机）。 */
     exec.on_trigger_fullsync = defer_on_trigger_fullsync;
-    /* RECONNECT（§8.3-3）：UDS 侧重连重置会话订阅为空，与 rebuild_subs 同语义，
-     * 故直接复用 defer_on_rebuild_subs（去重，不另立同名函数）。VSOA 侧重建属
-     * M3.3+ 且 VSOA 会话不映射 g_conns，RECONNECT 仅对 UDS 有效；当前 VSOA 断链
-     * 入队点未接入（留后续），但执行器已就绪，UDS RECONNECT 入队即执行。 */
+    /* RECONNECT（§8.3-3）：defer 执行器仍复用装空集函数（既存 RECONNECT 入队点用）。
+     * h-A 订阅真实重建不走此路——VSOA rebind / UDS accept 的「新会话就绪」路径
+     * 按订阅快照恢复，避免 defer stale 在跨重连时丢弃 action。 */
     exec.on_reconnect = defer_on_rebuild_subs;
     exec.executed     = &g_defer_executed;
     exec.stale        = &g_defer_stale;
@@ -2792,6 +2828,7 @@ int main(int argc, char** argv)
                         c->session.cred.pid = peer_pid;
                         c->session.cred.uid = peer_uid;
                         c->session.cred.cred_ok = true;
+                        uds_snapshot_restore((uint32_t)i, c); /* h-A：同 slot 恢复订阅 */
                         if (i + 1 > g_conn_high) g_conn_high = i + 1;
                         placed = 1;
                         break;
@@ -2814,6 +2851,7 @@ int main(int argc, char** argv)
              * flush 失败（对端已关闭）→ 关闭该连接。 */
             if ((fds[i].revents & POLLOUT) && conn->outq_count > 0) {
                 if (outq_flush(conn) != 0) {
+                    uds_snapshot_save((uint32_t)conn_idx, conn); /* h-A：断链保存快照 */
                     close(fds[i].fd);
                     conn_init(conn);
                     conn_note_closed(conn_idx);
@@ -2840,6 +2878,7 @@ int main(int argc, char** argv)
             memset(&cx.resp, 0, sizeof(cx.resp));
 
             if (handle_request(fds[i].fd, &cx) != 0) {
+                uds_snapshot_save((uint32_t)conn_idx, conn); /* h-A：断链保存快照 */
                 close(fds[i].fd);
                 conn_discard_outq(conn);   /* 队列内容计入 notify_drop，不静默丢 */
                 conn_init(conn);
