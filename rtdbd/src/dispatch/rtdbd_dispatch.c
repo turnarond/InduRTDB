@@ -339,3 +339,87 @@ void rtdbd_dispatch_health_fill(int health, const rtdbd_health_counts_t *counts,
     }
     out->n_conns = n_conns;
 }
+
+/* h-C 前置：4 个只读 URL 的 transport 无关纯函数（见 dispatch.h）。
+ * 逻辑从 rtdbd.c 的 op_* / do_list 迁入；输入全注入、无 fd/socket/全局状态。 */
+
+uint16_t rtdbd_dispatch_find(indurtdb_t *h, const rtdbd_conf_t *conf,
+                             uint32_t partition, const char *name,
+                             uint32_t *out_id)
+{
+    if (!h || !conf || !name || !out_id) return RTDBD_ST_BAD_REQUEST;
+    /* 分区白名单 fail-closed：非法分区 ⇒ 未找到（对齐 UDS op_find_by_name:1213）。 */
+    if (!rtdbd_conf_partition_allowed(conf, partition)) return RTDBD_ST_NOT_FOUND;
+    int rc = indurtdb_h_find_by_name_in(h, partition, name, out_id);
+    if (rc == INDURTDB_ERR_NOT_FOUND) return RTDBD_ST_NOT_FOUND;
+    if (rc != 0) return RTDBD_ST_INTERNAL;
+    return RTDBD_ST_OK;
+}
+
+uint16_t rtdbd_dispatch_meta(indurtdb_t *h, uint32_t point_id,
+                             rtdbd_meta_payload_t *out)
+{
+    if (!h || !out) return RTDBD_ST_BAD_REQUEST;
+    indurtdb_meta_t meta;
+    memset(&meta, 0, sizeof(meta));
+    int rc = indurtdb_h_get_meta(h, point_id, &meta);
+    if (rc == INDURTDB_ERR_NOT_FOUND) return RTDBD_ST_NOT_FOUND;
+    if (rc == INDURTDB_ERR_ARG) return RTDBD_ST_BAD_REQUEST; /* 越界 id 属请求错误 */
+    if (rc != 0) return RTDBD_ST_INTERNAL;
+    memcpy(out, &meta, sizeof(meta)); /* rtdbd_meta_payload_t 与 indurtdb_meta_t 逐字节同尺寸 */
+    return RTDBD_ST_OK;
+}
+
+uint16_t rtdbd_dispatch_list_snapshot(indurtdb_t *h, const rtdbd_conf_t *conf,
+                                      uint32_t partition, uint32_t max, uint32_t offset,
+                                      uint32_t max_points, uint8_t *buf, size_t cap,
+                                      size_t *out_len)
+{
+    if (!h || !conf || !buf || !out_len) return RTDBD_ST_BAD_REQUEST;
+    *out_len = 0u;
+    /* 白名单 fail-closed：具体分区非法 ⇒ OK + 空 body；ALL 哨兵不过滤
+     * （对齐 UDS op_list:1488-1494）。 */
+    if (partition != RTDBD_PARTITION_ALL &&
+        !rtdbd_conf_partition_allowed(conf, partition)) {
+        return RTDBD_ST_OK; /* 空 body 是合法结果，非 DENIED */
+    }
+    if (offset >= max_points) return RTDBD_ST_OK;
+    /* do_list 扫描逻辑迁入；cap 由调用方注入（UDS 77824B / VSOA 8192B），
+     * 按 cap/76 截断 max，避免 VSOA resp 超限静默丢 body。 */
+    uint32_t entry_cap = (max == 0u) ? (uint32_t)(cap / sizeof(rtdbd_point_info_t))
+                                     : max;
+    uint32_t hard_cap  = (uint32_t)(cap / sizeof(rtdbd_point_info_t));
+    if (entry_cap > hard_cap) entry_cap = hard_cap;
+    rtdbd_point_info_t *arr = (rtdbd_point_info_t *)buf;
+    uint32_t n = 0u;
+    for (uint32_t id = offset; id < max_points && n < entry_cap; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_h_read_point(h, id, &pt) != 0) continue;
+        if (pt.name[0] == '\0') continue;
+        if (partition != RTDBD_PARTITION_ALL && pt.partition != partition) continue;
+        rtdbd_point_info_t *e = &arr[n++];
+        e->point_id  = id;
+        e->type      = pt.type;
+        e->access    = pt.access;
+        e->partition = pt.partition;
+        memset(e->name, 0, sizeof(e->name));
+        memcpy(e->name, pt.name, sizeof(e->name) - 1u);
+    }
+    *out_len = (size_t)n * sizeof(rtdbd_point_info_t);
+    return RTDBD_ST_OK;
+}
+
+uint16_t rtdbd_dispatch_log_snapshot(const irt_logbuf_t *logbuf, uint32_t max,
+                                     uint8_t *buf, size_t cap, size_t *out_len)
+{
+    if (!logbuf || !buf || !out_len) return RTDBD_ST_BAD_REQUEST;
+    *out_len = 0u;
+    /* max 语义对齐 UDS op_get_log:1515：0→全部(128)、>128→128。 */
+    uint32_t n_req = (max == 0u || max > RTDBD_LOG_CAPACITY)
+                         ? RTDBD_LOG_CAPACITY : max;
+    uint32_t hard_cap = (uint32_t)(cap / sizeof(rtdbd_log_entry_t));
+    if (n_req > hard_cap) n_req = hard_cap; /* VSOA 8192/128=64 截断 */
+    uint32_t n = irt_logbuf_dump(logbuf, (rtdbd_log_entry_t *)buf, n_req);
+    *out_len = (size_t)n * sizeof(rtdbd_log_entry_t);
+    return RTDBD_ST_OK;
+}

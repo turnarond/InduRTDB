@@ -825,39 +825,8 @@ static int conn_peer_cred(const rtdbd_conn_t* c, uint32_t* pid, uint32_t* uid)
 /* 读点位当前值并组装 rtdbd_get_resp_t —— 业务语义已迁入 transport 无关 dispatch
  * （rtdbd_dispatch_get）：UDS 与 VSOA 两前端读同一点位得到字节一致的响应体。
  * 鉴权语义不变：/point/get 属 v3.5 监控只读通道（读免鉴权，同 GET_LOG 定位）。 */
-/* 枚举已注册点位（name[0]!='\0' 视为已注册）。
- * 从 offset(id) 起向后扫描，最多收集 max 个已注册点（max=0 表示上限 CHUNK 个），
- * 结果写入 buf，*out_len 返回字节数。分页时 offset 为起始 id，max 为返回条数上限。
- *
- * v3.9 T5：按分区过滤 —— filter == RTDBD_PARTITION_ALL 列出全部分区；
- * 否则仅列出 pt.partition == filter 的点位，且每条信息携带其 partition。 */
-static void do_list(indurtdb_t* h, uint32_t filter, uint32_t max_n, uint32_t offset,
-                    uint8_t* buf, size_t* out_len)
-{
-    *out_len = 0;
-    if (offset >= g_max_points) return;
-
-    uint32_t cap = (max_n == 0) ? RTDBD_LIST_CHUNK : max_n;
-    if (cap > RTDBD_LIST_CHUNK) cap = RTDBD_LIST_CHUNK;
-
-    rtdbd_point_info_t* arr = (rtdbd_point_info_t*)buf;
-    uint32_t n = 0;
-    for (uint32_t id = offset; id < g_max_points && n < cap; ++id) {
-        indurtdb_point_t pt;
-        if (indurtdb_h_read_point(h, id, &pt) != 0) continue;
-        if (pt.name[0] == '\0') continue; /* 未注册点位跳过 */
-        if (filter != RTDBD_PARTITION_ALL && pt.partition != filter) continue;
-
-        rtdbd_point_info_t* e = &arr[n++];
-        e->point_id = id;
-        e->type     = pt.type;
-        e->access   = pt.access;
-        e->partition = pt.partition;
-        memset(e->name, 0, sizeof(e->name));
-        memcpy(e->name, pt.name, sizeof(e->name) - 1);
-    }
-    *out_len = (size_t)n * sizeof(rtdbd_point_info_t);
-}
+/* h-C 前置：do_list 扫描逻辑已迁入 rtdbd_dispatch_list_snapshot（dispatch.c），
+ * UDS op_list 与 VSOA /point/list 共用同一纯函数，删除本处重复实现。 */
 
 /* ---- v3.9 T5：请求上下文 + 分发表 --------------------------------
  * 处理过程需要句柄、policy、audit、连接、连接表、分区白名单；原先
@@ -1209,22 +1178,11 @@ static int op_find_by_name(int fd, rtdbd_ctx_t* cx)
     }
     f.name[sizeof(f.name) - 1] = '\0';
 
-    /* 白名单 fail-closed：非法分区不存在该命名空间 ⇒ 未找到。 */
-    if (!rtdbd_conf_partition_allowed(cx->conf, f.partition)) {
-        cx->resp.status      = RTDBD_ST_NOT_FOUND;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-
+    /* h-C 前置：核心语义走共享纯函数（与 VSOA 同一函数、错误码一致）。 */
     uint32_t found_id = 0;
-    int rc = indurtdb_h_find_by_name_in(cx->h, f.partition, f.name, &found_id);
-    if (rc == INDURTDB_ERR_NOT_FOUND) {
-        cx->resp.status      = RTDBD_ST_NOT_FOUND;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-    if (rc != 0) {
-        cx->resp.status      = RTDBD_ST_INTERNAL;
+    uint16_t pst = rtdbd_dispatch_find(cx->h, cx->conf, f.partition, f.name, &found_id);
+    if (pst != RTDBD_ST_OK) {
+        cx->resp.status      = (uint8_t)pst;
         cx->resp.payload_len = 0;
         return send_all(fd, &cx->resp, sizeof(cx->resp));
     }
@@ -1249,21 +1207,13 @@ static int op_get_meta(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
 
-    indurtdb_meta_t meta;
+    /* h-C 前置：核心语义走共享纯函数；rtdbd_meta_payload_t 与库结构逐字节同尺寸
+     * （本文件 :47 static_assert），故响应字节不变。 */
+    rtdbd_meta_payload_t meta;
     memset(&meta, 0, sizeof(meta));
-    int rc = indurtdb_h_get_meta(cx->h, m.point_id, &meta);
-    if (rc == INDURTDB_ERR_NOT_FOUND) {
-        cx->resp.status      = RTDBD_ST_NOT_FOUND;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-    if (rc == INDURTDB_ERR_ARG) {   /* 越界 id 属请求错误，非"未找到" */
-        cx->resp.status      = RTDBD_ST_BAD_REQUEST;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-    if (rc != 0) {
-        cx->resp.status      = RTDBD_ST_INTERNAL;
+    uint16_t pst = rtdbd_dispatch_meta(cx->h, m.point_id, &meta);
+    if (pst != RTDBD_ST_OK) {
+        cx->resp.status      = (uint8_t)pst;
         cx->resp.payload_len = 0;
         return send_all(fd, &cx->resp, sizeof(cx->resp));
     }
@@ -1485,17 +1435,13 @@ static int op_list(int fd, rtdbd_ctx_t* cx)
         return 1;
     }
 
-    /* 白名单 fail-closed：具体分区非法 ⇒ 空结果；ALL 哨兵列出全部分区（不过滤）。 */
-    if (l.partition != RTDBD_PARTITION_ALL &&
-        !rtdbd_conf_partition_allowed(cx->conf, l.partition)) {
-        cx->resp.status      = RTDBD_ST_OK;
-        cx->resp.payload_len = 0;
-        return send_all(fd, &cx->resp, sizeof(cx->resp));
-    }
-
+    /* h-C 前置：白名单 + do_list 扫描统一走共享纯函数（max_points 注入），
+     * UDS 传原 g_max_points 与 g_list_buf 容量，输出字节不变。 */
     size_t len = 0;
-    do_list(cx->h, l.partition, l.max, l.offset, g_list_buf, &len);
-    cx->resp.status      = RTDBD_ST_OK;
+    uint16_t pst = rtdbd_dispatch_list_snapshot(cx->h, cx->conf, l.partition,
+                                                l.max, l.offset, g_max_points,
+                                                g_list_buf, sizeof(g_list_buf), &len);
+    cx->resp.status      = (uint8_t)pst;
     cx->resp.payload_len = (uint32_t)len;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
     if (len > 0 && send_all(fd, g_list_buf, len) != 0) return 1;
@@ -1512,13 +1458,15 @@ static int op_get_log(int fd, rtdbd_ctx_t* cx)
         (void)send_all(fd, &cx->resp, sizeof(cx->resp));
         return 1;
     }
-    uint32_t cap = (q.max == 0 || q.max > RTDBD_LOG_CAPACITY) ? RTDBD_LOG_CAPACITY : q.max;
-    uint32_t n = irt_logbuf_dump(&g_logbuf, g_log_out, cap);
-
-    cx->resp.status      = RTDBD_ST_OK;
-    cx->resp.payload_len = n * (uint32_t)sizeof(rtdbd_log_entry_t);
+    /* h-C 前置：日志环形快照走共享纯函数（logbuf 指针注入），单页快照无游标。
+     * UDS 传 g_log_out 容量 16384B（128 条），max 语义与输出不变。 */
+    size_t len = 0;
+    uint16_t pst = rtdbd_dispatch_log_snapshot(&g_logbuf, q.max,
+                                               (uint8_t *)g_log_out, sizeof(g_log_out), &len);
+    cx->resp.status      = (uint8_t)pst;
+    cx->resp.payload_len = (uint32_t)len;
     if (send_all(fd, &cx->resp, sizeof(cx->resp)) != 0) return 1;
-    if (n > 0 && send_all(fd, g_log_out, cx->resp.payload_len) != 0) return 1;
+    if (len > 0 && send_all(fd, g_log_out, cx->resp.payload_len) != 0) return 1;
     return 0;
 }
 
@@ -2712,6 +2660,8 @@ int main(int argc, char** argv)
             hb_ctx.sid_ring = &hb_sid_ring;
             rtdbd_vsoa_adapter_set_audit(g_vsoa, hB_audit_callback, &hb_ctx);
         }
+        /* h-C 前置：注入 4 只读 URL 所需 logbuf / max_points（未注入回 NOT_IMPLEMENTED）。 */
+        rtdbd_vsoa_adapter_set_readonly_sources(g_vsoa, &g_logbuf, g_max_points);
         if (g_vsoa_token_file) {
             int ntok = load_vsoa_token_file(g_vsoa_token_file, g_vsoa);
             if (ntok < 0) {

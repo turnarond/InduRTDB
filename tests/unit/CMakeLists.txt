@@ -73,7 +73,8 @@ if(TARGET test_c_dispatch)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
-        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c)
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
     target_include_directories(test_c_dispatch PRIVATE
         ${PROJECT_SOURCE_DIR}/rtdbd/include
         ${PROJECT_SOURCE_DIR}/rtdbd/src

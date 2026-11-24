@@ -137,6 +137,11 @@ typedef struct {
 void rtdbd_vsoa_adapter_set_policy(rtdbd_vsoa_adapter_t *a, const irt_policy_t *policy);
 void rtdbd_vsoa_adapter_set_conf(rtdbd_vsoa_adapter_t *a, const rtdbd_conf_t *conf);
 void rtdbd_vsoa_adapter_set_audit(rtdbd_vsoa_adapter_t *a, rtdbd_vsoa_audit_fn fn, void *ctx);
+/* h-C 前置：只读 URL（/point/list|find_by_name|meta|logs）所需数据源注入。
+ * 由 rtdbd main 注入 &g_logbuf / g_max_points；未注入时对应 URL 回 NOT_IMPLEMENTED。 */
+void rtdbd_vsoa_adapter_set_readonly_sources(rtdbd_vsoa_adapter_t *a,
+                                             const void *logbuf /* irt_logbuf_t* */,
+                                             uint32_t max_points);
 
 /* 设置连接默认 uid（**仅限本机 loopback 开发/联调**，且需同时开启
  * set_allow_unauthenticated(true)）。生产形态必须用 hello 握手 + token 表。 */

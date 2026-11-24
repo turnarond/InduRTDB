@@ -34,6 +34,7 @@
 #include "policy.h"
 #include "rtdbd_conf.h"
 #include "subtab.h" /* 订阅成员 + RBE 状态合并表（通知门控复用） */
+#include "logbuf.h" /* h-C 前置：irt_logbuf_t 类型（只读快照纯函数入参） */
 
 #ifdef __cplusplus
 extern "C" {
@@ -162,6 +163,31 @@ typedef struct {
 void rtdbd_dispatch_health_fill(int health, const rtdbd_health_counts_t *counts,
                                 uint32_t n_conns, bool conn_table_ok,
                                 rtdbd_health_t *out);
+
+/* h-C 前置：4 个只读 URL 的 transport 无关纯函数（UDS/VSOA 共用，输入全注入）。
+ * 相同输入 → 两前端产出逐字节一致（13 号 §7.4）。函数体内无 fd/socket/全局状态。
+ * 缓冲截断在纯函数内按 cap 完成（handler 只传 cap=sizeof(resp)），两前端一致判据
+ * 仅在 max≤阈值时承诺（list 8192/76=107、log 8192/128=64；超阈值 VSOA 按 cap 截断、
+ * UDS 保持原上限，例外由交付说明标注）。 */
+/* 按名查点：name 为 64B 定长（入口补 '\0'）；分区白名单 fail-closed。
+ * 返回 RTDBD_ST_*；成功时 out_id 填点位 id。 */
+uint16_t rtdbd_dispatch_find(indurtdb_t *h, const rtdbd_conf_t *conf,
+                             uint32_t partition, const char *name /*64B*/,
+                             uint32_t *out_id);
+/* 读元数据：成功时 out 填 32B indurtdb_meta_t 布局（rtdbd_meta_payload_t）。 */
+uint16_t rtdbd_dispatch_meta(indurtdb_t *h, uint32_t point_id,
+                             rtdbd_meta_payload_t *out);
+/* 枚举点位：分区白名单迁移至此（非法具体分区→OK+空 body、ALL 哨兵不过滤）；
+ * do_list 扫描逻辑迁入、max_points 由参数注入（不偷用全局 g_max_points）；
+ * 按 cap 截断 max 到 min(max, cap/76)，out_len 返回实际字节数。 */
+uint16_t rtdbd_dispatch_list_snapshot(indurtdb_t *h, const rtdbd_conf_t *conf,
+                                      uint32_t partition, uint32_t max, uint32_t offset,
+                                      uint32_t max_points, uint8_t *buf, size_t cap,
+                                      size_t *out_len);
+/* 日志环形快照：注入 logbuf 指针；max==0→全部、>RTDBD_LOG_CAPACITY→128，
+ * 再按 cap 截断到 min(n, cap/128)；单页快照无游标。 */
+uint16_t rtdbd_dispatch_log_snapshot(const irt_logbuf_t *logbuf, uint32_t max,
+                                     uint8_t *buf, size_t cap, size_t *out_len);
 
 #ifdef __cplusplus
 }

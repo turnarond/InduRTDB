@@ -68,6 +68,9 @@ struct rtdbd_vsoa_adapter {
     rtdbd_notify_counters_t notify_counters;
     /* h-A：服务端稳定 session_id 生成器（单调递增、非零；hello 成功响应下发）。 */
     uint64_t           next_session_id;
+    /* h-C 前置：只读 URL 数据源（rtdbd main 注入；未注入回 NOT_IMPLEMENTED）。 */
+    const irt_logbuf_t *readonly_logbuf;
+    uint32_t            readonly_max_points;
     /* 回调内使用的响应缓冲：SDK 规定 payload 在回调返回后失效，故必须自备。 */
     uint8_t            resp[RTDBD_VSOA_RESP_MAX];
 };
@@ -89,6 +92,120 @@ static rtdbd_session_t *cli_session(rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id)
         }
     }
     return NULL;
+}
+
+/* h-C 前置：4 只读 URL 的 β 门禁判据（r-A=β）。只封装判据、返回 bool；
+ * DENIED reply 由各分支自行发送，避免 helper 承担 server/seq/tun 参数。
+ * 语义对齐公共门禁 :519-536：仅 cred_ok && role!=UNKNOWN 的会话受 role→URL 白名单约束，
+ * UNKNOWN 联调会话沿用 cred_ok，不误伤既有 allow_unauthenticated e2e。 */
+static bool vsoa_readonly_gate_allowed(rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id,
+                                       const char *bare)
+{
+    rtdbd_session_t *s = cli_session(a, id);
+    return !(s && s->cred.cred_ok && s->role != RTDBD_ROLE_UNKNOWN &&
+             !rtdbd_authz_url_allowed(s->role, bare));
+}
+
+/* h-C 前置：4 只读 URL 统一 handler。kind: 0=find 1=meta 2=list 3=log。
+ * 门禁 → req_len 校验 → 数据源检查 → 共享纯函数 → 回包，全在 SDK 回调线程内同步完成。 */
+typedef enum { HC_RO_FIND = 0, HC_RO_META, HC_RO_LIST, HC_RO_LOG } hc_ro_kind_t;
+
+static void vsoa_readonly_handle(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
+                                 vsoa_cli_id_t id, vsoa_header_t *hdr,
+                                 const char *bare, const uint8_t *req, size_t req_len,
+                                 hc_ro_kind_t kind)
+{
+    uint32_t seq = hdr ? ntohl(hdr->seqno) : 0u;
+    uint16_t tun = hdr ? ntohs(hdr->tunid) : 0u;
+    vsoa_payload_t out;
+    memset(&out, 0, sizeof(out));
+
+    /* r-A=β：门禁在分支内显式执行（公共门禁对非镜像 URL 不可达）。 */
+    if (!vsoa_readonly_gate_allowed(a, id, bare)) {
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_DENIED), seq, tun, &out);
+        return;
+    }
+
+    size_t expect = (kind == HC_RO_FIND) ? sizeof(rtdbd_find_req_t)
+                  : (kind == HC_RO_META) ? sizeof(rtdbd_meta_req_t)
+                  : (kind == HC_RO_LIST) ? sizeof(rtdbd_list_req_t)
+                                         : sizeof(rtdbd_log_req_t);
+    if (req_len != expect || !req) { /* 对齐 UDS 各 op_* 的 payload_len 校验 */
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_BAD_REQUEST), seq, tun, &out);
+        return;
+    }
+    /* 数据源检查：未注入 handle/conf/logbuf → NOT_IMPLEMENTED（不糊弄）。 */
+    if (!a->handle || !a->conf ||
+        (kind == HC_RO_LOG && !a->readonly_logbuf)) {
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_NOT_IMPLEMENTED), seq, tun, &out);
+        return;
+    }
+
+    uint16_t st = RTDBD_ST_OK;
+    size_t body_len = 0u;
+    switch (kind) {
+    case HC_RO_FIND: {
+        rtdbd_find_req_t f;
+        memcpy(&f, req, sizeof(f));
+        f.name[sizeof(f.name) - 1u] = '\0'; /* 全 0xFF 无 NUL 也安全（对齐 UDS :1210） */
+        uint32_t found = 0u;
+        st = rtdbd_dispatch_find(a->handle, a->conf, f.partition, f.name, &found);
+        if (st == RTDBD_ST_OK) {
+            rtdbd_find_resp_t r;
+            memset(&r, 0, sizeof(r));
+            r.point_id = found;
+            memcpy(a->resp, &r, sizeof(r));
+            body_len = sizeof(r);
+        }
+        break;
+    }
+    case HC_RO_META: {
+        rtdbd_meta_req_t m;
+        memcpy(&m, req, sizeof(m));
+        rtdbd_meta_payload_t meta;
+        memset(&meta, 0, sizeof(meta));
+        st = rtdbd_dispatch_meta(a->handle, m.point_id, &meta);
+        if (st == RTDBD_ST_OK) {
+            memcpy(a->resp, &meta, sizeof(meta));
+            body_len = sizeof(meta);
+        }
+        break;
+    }
+    case HC_RO_LIST: {
+        rtdbd_list_req_t l;
+        memcpy(&l, req, sizeof(l));
+        size_t olen = 0u;
+        /* cap=sizeof(a->resp)=8192 → 纯函数内截断 max 到 107 条。 */
+        st = rtdbd_dispatch_list_snapshot(a->handle, a->conf, l.partition, l.max,
+                                          l.offset, a->readonly_max_points,
+                                          a->resp, sizeof(a->resp), &olen);
+        if (st == RTDBD_ST_OK) body_len = olen;
+        break;
+    }
+    case HC_RO_LOG: {
+        rtdbd_log_req_t q;
+        memcpy(&q, req, sizeof(q));
+        size_t olen = 0u;
+        st = rtdbd_dispatch_log_snapshot(a->readonly_logbuf, q.max,
+                                         a->resp, sizeof(a->resp), &olen);
+        if (st == RTDBD_ST_OK) body_len = olen;
+        break;
+    }
+    }
+    if (body_len > sizeof(a->resp)) { /* 防御：纯函数已按 cap 截断，这里仅兜底 */
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_INTERNAL), seq, tun, &out);
+        return;
+    }
+    if (body_len > 0u) {
+        out.data = a->resp;
+        out.data_len = body_len;
+    }
+    (void)vsoa_server_cli_reply(server, id,
+        (uint8_t)rtdbd_st_to_vsoa_status(st), seq, tun, &out);
 }
 
 /* 连接建立/断开回调：维护 per-cli 会话（§8.3-3 传输无关会话 + §8.3-4 身份绑定）。
@@ -511,6 +628,25 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
         return;
     }
 
+    /* h-C 前置：4 只读 URL 专有分支（置于 opcode_from_url 之前——4 URL 不在 13 表，
+     * 放到门禁后会因 :early-return 不可达；β 门禁在 handler 内显式执行）。 */
+    if (strcmp(bare, "/point/find_by_name") == 0) {
+        vsoa_readonly_handle(a, server, id, hdr, bare, req, req_len, HC_RO_FIND);
+        return;
+    }
+    if (strcmp(bare, "/point/meta") == 0) {
+        vsoa_readonly_handle(a, server, id, hdr, bare, req, req_len, HC_RO_META);
+        return;
+    }
+    if (strcmp(bare, "/point/list") == 0) {
+        vsoa_readonly_handle(a, server, id, hdr, bare, req, req_len, HC_RO_LIST);
+        return;
+    }
+    if (strcmp(bare, "/logs") == 0) {
+        vsoa_readonly_handle(a, server, id, hdr, bare, req, req_len, HC_RO_LOG);
+        return;
+    }
+
     uint16_t opcode = 0;
     if (rtdbd_opcode_from_url(bare, &opcode) != 0) {
         return; /* 非镜像能力：不处理（也不落错误 reply，避免半实现误导） */
@@ -745,6 +881,27 @@ rtdbd_vsoa_adapter_t *rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t *hand
             return NULL;
         }
     }
+    /* h-C 前置：4 只读 URL 单独注册（P0-1：漏注册则 SDK 回 status=3、分支不可达）。
+     * 不进 13 镜像表（保持 opcode 冻结）；注册失败即 adapter 创建失败、不半实现。 */
+    {
+        static const char *const ro_urls[] = {
+            "/point/find_by_name", "/point/meta", "/point/list", "/logs"
+        };
+        for (size_t i = 0; i < sizeof(ro_urls) / sizeof(ro_urls[0]); ++i) {
+            char full[128];
+            int k = snprintf(full, sizeof(full), "%s%s", RTDBD_VSOA_URL_PREFIX, ro_urls[i]);
+            if (k <= 0 || (size_t)k >= sizeof(full)) {
+                vsoa_server_close(a->server); free(a); return NULL;
+            }
+            vsoa_url_t u;
+            memset(&u, 0, sizeof(u));
+            u.url = full;
+            u.url_len = strlen(full);
+            if (!vsoa_server_add_listener(a->server, &u, vsoa_on_cmd, a)) {
+                vsoa_server_close(a->server); free(a); return NULL;
+            }
+        }
+    }
     return a;
 }
 
@@ -856,6 +1013,14 @@ void rtdbd_vsoa_adapter_set_audit(rtdbd_vsoa_adapter_t *a, rtdbd_vsoa_audit_fn f
     }
     a->audit = fn;
     a->audit_ctx = ctx;
+}
+
+void rtdbd_vsoa_adapter_set_readonly_sources(rtdbd_vsoa_adapter_t *a,
+                                             const void *logbuf, uint32_t max_points)
+{
+    if (!a) return;
+    a->readonly_logbuf = (const irt_logbuf_t *)logbuf;
+    a->readonly_max_points = max_points;
 }
 
 void rtdbd_vsoa_adapter_set_allow_unauthenticated(rtdbd_vsoa_adapter_t *a, bool allow)

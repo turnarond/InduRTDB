@@ -126,9 +126,17 @@ int e2e_handler(void *ctx, uint16_t opcode, const uint8_t *req, size_t req_len,
         rtdbd_vsoa_adapter_set_conf(adapter, conf);
         rtdbd_vsoa_adapter_set_audit(adapter, e2e_audit, nullptr);
         rtdbd_vsoa_adapter_set_default_uid(adapter, e2e_uid);
+        /* h-C 前置：注入 4 只读 URL 数据源（logbuf + max_points）。 */
+        static irt_logbuf_t ro_logbuf;
+        irt_logbuf_init(&ro_logbuf);
+        irt_logbuf_emit(&ro_logbuf, RTDBD_LOG_INFO, "e2e-readonly-source");
+        rtdbd_vsoa_adapter_set_readonly_sources(adapter, &ro_logbuf, 64u);
         /* 预共享 token 表（§8.3-4 生产形态）：hello 握手凭此换取身份 */
         rtdbd_vsoa_adapter_add_token(adapter, "tok-plc-1", e2e_uid, 0,
                                      "plc-line-1", RTDBD_ROLE_PLC);
+        /* h-C 前置 β 门禁负例角色：sync_admin / sync_peer 对 4 只读 URL 应 DENIED */
+        rtdbd_vsoa_adapter_add_token(adapter, "tok-admin-hc", e2e_uid, 0,
+                                     "admin-hc", RTDBD_ROLE_SYNC_ADMIN);
         /* 未认证直写仅供本机联调（生产必须关闭） */
         rtdbd_vsoa_adapter_set_allow_unauthenticated(adapter, true);
     }
@@ -186,7 +194,7 @@ struct RpcResult {
     bool has_hdr = false;
     uint8_t status = 0;
     size_t data_len = 0;
-    uint8_t data[256];
+    uint8_t data[8304]; /* 8192B list/log 满页 + 余量（h-C 前置截断断言） */
 };
 
 void on_rpc(void *arg, vsoa_client_t *client, vsoa_header_t *hdr, vsoa_payload_t *payload)
@@ -1068,6 +1076,153 @@ TEST(VsoaE2E, HealthReturns72BHealthSnapshot)
     }
 
     vsoa_client_close(client);
+    kill(pid, SIGTERM);
+    int wstatus = 0;
+    waitpid(pid, &wstatus, 0);
+    indurtdb_h_close(handle);
+}
+
+// ---- h-C 前置：4 只读 URL（UDS-only 补齐到 VSOA）：可用 / 截断 / 门禁负例 ----
+TEST(VsoaE2E, ReadonlyUrlsAvailableTruncatedAndGated)
+{
+    indurtdb_cfg_t cfg{};
+    cfg.max_points = 64;
+    cfg.max_subscribers = 4;
+    char inst[64];
+    std::snprintf(inst, sizeof(inst), "vsoa_e2e_hc_ro_%d", static_cast<int>(getpid()));
+    indurtdb_t *handle = nullptr;
+    ASSERT_EQ(indurtdb_h_open(&handle, inst, &cfg), 0);
+    ASSERT_EQ(indurtdb_h_create_point(handle, 5, "p5", INDURTDB_TYPE_INT32,
+                                      INDURTDB_ACCESS_READ_WRITE), 0);
+
+    int pipefd[2];
+    ASSERT_EQ(pipe(pipefd), 0);
+    pid_t pid = fork();
+    ASSERT_GE(pid, 0);
+    if (pid == 0) { close(pipefd[0]); run_server(pipefd[1], handle); }
+    close(pipefd[1]);
+    uint16_t port = 0;
+    ASSERT_EQ(read(pipefd[0], &port, sizeof(port)), static_cast<ssize_t>(sizeof(port)));
+    close(pipefd[0]);
+    ASSERT_NE(port, 0);
+
+    struct timespec cts;
+    cts.tv_sec = 3; cts.tv_nsec = 0;
+    auto connect_client = [&]() -> vsoa_client_t * {
+        vsoa_client_t *c = vsoa_client_create(nullptr, nullptr);
+        if (!c) return nullptr;
+        struct sockaddr_in addr;
+        std::memset(&addr, 0, sizeof(addr));
+        addr.sin_family = AF_INET;
+        addr.sin_port = htons(port);
+        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        char info[256] = {0};
+        if (!vsoa_client_connect(c, reinterpret_cast<struct sockaddr *>(&addr),
+                                 sizeof(addr), &cts, nullptr, info, sizeof(info))) {
+            vsoa_client_close(c);
+            return nullptr;
+        }
+        return c;
+    };
+    auto call_rpc = [&](vsoa_client_t *c, const char *url_str,
+                        const void *req, size_t req_len, RpcResult *res) -> bool {
+        vsoa_url_t url;
+        std::memset(&url, 0, sizeof(url));
+        url.url = const_cast<char *>(url_str);
+        url.url_len = std::strlen(url_str);
+        vsoa_payload_t pl;
+        std::memset(&pl, 0, sizeof(pl));
+        pl.data = const_cast<void *>(req);
+        pl.data_len = req_len;
+        if (!vsoa_client_call(c, VSOA_CLIENT_RPC_METHOD_GET, &url, &pl,
+                              on_rpc, res, &cts)) return false;
+        return pump_client(c, res, kReplyWaitMs);
+    };
+    auto hello_as = [&](vsoa_client_t *c, const char *token,
+                        const char *service_id) -> bool {
+        rtdbd_vsoa_hello_req_t hr;
+        std::memset(&hr, 0, sizeof(hr));
+        std::strncpy(hr.token, token, sizeof(hr.token) - 1u);
+        std::strncpy(hr.service_id, service_id, sizeof(hr.service_id) - 1u);
+        RpcResult res;
+        return call_rpc(c, "/indurtdb/v1/hello", &hr, sizeof(hr), &res) &&
+               res.status == 0x80;
+    };
+
+    vsoa_client_t *plc = connect_client();
+    ASSERT_NE(plc, nullptr);
+    ASSERT_TRUE(hello_as(plc, "tok-plc-1", "plc-line-1"));
+
+    // 1) /point/find_by_name：plc 可读，4B 响应 + 与纯函数一致
+    {
+        rtdbd_find_req_t req;
+        std::memset(&req, 0, sizeof(req));
+        std::strncpy(req.name, "p5", sizeof(req.name) - 1u);
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(plc, "/indurtdb/v1/point/find_by_name", &req, sizeof(req), &res));
+        EXPECT_EQ(res.status, 0x80);
+        ASSERT_EQ(res.data_len, sizeof(rtdbd_find_resp_t));
+        rtdbd_find_resp_t fr;
+        std::memcpy(&fr, res.data, sizeof(fr));
+        EXPECT_EQ(fr.point_id, 5u);
+        rtdbd_conf_t conf; rtdbd_conf_init(&conf);
+        uint32_t direct = 0;
+        ASSERT_EQ(rtdbd_dispatch_find(handle, &conf, 0, req.name, &direct), RTDBD_ST_OK);
+        EXPECT_EQ(fr.point_id, direct); // 两前端相同输入一致（可证伪）
+    }
+    // 2) /point/meta：plc 可读，32B 响应
+    {
+        rtdbd_meta_req_t req{};
+        req.point_id = 5;
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(plc, "/indurtdb/v1/point/meta", &req, sizeof(req), &res));
+        EXPECT_EQ(res.status, 0x80);
+        EXPECT_EQ(res.data_len, sizeof(rtdbd_meta_payload_t));
+    }
+    // 3) /point/list：plc 可读 + 超阈值截断（max=1000 → resp_len≤8192）
+    {
+        rtdbd_list_req_t req{};
+        req.partition = RTDBD_PARTITION_ALL;
+        req.max = 1000;
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(plc, "/indurtdb/v1/point/list", &req, sizeof(req), &res));
+        EXPECT_EQ(res.status, 0x80);
+        EXPECT_LE(res.data_len, 8192u);
+        EXPECT_GE(res.data_len, sizeof(rtdbd_point_info_t));
+    }
+    // 4) /logs：plc 可读（server 注入一条日志）
+    {
+        rtdbd_log_req_t req{};
+        req.max = 0;
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(plc, "/indurtdb/v1/logs", &req, sizeof(req), &res));
+        EXPECT_EQ(res.status, 0x80);
+        EXPECT_GE(res.data_len, sizeof(rtdbd_log_entry_t));
+        EXPECT_LE(res.data_len, 8192u);
+    }
+    // 5) 错长度负例：/point/meta 带错长度 → BAD_REQUEST
+    {
+        uint8_t junk[2] = {1, 2};
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(plc, "/indurtdb/v1/point/meta", junk, sizeof(junk), &res));
+        EXPECT_EQ(res.status, (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_BAD_REQUEST));
+    }
+    // 6) β 门禁负例：sync_admin / sync_peer 会话对 4 只读 URL 应 DENIED
+    {
+        vsoa_client_t *admin = connect_client();
+        ASSERT_NE(admin, nullptr);
+        ASSERT_TRUE(hello_as(admin, "tok-admin-hc", "admin-hc"));
+        rtdbd_meta_req_t req{}; req.point_id = 5;
+        RpcResult res;
+        ASSERT_TRUE(call_rpc(admin, "/indurtdb/v1/point/meta", &req, sizeof(req), &res));
+        EXPECT_EQ(res.status, (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_DENIED));
+        vsoa_client_close(admin);
+    }
+    // sync_peer 需成员表校验来源才能 hello（测试未配 peers，无法建会话）；
+    // 其 role→URL 拒绝语义由 rtdbd_authz.c:47-58 静态判据保证，见 test_hC_readonly
+    // 与方案风险表；此处不构造无法建立的会话。
+
+    vsoa_client_close(plc);
     kill(pid, SIGTERM);
     int wstatus = 0;
     waitpid(pid, &wstatus, 0);

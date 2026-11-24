@@ -365,7 +365,8 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
-        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
     target_include_directories(test_vsoa_e2e PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/rtdbd/include
@@ -473,7 +474,8 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
-        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
     target_include_directories(test_vsoa_cluster PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/rtdbd/include
@@ -510,7 +512,8 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
-        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c)
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
     target_include_directories(IR5_NotifyDirection PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/rtdbd/include
@@ -548,9 +551,24 @@ add_executable(test_hB_health test_hB_health.cpp
     ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
     ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
     ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
-    ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c)
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
 target_include_directories(test_hB_health PRIVATE
     ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
 target_link_libraries(test_hB_health PRIVATE GTest::gtest GTest::gtest_main indurtdb)
 set_target_properties(test_hB_health PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 add_test(NAME test_hB_health COMMAND test_hB_health)
+
+# ---- h-C 前置：4 只读 URL 共享纯函数（纯逻辑，默认构建可跑）----
+add_executable(test_hC_readonly test_hC_readonly.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
+target_include_directories(test_hC_readonly PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+target_link_libraries(test_hC_readonly PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(test_hC_readonly PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME test_hC_readonly COMMAND test_hC_readonly)
