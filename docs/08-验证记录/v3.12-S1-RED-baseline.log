@@ -1,0 +1,10 @@
+[ 83%] Built target indurtdb
+[ 83%] Building CXX object tests/unit/CMakeFiles/test_c_epoch.dir/test_c_epoch.cpp.o
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/unit/test_c_epoch.cpp:8:10: fatal error: cluster/rtdbd_epoch.h: 没有那个文件或目录
+    8 | #include "cluster/rtdbd_epoch.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+gmake[3]: *** [tests/unit/CMakeFiles/test_c_epoch.dir/build.make:76：tests/unit/CMakeFiles/test_c_epoch.dir/test_c_epoch.cpp.o] 错误 1
+gmake[2]: *** [CMakeFiles/Makefile2:741：tests/unit/CMakeFiles/test_c_epoch.dir/all] 错误 2
+gmake[1]: *** [CMakeFiles/Makefile2:748：tests/unit/CMakeFiles/test_c_epoch.dir/rule] 错误 2
+gmake: *** [Makefile:387：test_c_epoch] 错误 2

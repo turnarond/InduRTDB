@@ -11,9 +11,10 @@
 | 跨进程共享内存实时点位存储 (低延迟、确定性) | 南向设备接入 (Modbus/OPC UA/S7 驱动) |
 | 工业语义 (quality / timestamp / unit / access) | 北向 SCADA 对接 (OPC UA Server / MQTT 上送) |
 | 多进程读写、订阅、崩溃自愈 | 持久化 / 历史库 |
-| 作为库被集成 (find_package / pkg-config / FetchContent) | 集群 / 跨节点同步 |
+| 作为库被集成 (find_package / pkg-config / FetchContent) | 主备切换 / 选主（全对等 active-active，无主从） |
+| 集群 / 跨节点同步 (v3.12 主特性，rtdbd 内自持的独立服务，不依赖 node-server；13 号 D1) | — |
 
-**与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。
+**与 node-server 的关系:** InduRTDB 作为 [node-server](https://github.com/acoinfo/edge-framework)（BAS Edge Data Hub）的**底层数据层**,提供跨进程共享内存实时能力;北向 OPC UA、持久化等能力复用 node-server 既有实现,不重复造轮子。**节点间同步由 InduRTDB rtdbd 自持（13 号 D1），不经 node-server；node-server 等直连 SHM 的写入不参与集群同步（13 号 §8.3-1）。**
 
 ### x86 实测性能 (v3.7.0 基线, Release -O2；v3.8 未改热路径，未复测)
 

@@ -1,6 +1,6 @@
 # InduRTDB 文档总览
 
-> **v3.12.0 盘点交付说明**：[`交付说明-v3.12.0.md`](./交付说明-v3.12.0.md)——功能盘点完成、发布门 FAIL 8（未放行）；含主备/集群边界声明（不做、由 node-server 提供）、能力清单、使用手册与 SDK 接口索引、v3.12 新增接口速查。本文不是"可交付（Green）"宣告，`VERSION` 仍 3.11.0、未打 tag/合 main。
+> **v3.12.0 盘点交付说明**：[`交付说明-v3.12.0.md`](./交付说明-v3.12.0.md)——功能盘点完成、发布门 FAIL 8（未放行）；含集群同步边界声明（2026-11-25 按 13 号 D1 修正为 rtdbd 内自持、v3.12 主特性、不依赖 node-server；主备切换不做）、能力清单、使用手册与 SDK 接口索引、v3.12 新增接口速查。本文不是"可交付（Green）"宣告，`VERSION` 仍 3.11.0、未打 tag/合 main。
 
 > 文档是 InduRTDB 唯一的对外接口。本目录按「由浅入深」的阅读顺序组织，文件夹与文件均以数字前缀排序。当前对齐纯 C v3.10.0 实现与 v3.10 文档治理口径。
 
@@ -41,6 +41,7 @@
 > **2026-11-24 h-C 前置实现补登记**：[`v3.12-hC前置-rtdbd只读URL补齐实现`](./02-需求文档/changes/v3.12-hC前置-rtdbd只读URL补齐实现.md)——28 号 §3.2"4 只读 URL 是设备侧代理前置依赖"的实现已完成：4 个输入全注入纯函数（dispatch）+ UDS op_* 改造（字节不变）+ VSOA 4 URL 专有 listener（显式 β 门禁 plc 可读/sync_admin 拒、resp 8192B 截断）+ test_hC_readonly 6 测 + ON e2e 只读用例。两轮评审通过（2 P0+7 P1、终验新 P0 全闭环）；OFF ALL GREEN、ON 63/63、h-A/h-B 回归绿、dispatch 边界 ok。**不改 opcode/POD/对外口径/发布门 FAIL 8**；发布门仍 FAIL 8、未打 tag/合 main。
 > **2026-11-24 h-C 主体设备侧代理实现补登记**：[`v3.12-hC主体-设备侧代理实现`](./02-需求文档/changes/v3.12-hC主体-设备侧代理实现.md)——新组件 `rtdbd-device-agent` 已实施：对外部 PC 暴露 VSOA server（d-A 指定网卡+passwd 准入）+ 2 条 loopback client（plc/sync_admin，d-B N:2）+ 并发 pending 表（按调用 arg 精确关联、无串台）+ URL 透传（订阅入口合法）+ RBE 适配（引用计数/首值缓存/二次扇出）+ 3s 超时/重连。spike 三进程 SPIKE_PASS、两轮评审通过（2 P0+9 P1）、OFF RBE 4 测绿、ON 三进程 e2e PASS（真实 rtdbd+代理+外部 client）、ON 65/65、前置全绿。**不改 opcode/ABI/对外口径/发布门 FAIL 8**；未打 tag/合 main。外部 PC 瘦网关（d-F）另立。
 > **2026-11-24 生产发布阶段一补登记**：[`v3.12-阶段一-FAIL8建能力`](./02-需求文档/changes/v3.12-阶段一-FAIL8建能力.md)——生产发布四阶段之「建能力」已实施：门禁 `ir_snapshot` 从文本子串匹配改为 doc19 §5.5 现场 ctest -N 精确比对（三坏样本 RED）+ 并集快照脚本 `gen_ctest_snapshot.py` + 9 个冻结名真 ctest（5 IR Linux 近似真测试 + 4 Gate n/a 骨架、真达标靠阶段二现场独立工具）。两轮评审通过（5 P0+5 P1 全闭环）、OFF ALL GREEN、ON 74/74、13 名真实注册。**发布门仍 7 FAIL（B 段 pending 未填，阶段三处理）**、未改口径/版本/tag/main、不碰设备。
+> **2026-11-25 同步语义 S1 补登记**：[`v3.12-S1-摘要与epoch地基`](./02-需求文档/changes/v3.12-S1-摘要与epoch地基.md)——按 13 号 D1（同步在 rtdbd 自持、不依赖 node-server）实施同步语义第一层地基：进程级全局 epoch 模块（next/is_stale/advance_to/字典序键，会话级 epoch 不参与裁决）+ 点快照数组输入的确定性 digest 纯函数（FNV-1a-64、按 type 有效字节、`fnv1a64-v1:` 版本标记，不改 lib ABI）。两轮评审 2 P0+5 P1 全闭环；RED 证据归档、OFF 68/68、门禁 ALL GREEN、红线零。S2 同步通道（/sync/* URL+peer）待后续。
 > 15–18 号为 M3.3 切片规划与方案（已实施并合入 `release/v3.12`）；19/20 号为**纯规划文档**，经三阶段方案评审 + 第四签补证闭环（四签通过，[`reviews/M5阶段B段闭环方案分析-评审`](./03-设计文档/reviews/M5阶段B段闭环方案分析-评审.md)）。**发布门仍 FAIL 8、B 段 7 项 `pending`、未打 tag**；q1/q2/q4 已于 2026-11-15 书面裁决（均按推荐，方向已定），q2 实施时点 2026-11-20 经用户批准变更并提前实施（见上）；6 节点/现场取证待 M5/M6，本阶段不授权开工。
 
 ## 推荐阅读路径
