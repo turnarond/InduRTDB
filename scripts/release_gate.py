@@ -11,6 +11,7 @@ import datetime
 import hashlib
 import json
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -48,6 +49,69 @@ def verdict_class(text):
 def _resolve(raw, root):
     p = Path(raw)
     return p if p.is_absolute() else Path(root) / p
+
+
+_CTEST_LINE_RE = re.compile(r"^\s*Test\s+#\d+:\s+(\S+)\s*$")
+_CTEST_TOTAL_RE = re.compile(r"^Total Tests:\s*(\d+)\s*$", re.M)
+_CTEST_PROJECT_RE = re.compile(r"^Test project\s+(.+?)\s*$", re.M)
+_IR_BUILD_DIRS_RE = re.compile(r"^# IR_BUILD_DIRS:\s*(.+?)\s*$", re.M)
+
+
+def parse_ctest_snapshot(text):
+    """解析 ctest -N 快照。返回 (names, build_dirs, error)。
+    只认 `Test #N: name` 行（doc19 §5.5），结构化校验首行/Total/条目数，
+    防手改快照（追加 Test 行或改文本）伪造。"""
+    if not isinstance(text, str) or not text:
+        return set(), [], "empty snapshot"
+    names = set()
+    for line in text.splitlines():
+        m = _CTEST_LINE_RE.match(line)
+        if m:
+            names.add(m.group(1))
+    total_m = _CTEST_TOTAL_RE.search(text)
+    if not total_m:
+        return names, [], "missing 'Total Tests: N'"
+    total = int(total_m.group(1))
+    # 条目数必须与 Total 一致（防手工追加/删除 Test 行）。
+    n_test_lines = sum(1 for line in text.splitlines() if _CTEST_LINE_RE.match(line))
+    if n_test_lines != total:
+        return names, [], f"Test line count {n_test_lines} != Total Tests {total}"
+    if not _CTEST_PROJECT_RE.search(text):
+        return names, [], "missing 'Test project' header"
+    dirs_m = _IR_BUILD_DIRS_RE.search(text)
+    build_dirs = dirs_m.group(1).split() if dirs_m else []
+    return names, build_dirs, None
+
+
+def live_ctest_names(build_dir):
+    """现场执行 ctest -N，返回真实注册名集合；失败返回 (None, err)。
+    self-test 专用注入：环境变量 RTDBD_SELFTEST_CTEST_OUT 指向的文本代替真实
+    ctest -N 输出——用于验证门禁逻辑（手改/删名/只跑OFF 被拒），不替代真实现场校验。"""
+    import os
+    stub = os.environ.get("RTDBD_SELFTEST_CTEST_OUT")
+    if stub:
+        try:
+            text = Path(stub).read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return None, f"selftest ctest stub unreadable: {exc}"
+        names, _, err = parse_ctest_snapshot(text)
+        if err:
+            return None, f"selftest ctest stub unparsable: {err}"
+        return names, None
+    bd = Path(build_dir)
+    if not bd.is_dir():
+        return None, f"build dir missing: {bd}"
+    try:
+        out = subprocess.run(["ctest", "-N"], cwd=str(bd), capture_output=True,
+                             text=True, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return None, f"ctest -N failed: {exc}"
+    if out.returncode != 0:
+        return None, f"ctest -N exit {out.returncode}: {out.stderr[:200]}"
+    names, _, err = parse_ctest_snapshot(out.stdout)
+    if err:
+        return None, f"ctest -N unparsable: {err}"
+    return names, None
 
 
 def check_conditions(ledger, root):
@@ -134,25 +198,73 @@ def check_conditions(ledger, root):
         for f in res["findings"]:
             findings.append(dict(f, field=f"conditions.b_segment.{f['field']}"))
 
-    snap = seg.get("ir_snapshot")
+    # doc19 §5.5：ir_snapshot 从文本子串匹配升级为「现场 ctest -N 逐行/集合比对」，
+    # 堵「手改快照/名字写进任意文本即过」的假绿（H-2 纵深）。
     required = seg.get("required_irs") or []
-    if not snap or not _resolve(snap, root).is_file():
-        findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
-                         "message": "ctest -N snapshot missing"})
-    elif not isinstance(required, list) or not required:
+    snaps = seg.get("ir_snapshots")          # v2 新增：列表优先（OFF+ON 并集）
+    snap_single = seg.get("ir_snapshot")     # v1 兼容：单文件
+    if isinstance(snaps, list) and snaps:
+        snap_paths = snaps
+    elif snap_single:
+        snap_paths = [snap_single]
+    else:
+        snap_paths = []
+    if not isinstance(required, list) or not required:
         findings.append({"level": "FAIL", "field": "conditions.b_segment.required_irs",
                          "message": "required_irs must be a non-empty list"})
-    else:
+    if not snap_paths:
+        findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                         "message": "ctest -N snapshot missing (ir_snapshot/ir_snapshots)"})
+    live_union = set()
+    snap_union = set()
+    for raw in snap_paths:
+        if not isinstance(raw, str) or not raw:
+            findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                             "message": f"invalid snapshot path: {raw!r}"})
+            continue
+        p = _resolve(raw, root)
+        if not p.is_file():
+            findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                             "message": f"ctest -N snapshot missing: {p}"})
+            continue
         try:
-            text = _resolve(snap, root).read_text(encoding="utf-8", errors="replace")
+            text = p.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
-            text = ""
             findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
                              "message": f"unreadable: {exc}"})
-        missing = [name for name in required if name not in text]
+            continue
+        snap_names, build_dirs, perr = parse_ctest_snapshot(text)
+        if perr:
+            findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                             "message": f"snapshot structure invalid ({p}): {perr}"})
+            continue
+        snap_union |= snap_names
+        if not build_dirs:
+            pm = _CTEST_PROJECT_RE.search(text)
+            build_dirs = [pm.group(1)] if pm else []
+        for bd in build_dirs:
+            live, lerr = live_ctest_names(bd)
+            if live is None:
+                findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                                 "message": f"live ctest -N verification failed ({bd}): {lerr}"})
+            else:
+                live_union |= live
+    # 并集精确比对（doc19 §5.5）：每个 build 的现场 ctest -N 集合是快照的子集，
+    # 全部 build 的现场并集必须与快照并集精确相等（OFF+ON 并集语义）。
+    if snap_paths and live_union:
+        if snap_union != live_union:
+            only_snap = sorted(snap_union - live_union)
+            only_live = sorted(live_union - snap_union)
+            findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
+                             "message": f"snapshot/live ctest union mismatch: snapshot_only={only_snap} live_only={only_live}"})
+    if required and snap_paths:
+        # required 必须是现场真实注册名集合的子集（精确名比对，非文本包含）。
+        # 注：现场集合取 live_union（若现场校验失败则用 snap_union 仅作诊断，仍 FAIL 已记）。
+        verify_set = live_union if live_union else snap_union
+        missing = [name for name in required if name not in verify_set]
         if missing:
             findings.append({"level": "FAIL", "field": "conditions.b_segment.ir_snapshot",
-                             "message": f"IR tests not registered in ctest: {missing}"})
+                             "message": f"IR/Gate tests not registered in ctest: {missing}"})
 
     log = seg.get("full_gate_log")
     if not log or not _resolve(log, root).is_file():

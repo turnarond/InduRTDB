@@ -608,3 +608,24 @@ target_include_directories(test_hc_agent_rbe PRIVATE
 target_link_libraries(test_hc_agent_rbe PRIVATE GTest::gtest GTest::gtest_main)
 set_target_properties(test_hc_agent_rbe PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 add_test(NAME test_hc_agent_rbe COMMAND test_hc_agent_rbe)
+
+# ---- 阶段一：FAIL 8 建能力（doc19 §5.5；required_irs 13 名真实 ctest 注册）----
+# 5 IR 真测试（Linux 近似语义、非现场 B 段真值）：同一二进制按 gtest_filter 拆成冻结名 ctest。
+add_executable(test_release_ir test_release_ir.cpp)
+target_include_directories(test_release_ir PRIVATE
+    ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include)
+target_link_libraries(test_release_ir PRIVATE GTest::gtest GTest::gtest_main indurtdb)
+set_target_properties(test_release_ir PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME IR1_FullSnapshot      COMMAND test_release_ir --gtest_filter=ReleaseIrTest.IR1_FullSnapshot)
+add_test(NAME IR6_RestartSemantics  COMMAND test_release_ir --gtest_filter=ReleaseIrTest.IR6_RestartSemantics)
+add_test(NAME IR7_PartitionConverge COMMAND test_release_ir --gtest_filter=ReleaseIrTest.IR7_PartitionConverge)
+add_test(NAME IR4_NetworkPartition  COMMAND test_release_ir --gtest_filter=ReleaseIrTest.IR4_NetworkPartition)
+add_test(NAME IR5_StaleEpoch        COMMAND test_release_ir --gtest_filter=ReleaseIrTest.IR5_StaleEpoch)
+# 4 Gate n/a 骨架（真实注册但不产出达标证据；真达标靠阶段二现场独立工具）。
+add_executable(test_release_gate_na test_release_gate_na.cpp)
+target_link_libraries(test_release_gate_na PRIVATE GTest::gtest GTest::gtest_main)
+set_target_properties(test_release_gate_na PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME Gate_T1_SyncOverhead COMMAND test_release_gate_na --gtest_filter=ReleaseGateNa.Gate_T1_SyncOverhead)
+add_test(NAME Gate_T2_LocalP99     COMMAND test_release_gate_na --gtest_filter=ReleaseGateNa.Gate_T2_LocalP99)
+add_test(NAME Gate_T3_WallClock    COMMAND test_release_gate_na --gtest_filter=ReleaseGateNa.Gate_T3_WallClock)
+add_test(NAME Gate_T3_RSS          COMMAND test_release_gate_na --gtest_filter=ReleaseGateNa.Gate_T3_RSS)

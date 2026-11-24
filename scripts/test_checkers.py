@@ -124,9 +124,29 @@ GOOD_REVIEW_CONDITIONAL = GOOD_REVIEW.replace(
     "有条件通过（硬条件 1–4 闭环前不得发布）：须补命令取证与 B 段机械出口。")
 
 
-def run(script, args):
+_SELFTEST_CTEST_STUB = None  # release_gate.py 现场 ctest -N 的 self-test 注入（见 ledger）
+
+
+def run(script, args, env=None):
+    import os
+    full_env = dict(os.environ)
+    if env:
+        full_env.update(env)
+    if script == "release_gate.py" and _SELFTEST_CTEST_STUB is not None:
+        full_env.setdefault("RTDBD_SELFTEST_CTEST_OUT", str(_SELFTEST_CTEST_STUB))
     return subprocess.run([sys.executable, str(HERE / script), *args],
-                          capture_output=True, text=True)
+                          capture_output=True, text=True, env=full_env)
+
+
+def make_ctest_snapshot(names, build_dirs=()):
+    """生成真 ctest -N 格式快照（doc19 §5.5 结构化校验用）。"""
+    lines = ["Test project /tmp/fake-build"]
+    for i, name in enumerate(sorted(set(names)), 1):
+        lines.append(f"  Test  #{i}: {name}")
+    lines.append(f"Total Tests: {len(set(names))}")
+    if build_dirs:
+        lines.append("# IR_BUILD_DIRS: " + " ".join(build_dirs))
+    return "\n".join(lines) + "\n"
 
 
 def check(cond, label):
@@ -314,7 +334,10 @@ def main():
                       for i in ("P3", "P6", "P7", "P8", "P9", "P10", "P11")],
         }), encoding="utf-8")
         ir_snap = d / "ctest-snapshot.txt"
-        ir_snap.write_text("Test #43: IR1_分区收敛\nTest #44: IR7_迁移\n", encoding="utf-8")
+        ir_snap.write_text(make_ctest_snapshot(["IR1", "IR7"], [str(d / "fake-build")]),
+                           encoding="utf-8")
+        ctest_stub = d / "ctest-stub.txt"
+        ctest_stub.write_text(ir_snap.read_text(), encoding="utf-8")
         gate_log = d / "check-all.log"
         gate_log.write_text("[OK] canary（0s）\nALL GREEN\n", encoding="utf-8")
 
@@ -340,8 +363,20 @@ def main():
 
         def ledger(hc_closed, b_numbers, irs, gate_text, verified=True,
                    required=None):
+            global _SELFTEST_CTEST_STUB
             gate_log.write_text(gate_text, encoding="utf-8")
-            ir_snap.write_text(irs, encoding="utf-8")
+            # irs 可为纯名字换行（旧夹具）或真 ctest -N 格式；统一写真格式快照。
+            import re as _re
+            if not any(_re.match(r"^\s*Test\s+#\d+:", ln) for ln in irs.splitlines()):
+                names = [ln.strip() for ln in irs.splitlines() if ln.strip()]
+                snap_text = make_ctest_snapshot(names, [str(d / "fake-build")])
+            else:
+                snap_text = irs
+            ir_snap.write_text(snap_text, encoding="utf-8")
+            # self-test stub = 快照内容（现场 ctest -N 的模拟输出）；
+            # 坏样本靠 required 精确检查/结构校验被拒（doc19 §5.5）。
+            ctest_stub.write_text(snap_text, encoding="utf-8")
+            _SELFTEST_CTEST_STUB = str(ctest_stub)
             hc = {"id": "H1", "closed": hc_closed, "evidence": str(ev)}
             if verified:
                 hc["verified_by"] = str(verified_ev)
@@ -464,6 +499,25 @@ def main():
                        required=q2_required)])
         failed += check(r.returncode == 0 and result_ok(r) is True,
                         "q2: all 13 required names accepted")
+        # doc19 §5.5 H-2：三坏样本必须 FAIL，堵「手改快照/子串名/只跑 OFF」假绿。
+        hand_tampered = ("Test project /tmp/fake-build\n  Test  #1: IR1_FullSnapshot\n"
+                         "Total Tests: 13\n")  # 1 条 Test 行但 Total=13 → 结构 FAIL
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, hand_tampered, "ALL GREEN\n", required=q2_required)])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "doc19 §5.5: hand-tampered snapshot (Total mismatch) rejected")
+        substring_name = ("Test project /tmp/fake-build\n"
+                          "  Test  #1: xxxGate_T2_LocalP99yyy\nTotal Tests: 1\n")
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, substring_name, "ALL GREEN\n", required=q2_required)])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "doc19 §5.5: substring test name not accepted as exact match")
+        off_only = make_ctest_snapshot([n for n in q2_required
+                                        if n != "IR5_NotifyDirection"], ["/tmp/fake-build"])
+        r = run("release_gate.py", base + ["--conditions",
+                ledger(True, True, off_only, "ALL GREEN\n", required=q2_required)])
+        failed += check(r.returncode != 0 and result_ok(r) is False,
+                        "doc19 §5.5: OFF-only snapshot (missing ON-only IR5) rejected")
 
         r = run("release_gate.py", base + ["--conditions", ledger(True, True, ir_snap.read_text(), "[SKIP] canary\nALL GREEN\n")])
         failed += check(r.returncode != 0 and result_ok(r) is False,
