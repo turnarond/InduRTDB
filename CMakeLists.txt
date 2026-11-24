@@ -63,6 +63,8 @@ endif()
 # 开启时必须给出 VSOA_SDK_ROOT（libvsoa 树根），并在配置期做**硬探测**：
 # 头/库缺失或版本不符一律 FATAL_ERROR，绝不静默降级为「以为接了 VSOA 实际没接」。
 option(INDURTDB_ENABLE_VSOA "Build rtdbd with VSOA dual-stack frontend" OFF)
+# h-C 设备侧代理（新组件）：需 VSOA ON；Linux 默认 ON 供 e2e，SylixOS 显式 ON。
+option(INDURTDB_BUILD_AGENT "Build rtdbd-device-agent (h-C device-side proxy)" ${INDURTDB_ENABLE_VSOA})
 set(VSOA_SDK_ROOT "" CACHE PATH "libvsoa SDK root (contains include/libvsoa and lib/<os>/<arch>)")
 # v3.12 G2：平台化默认库子目录（Linux 零回归；SylixOS 默认 aarch64 交叉库）
 if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS")
@@ -185,6 +187,34 @@ if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL AND INDURTDB_E
     target_link_libraries(sylixos_vsoa_e2e PRIVATE indurtdb
         "-l:libvsoa-client.so" "-l:libvsoa-server.so"
         "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
+endif()
+
+# --- h-C 设备侧代理（新组件，Linux + SylixOS 双构建，需 VSOA ON）---
+if(INDURTDB_BUILD_AGENT AND INDURTDB_ENABLE_VSOA AND INDURTDB_IS_TOP_LEVEL)
+    add_executable(rtdbd-device-agent
+        rtdbd/src/agent/rtdbd_agent_main.c
+        rtdbd/src/agent/rtdbd_device_agent.c
+        rtdbd/src/agent/rtdbd_agent_rbe.c
+        rtdbd/src/dispatch/rtdbd_dispatch.c
+        rtdbd/src/policy.c
+        rtdbd/src/rtdbd_conf.c
+        rtdbd/src/stats.c
+        rtdbd/src/subtab.c
+        rtdbd/src/logbuf.c)
+    target_include_directories(rtdbd-device-agent PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_directories(rtdbd-device-agent PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_libraries(rtdbd-device-agent PRIVATE indurtdb
+        "-l:libvsoa-client.so" "-l:libvsoa-server.so"
+        "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
+    if(NOT CMAKE_SYSTEM_NAME STREQUAL "SylixOS")
+        target_link_options(rtdbd-device-agent PRIVATE "LINKER:--disable-new-dtags")
+        set_target_properties(rtdbd-device-agent PROPERTIES
+            BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}")
+    endif()
 endif()
 
 # --- 覆盖率目标（T8）：仅当开启插桩且构建测试时可用 ---

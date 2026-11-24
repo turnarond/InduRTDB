@@ -32,6 +32,8 @@ REQUIRED_SYMBOLS = (
     "vsoa_server_close", "vsoa_server_start", "vsoa_server_cli_address",
     "vsoa_server_cli_datagram", "vsoa_server_cli_reply",
     "vsoa_server_cli_set_authed", "vsoa_server_fds", "vsoa_server_input_fds",
+    # h-C 设备侧代理（对外 passwd 连接级准入，d-C）
+    "vsoa_server_passwd",
     # client（e2e harness：写入方 + 订阅者）
     "vsoa_client_create", "vsoa_client_connect", "vsoa_client_call",
     "vsoa_client_on_datagram", "vsoa_client_subscribe",

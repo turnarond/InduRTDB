@@ -388,6 +388,33 @@ if(INDURTDB_ENABLE_VSOA)
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME test_vsoa_e2e COMMAND test_vsoa_e2e)
 
+    # ---- h-C 设备侧代理三进程 e2e（fork 真实 rtdbd + 代理 + 外部 client）----
+    if(INDURTDB_BUILD_AGENT)
+        add_executable(test_hc_agent_e2e test_hc_agent_e2e.cpp
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/agent/rtdbd_device_agent.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/agent/rtdbd_agent_rbe.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+            ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
+        target_include_directories(test_hc_agent_e2e PRIVATE
+            ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include
+            ${PROJECT_SOURCE_DIR}/rtdbd/src ${VSOA_SDK_ROOT}/include/libvsoa)
+        target_link_directories(test_hc_agent_e2e PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+        target_link_libraries(test_hc_agent_e2e PRIVATE GTest::gtest GTest::gtest_main indurtdb
+            "-l:libvsoa-client.so" "-l:libvsoa-server.so"
+            "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
+        target_link_options(test_hc_agent_e2e PRIVATE "LINKER:--disable-new-dtags")
+        target_compile_definitions(test_hc_agent_e2e PRIVATE
+            RTDBD_BIN="${CMAKE_BINARY_DIR}/rtdbd/rtdbd")
+        set_target_properties(test_hc_agent_e2e PROPERTIES
+            BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+            CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+        add_test(NAME test_hc_agent_e2e COMMAND test_hc_agent_e2e)
+    endif()
+
     # ---- v3.12 M3.3 方案 A：单线程统一 poll 主循环（真实 rtdbd 双栈可达）----
     add_executable(test_vsoa_main_loop test_vsoa_main_loop.cpp)
     target_include_directories(test_vsoa_main_loop PRIVATE
@@ -572,3 +599,12 @@ target_include_directories(test_hC_readonly PRIVATE
 target_link_libraries(test_hC_readonly PRIVATE GTest::gtest GTest::gtest_main indurtdb)
 set_target_properties(test_hC_readonly PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
 add_test(NAME test_hC_readonly COMMAND test_hC_readonly)
+
+# ---- h-C 主体：设备侧代理 RBE 适配纯逻辑（纯逻辑，默认构建可跑，无 VSOA SDK）----
+add_executable(test_hc_agent_rbe test_hc_agent_rbe.cpp
+    ${PROJECT_SOURCE_DIR}/rtdbd/src/agent/rtdbd_agent_rbe.c)
+target_include_directories(test_hc_agent_rbe PRIVATE
+    ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+target_link_libraries(test_hc_agent_rbe PRIVATE GTest::gtest GTest::gtest_main)
+set_target_properties(test_hc_agent_rbe PROPERTIES CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+add_test(NAME test_hc_agent_rbe COMMAND test_hc_agent_rbe)
