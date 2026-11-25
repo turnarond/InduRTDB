@@ -80,6 +80,21 @@ if(TARGET test_c_digest)
         ${PROJECT_SOURCE_DIR}/rtdbd/src)
 endif()
 
+# S3：逻辑选源 + 有界去重候选（纯逻辑，无 SDK）。
+if(TARGET test_c_select_source)
+    target_sources(test_c_select_source PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_select_source.c)
+    target_include_directories(test_c_select_source PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+if(TARGET test_c_candidate_set)
+    target_sources(test_c_candidate_set PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_select_source.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_candidate_set.c)
+    target_include_directories(test_c_candidate_set PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/include ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+
 # S2：同步 POD（纯头）+ cluster 纯逻辑单测（GLOB 已生成 target）。
 if(TARGET test_c_sync_protocol)
     target_include_directories(test_c_sync_protocol PRIVATE

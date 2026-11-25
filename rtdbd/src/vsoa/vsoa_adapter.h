@@ -25,6 +25,8 @@
 #include "dispatch/rtdbd_dispatch.h"     /* rtdbd_dispatch_cfg_t（业务语义配置快照） */
 #include "session/rtdbd_session.h"      /* 角色枚举 rtdbd_session_role_t（§8.3-4）及
                                          * rtdbd_notify_counters_t（NOTIFY 门控诊断计数） */
+#include "cluster/rtdbd_digest.h"        /* S3：本机摘要类型 */
+#include "cluster/rtdbd_select_source.h" /* S3：逻辑选源候选/结果类型（单向依赖） */
 
 #ifdef __cplusplus
 extern "C" {
@@ -144,6 +146,12 @@ void rtdbd_vsoa_adapter_set_readonly_sources(rtdbd_vsoa_adapter_t *a,
                                              uint32_t max_points);
 /* S2：本机同步 node_id（--sync-node-id；未设时 hello 取 service_id）。 */
 void rtdbd_vsoa_adapter_set_sync_node_id(rtdbd_vsoa_adapter_t *a, const char *node_id);
+/* S3：把 cli[].sync_state.valid 投影为选源候选 + 显式注入本机候选。
+ * local_node_id/local_digest 必填（缺则 false 拒绝，避免 winner 漏本机）。 */
+bool rtdbd_vsoa_adapter_collect_source_candidates(rtdbd_vsoa_adapter_t *a,
+                                                  rtdbd_source_candidate_t *out, uint32_t cap,
+                                                  const char *local_node_id,
+                                                  const rtdbd_digest_t *local_digest);
 /* S2：WAIT 延迟表 pump——每轮主循环尾调用，非阻塞回写到期的 wait reply。 */
 void rtdbd_vsoa_adapter_wait_pump(rtdbd_vsoa_adapter_t *a);
 

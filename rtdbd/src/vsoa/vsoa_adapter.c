@@ -1324,6 +1324,44 @@ void rtdbd_vsoa_adapter_set_sync_node_id(rtdbd_vsoa_adapter_t *a, const char *no
     a->sync_node_id[n] = '\0';
 }
 
+/* S3：投影 cli[].sync_state.valid 为选源候选 + 显式注入本机候选（见 adapter.h）。 */
+bool rtdbd_vsoa_adapter_collect_source_candidates(rtdbd_vsoa_adapter_t *a,
+                                                  rtdbd_source_candidate_t *out, uint32_t cap,
+                                                  const char *local_node_id,
+                                                  const rtdbd_digest_t *local_digest)
+{
+    if (!a || !out || cap == 0u || !local_node_id || !local_digest) return false;
+    uint32_t n = 0u;
+    for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI && n < cap; ++i) {
+        rtdbd_vsoa_cli_entry_t *e = &a->cli[i];
+        if (!e->used || !e->sync_state.valid) continue;
+        rtdbd_source_candidate_t *c = &out[n++];
+        memset(c, 0, sizeof(*c));
+        c->epoch = e->sync_state.epoch;
+        c->struct_hash = e->sync_state.struct_hash;
+        c->value_digest = e->sync_state.value_digest;
+        c->n_points = e->sync_state.n_points;
+        memcpy(c->node_id, e->sync_state.node_id, sizeof(c->node_id));
+        c->node_id[sizeof(c->node_id) - 1u] = '\0';
+        c->boot_id = 0u;   /* S3：boot_id 仅审计、不参与选源（置 0 归一化） */
+        c->offset = 0u;    /* 入站 hello 无 offset，去重键由调用方 backlog 补 */
+        c->valid = true;
+    }
+    if (n >= cap) return false; /* 无槽位注入本机 → 拒绝裁决 */
+    rtdbd_source_candidate_t *self = &out[n++];
+    memset(self, 0, sizeof(*self));
+    self->epoch = rtdbd_epoch_current();
+    self->struct_hash = local_digest->struct_hash;
+    self->value_digest = local_digest->value_digest;
+    self->n_points = local_digest->n_points;
+    size_t idlen = strlen(local_node_id);
+    if (idlen >= sizeof(self->node_id)) idlen = sizeof(self->node_id) - 1u;
+    memcpy(self->node_id, local_node_id, idlen);
+    self->node_id[idlen] = '\0';
+    self->valid = true;
+    return true;
+}
+
 void rtdbd_vsoa_adapter_wait_pump(rtdbd_vsoa_adapter_t *a)
 {
     if (!a) return;
