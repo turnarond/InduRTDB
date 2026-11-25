@@ -362,6 +362,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_notify_latency.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
@@ -501,6 +502,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_notify_latency.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
@@ -539,6 +541,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_notify_latency.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
@@ -576,6 +579,7 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_notify_latency.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c

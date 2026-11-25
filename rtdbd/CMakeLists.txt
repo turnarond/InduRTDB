@@ -23,6 +23,7 @@ add_executable(rtdbd
     src/cluster/rtdbd_epoch.c
     src/cluster/rtdbd_digest.c
     src/cluster/rtdbd_sync_logic.c
+    src/rtdbd_notify_latency.c
     src/session/rtdbd_session.c
     src/session/rtdbd_authz.c
     src/stats.c

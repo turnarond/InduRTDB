@@ -1,0 +1,10 @@
+[ 80%] Built target indurtdb
+[100%] Building CXX object tests/unit/CMakeFiles/test_c_notify_latency.dir/test_c_notify_latency.cpp.o
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/unit/test_c_notify_latency.cpp:8:10: fatal error: rtdbd_notify_latency.h: 没有那个文件或目录
+    8 | #include "rtdbd_notify_latency.h"
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~
+compilation terminated.
+gmake[3]: *** [tests/unit/CMakeFiles/test_c_notify_latency.dir/build.make:76：tests/unit/CMakeFiles/test_c_notify_latency.dir/test_c_notify_latency.cpp.o] 错误 1
+gmake[2]: *** [CMakeFiles/Makefile2:985：tests/unit/CMakeFiles/test_c_notify_latency.dir/all] 错误 2
+gmake[1]: *** [CMakeFiles/Makefile2:992：tests/unit/CMakeFiles/test_c_notify_latency.dir/rule] 错误 2
+gmake: *** [Makefile:504：test_c_notify_latency] 错误 2

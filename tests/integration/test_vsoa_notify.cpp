@@ -70,6 +70,7 @@ extern "C" {
 #include "dispatch/rtdbd_dispatch.h"
 #include "vsoa/vsoa_adapter.h"
 #include "session/rtdbd_session.h"
+#include "rtdbd_notify_latency.h" /* S4：VSOA NOTIFY 延迟统计 POD */
 }
 
 namespace {
@@ -789,6 +790,15 @@ TEST(IR5NotifyDirection, MainCriteriaDirectedNotifyIsolation)
     topology_t topo;
     ASSERT_TRUE(topo.build(port, true, true)) << "拓扑构建失败";
 
+    /* S4：写点前经 PLC client 读 /stats/notify，基线 count 必须为 0。 */
+    rpc_result_t sres0;
+    ASSERT_TRUE(cli_call(topo.a, "/indurtdb/v1/stats/notify", nullptr, 0u, &sres0));
+    ASSERT_EQ(sres0.status, kStatusOk);
+    ASSERT_EQ(sres0.data_len, sizeof(rtdbd_notify_latency_stats_t));
+    rtdbd_notify_latency_stats_t s0;
+    std::memcpy(&s0, sres0.data, sizeof(s0));
+    EXPECT_EQ(s0.count, 0u);
+
     /* 同步点：write RPC reply（vsoa_adapter.c:496 dispatch 先于 :518 reply） */
     rpc_result_t wres;
     ASSERT_TRUE(cli_write(topo.a, 5, 777, &wres)) << "write RPC 无 reply";
@@ -799,6 +809,17 @@ TEST(IR5NotifyDirection, MainCriteriaDirectedNotifyIsolation)
     /* ① A 收到 1 帧、point_id=5、值正确、quick==false */
     ASSERT_TRUE(topo.dga.received) << "A 未收到定向 NOTIFY";
     EXPECT_EQ(topo.dga.frames, 1);
+    /* S4：真实写 + 真实 NOTIFY 后，经 URL 读延迟统计：count>0、last_ns>0、transport=vsoa。 */
+    rpc_result_t sres1;
+    ASSERT_TRUE(cli_call(topo.a, "/indurtdb/v1/stats/notify", nullptr, 0u, &sres1));
+    ASSERT_EQ(sres1.status, kStatusOk);
+    ASSERT_EQ(sres1.data_len, sizeof(rtdbd_notify_latency_stats_t));
+    rtdbd_notify_latency_stats_t s1;
+    std::memcpy(&s1, sres1.data, sizeof(s1));
+    EXPECT_GT(s1.count, s0.count);
+    EXPECT_GT(s1.last_ns, 0u);
+    EXPECT_EQ(s1.last_write_seq, 1u);
+    EXPECT_STREQ(s1.transport, "vsoa");
     EXPECT_EQ(topo.dga.point_id, 5u);
     EXPECT_EQ(topo.dga.type, static_cast<uint8_t>(RTDBD_TYPE_INT32));
     EXPECT_EQ(topo.dga.value, 777);
@@ -828,6 +849,11 @@ TEST(IR5NotifyDirection, MainCriteriaDirectedNotifyIsolation)
                 static_cast<unsigned long long>(final_snap.last.rbe_gate_misses),
                 static_cast<unsigned long long>(final_snap.last.peer_notify_leak),
                 final_snap.child_fail);
+
+    /* S4 门禁负例：sync_admin client 读 /stats/notify 必须 DENIED（仅 PLC 可读）。 */
+    rpc_result_t sadmin;
+    ASSERT_TRUE(cli_call(topo.admin, "/indurtdb/v1/stats/notify", nullptr, 0u, &sadmin));
+    EXPECT_NE(sadmin.status, kStatusOk); /* DENIED */
 
     /* 所有共享页读取已在 kill 之前完成；kill 后只取 wstatus */
     finish_and_check_wstatus(&h, &final_snap);

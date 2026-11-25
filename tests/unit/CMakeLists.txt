@@ -110,6 +110,14 @@ if(TARGET test_c_sync_watermark)
         ${PROJECT_SOURCE_DIR}/rtdbd/src)
 endif()
 
+# S4：VSOA NOTIFY 延迟旁路环（纯逻辑，无 SDK）。
+if(TARGET test_c_notify_latency)
+    target_sources(test_c_notify_latency PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_notify_latency.c)
+    target_include_directories(test_c_notify_latency PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+
 # M1：双前端等价协议层单测直接编译 rtdbd/src/dispatch/rtdbd_dispatch.c
 # （纯叶子模块，仅依赖 libc + protocol.h，无 transport/VSOA 耦合）。
 if(TARGET test_c_dispatch)

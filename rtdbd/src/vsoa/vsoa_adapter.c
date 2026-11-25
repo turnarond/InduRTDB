@@ -34,6 +34,7 @@
 #include "vsoa_sync_protocol.h"   /* S2：同步通道专有 POD */
 #include "cluster/rtdbd_sync_logic.h" /* S2：delta 扫描/WAIT 阈值纯逻辑 */
 #include "cluster/rtdbd_epoch.h"      /* S1：全局 epoch */
+#include "rtdbd_notify_latency.h"     /* S4：VSOA NOTIFY 延迟旁路环 */
 #include "cluster/rtdbd_digest.h"     /* S1：点集摘要 */
 
 /* 响应体上限：与既有 UDS 侧单帧负载量级一致（快照走分页 RPC，不在此限内）。 */
@@ -489,6 +490,8 @@ static void vsoa_notify_dispatch(rtdbd_vsoa_adapter_t *a,
         pl.data = &nt;
         pl.data_len = sizeof(nt);
         (void)vsoa_server_cli_datagram(a->server, a->cli[i].id, &url, &pl);
+        /* S4：实际发出的 NOTIFY 打 t1（两层 guard 之后；每客户端一样本，共用同 t0）。 */
+        (void)rtdbd_notify_latency_t1(w->point_id);
     }
 }
 
@@ -918,6 +921,28 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
         vsoa_sync_handle(a, server, id, hdr, bare, req, req_len, 3);
         return;
     }
+    /* S4：VSOA NOTIFY 延迟统计只读 URL（仅 PLC 可读；专有区分派、不进 13 表）。 */
+    if (strcmp(bare, "/stats/notify") == 0) {
+        uint32_t seq = hdr ? ntohl(hdr->seqno) : 0u;
+        uint16_t tun = hdr ? ntohs(hdr->tunid) : 0u;
+        vsoa_payload_t sp;
+        memset(&sp, 0, sizeof(sp));
+        rtdbd_session_t *ss = cli_session(a, id);
+        if (!ss || !ss->cred.cred_ok || ss->role != RTDBD_ROLE_PLC || req_len != 0u) {
+            uint16_t st = (!ss || !ss->cred.cred_ok || ss->role != RTDBD_ROLE_PLC)
+                              ? RTDBD_ST_DENIED : RTDBD_ST_BAD_REQUEST;
+            (void)vsoa_server_cli_reply(server, id,
+                (uint8_t)rtdbd_st_to_vsoa_status(st), seq, tun, &sp);
+            return;
+        }
+        rtdbd_notify_latency_stats_t stats = rtdbd_notify_latency_stats();
+        memcpy(a->resp, &stats, sizeof(stats));
+        sp.data = (char *)a->resp;
+        sp.data_len = sizeof(stats);
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), seq, tun, &sp);
+        return;
+    }
 
     uint16_t opcode = 0;
     if (rtdbd_opcode_from_url(bare, &opcode) != 0) {
@@ -1033,6 +1058,8 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
             st = (int)rtdbd_dispatch_write(a->handle, a->policy, a->conf, &wreq,
                                            sess->cred.uid, sess->partition, &wmeta);
             if (st == RTDBD_ST_OK) {
+                /* S4：写权威生效时刻 t0（仅 VSOA 主写入口；UDS 不覆盖）。 */
+                (void)rtdbd_notify_latency_t0(wreq.point_id);
                 if (a->audit) {
                     a->audit(a->audit_ctx, sess->cred.pid, sess->cred.uid,
                              sess->partition, wreq.point_id, 0 /* ts_ns 由前端补 */,
@@ -1192,6 +1219,21 @@ rtdbd_vsoa_adapter_t *rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t *hand
             if (!vsoa_server_add_listener(a->server, &u, vsoa_on_cmd, a)) {
                 vsoa_server_close(a->server); free(a); return NULL;
             }
+        }
+    }
+    /* S4：VSOA NOTIFY 延迟统计只读 URL listener（专有、不进 13 表）。 */
+    {
+        char full[128];
+        int k = snprintf(full, sizeof(full), "%s%s", RTDBD_VSOA_URL_PREFIX, "/stats/notify");
+        if (k <= 0 || (size_t)k >= sizeof(full)) {
+            vsoa_server_close(a->server); free(a); return NULL;
+        }
+        vsoa_url_t u;
+        memset(&u, 0, sizeof(u));
+        u.url = full;
+        u.url_len = strlen(full);
+        if (!vsoa_server_add_listener(a->server, &u, vsoa_on_cmd, a)) {
+            vsoa_server_close(a->server); free(a); return NULL;
         }
     }
     return a;
