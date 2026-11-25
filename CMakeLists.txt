@@ -187,6 +187,17 @@ if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL AND INDURTDB_E
     target_link_libraries(sylixos_vsoa_e2e PRIVATE indurtdb
         "-l:libvsoa-client.so" "-l:libvsoa-server.so"
         "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
+    # S5：现场取证程序（双角色 client，复用 s5_capture 纯函数 TU）。
+    add_executable(s5_forensics tests/sylixos/s5_forensics.c tests/sylixos/s5_capture.c)
+    target_include_directories(s5_forensics PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests/sylixos
+        ${VSOA_SDK_ROOT}/include ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_directories(s5_forensics PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_libraries(s5_forensics PRIVATE indurtdb
+        "-l:libvsoa-client.so" "-l:libvsoa-server.so"
+        "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
 endif()
 
 # --- h-C 设备侧代理（新组件，Linux + SylixOS 双构建，需 VSOA ON）---

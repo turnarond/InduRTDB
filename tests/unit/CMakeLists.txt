@@ -118,6 +118,14 @@ if(TARGET test_c_notify_latency)
         ${PROJECT_SOURCE_DIR}/rtdbd/src)
 endif()
 
+# S5：取证 JSON 纯函数（host 单测与板载程序共用同一 TU）。
+if(TARGET test_c_s5_capture)
+    target_sources(test_c_s5_capture PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests/sylixos/s5_capture.c)
+    target_include_directories(test_c_s5_capture PRIVATE
+        ${PROJECT_SOURCE_DIR}/tests/sylixos)
+endif()
+
 # M1：双前端等价协议层单测直接编译 rtdbd/src/dispatch/rtdbd_dispatch.c
 # （纯叶子模块，仅依赖 libc + protocol.h，无 transport/VSOA 耦合）。
 if(TARGET test_c_dispatch)
