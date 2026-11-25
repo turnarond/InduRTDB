@@ -142,6 +142,10 @@ void rtdbd_vsoa_adapter_set_audit(rtdbd_vsoa_adapter_t *a, rtdbd_vsoa_audit_fn f
 void rtdbd_vsoa_adapter_set_readonly_sources(rtdbd_vsoa_adapter_t *a,
                                              const void *logbuf /* irt_logbuf_t* */,
                                              uint32_t max_points);
+/* S2：本机同步 node_id（--sync-node-id；未设时 hello 取 service_id）。 */
+void rtdbd_vsoa_adapter_set_sync_node_id(rtdbd_vsoa_adapter_t *a, const char *node_id);
+/* S2：WAIT 延迟表 pump——每轮主循环尾调用，非阻塞回写到期的 wait reply。 */
+void rtdbd_vsoa_adapter_wait_pump(rtdbd_vsoa_adapter_t *a);
 
 /* 设置连接默认 uid（**仅限本机 loopback 开发/联调**，且需同时开启
  * set_allow_unauthenticated(true)）。生产形态必须用 hello 握手 + token 表。 */

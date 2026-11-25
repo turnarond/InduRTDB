@@ -31,11 +31,44 @@
 #include <vsoa_client.h>
 #include <vsoa_parser.h>
 #include <vsoa_server.h>
+#include "vsoa_sync_protocol.h"   /* S2：同步通道专有 POD */
+#include "cluster/rtdbd_sync_logic.h" /* S2：delta 扫描/WAIT 阈值纯逻辑 */
+#include "cluster/rtdbd_epoch.h"      /* S1：全局 epoch */
+#include "cluster/rtdbd_digest.h"     /* S1：点集摘要 */
 
 /* 响应体上限：与既有 UDS 侧单帧负载量级一致（快照走分页 RPC，不在此限内）。 */
 /* M3.3 切片 C：/sync/peers/get 回 4104B 定长 POD（rtdbd_peers_resp_t），
  * 原 4096B 装不下；扩容并留出余量。 */
 #define RTDBD_VSOA_RESP_MAX 8192u
+
+/* S2：per-cli 同步状态（hello 交换后登记，断链清零）。 */
+typedef struct {
+    uint64_t epoch;
+    uint64_t struct_hash;
+    uint64_t value_digest;
+    uint32_t n_points;
+    char     node_id[RTDBD_PEER_NODE_ID_MAX];
+    bool     valid;
+} rtdbd_sync_peer_state_t;
+
+/* S2：WAIT 延迟等待上下文（回调内只登记，pump 内异步回写；终验 P0-1）。 */
+typedef struct {
+    bool            used;
+    vsoa_cli_id_t   cli_id;
+    uint32_t        seq;      /* 主机序（ntohl 后，终验 P1） */
+    uint16_t        tun;      /* 主机序（ntohs 后） */
+    uint64_t        min_epoch;
+    uint32_t        required_acks;
+    uint64_t        deadline_ns; /* CLOCK_MONOTONIC ns */
+} rtdbd_sync_wait_ctx_t;
+
+/* per-cli 会话项类型（S2 同步状态随之挂载）。 */
+typedef struct {
+    vsoa_cli_id_t          id;
+    bool                   used;
+    rtdbd_session_t        session;
+    rtdbd_sync_peer_state_t sync_state;
+} rtdbd_vsoa_cli_entry_t;
 
 struct rtdbd_vsoa_adapter {
     vsoa_server_t     *server;
@@ -58,11 +91,10 @@ struct rtdbd_vsoa_adapter {
     rtdbd_vsoa_token_entry_t tokens[RTDBD_VSOA_MAX_TOKEN];
     /* per-cli 会话表（传输无关会话按连接隔离，§8.3-3/§8.3-4）：
      * partition 等连接级状态挂在这里；连接建立/断开由 on_cli 回调维护。 */
-    struct {
-        vsoa_cli_id_t   id;
-        bool            used;
-        rtdbd_session_t session;
-    } cli[RTDBD_VSOA_MAX_CLI];
+    rtdbd_vsoa_cli_entry_t cli[RTDBD_VSOA_MAX_CLI];
+    /* S2：WAIT 等待表 + 本机 node_id（--sync-node-id，未给取 service_id）。 */
+    rtdbd_sync_wait_ctx_t wait_ctx[RTDBD_SYNC_WAIT_MAX];
+    char                  sync_node_id[RTDBD_PEER_NODE_ID_MAX];
     /* v3.12 M3.3 切片4：NOTIFY 门控诊断计数（adapter 全局聚合，非 per-session）。
      * calloc 创建时自动零初始化；纯标量、单线程普通 ++（doc 13 §8.3-3）。 */
     rtdbd_notify_counters_t notify_counters;
@@ -90,6 +122,16 @@ static rtdbd_session_t *cli_session(rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id)
         if (a->cli[i].used && a->cli[i].id == id) {
             return &a->cli[i].session;
         }
+    }
+    return NULL;
+}
+
+/* S2：按 cli_id 取整个 cli 项（含 sync_state），供同步 handler 登记状态。 */
+static rtdbd_vsoa_cli_entry_t *cli_entry_for(
+    rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id)
+{
+    for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
+        if (a->cli[i].used && a->cli[i].id == id) return &a->cli[i];
     }
     return NULL;
 }
@@ -250,6 +292,13 @@ static void vsoa_on_cli(void *arg, vsoa_server_t *server, vsoa_cli_id_t id, bool
                 (void)rtdbd_sub_snapshot_save(s->session_id, &ident, s->subs, s->nsubs);
             }
             rtdbd_session_free(s);
+            /* S2（终验 P1）：断链清同步状态 + WAIT 等待表项，防 cli_id 复用串台。 */
+            memset(&a->cli[i].sync_state, 0, sizeof(a->cli[i].sync_state));
+            for (uint32_t k = 0; k < RTDBD_SYNC_WAIT_MAX; ++k) {
+                if (a->wait_ctx[k].used && a->wait_ctx[k].cli_id == a->cli[i].id) {
+                    memset(&a->wait_ctx[k], 0, sizeof(a->wait_ctx[k]));
+                }
+            }
             a->cli[i].used = false;
             a->cli[i].id = 0;
             return;
@@ -493,6 +542,212 @@ static uint16_t vsoa_peers_admin(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
     return RTDBD_ST_OK;
 }
 
+/* ---- S2：同步通道专有 URL handler（4 URL，VSOA RPC call 全同步，不走 quick）---- */
+static uint64_t sync_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+/* 本机 node_id：配置优先，回退 service_id（S2 临时，S2b 正式配置）。 */
+static const char *sync_local_node_id(rtdbd_vsoa_adapter_t *a, rtdbd_session_t *s)
+{
+    if (a->sync_node_id[0] != '\0') return a->sync_node_id;
+    if (s && s->service_id[0] != '\0') return s->service_id;
+    return "local";
+}
+
+/* S2 门禁：仅已握手的 sync_peer 且来源在成员表可访问同步 URL（fix P1-5）。
+ * 复用 vsoa_hello 的 sync_peer 来源判据（:287-311）。 */
+static bool sync_gate_allowed(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
+                              vsoa_cli_id_t id, rtdbd_session_t **out_s)
+{
+    rtdbd_session_t *s = cli_session(a, id);
+    if (!s || !s->cred.cred_ok || s->role != RTDBD_ROLE_SYNC_PEER) return false;
+    struct sockaddr_storage sa;
+    socklen_t slen = sizeof(sa);
+    memset(&sa, 0, sizeof(sa));
+    if (!vsoa_server_cli_address(server, id, (struct sockaddr *)&sa, &slen) ||
+        sa.ss_family != AF_INET) return false;
+    char src[INET_ADDRSTRLEN] = {0};
+    const struct sockaddr_in *in4 = (const struct sockaddr_in *)&sa;
+    if (!inet_ntop(AF_INET, &in4->sin_addr, src, sizeof(src))) return false;
+    if (rtdbd_authz_sync_peer_source_allowed(rtdbd_peers_global(), src) != RTDBD_ST_OK) {
+        return false;
+    }
+    if (out_s) *out_s = s;
+    return true;
+}
+
+/* 本机 digest：枚举已注册点 → S1 rtdbd_digest_compute（复用 S1 纯函数）。 */
+static void sync_local_digest(rtdbd_vsoa_adapter_t *a, uint64_t *sh, uint64_t *vd,
+                              uint32_t *np)
+{
+    *sh = 0u; *vd = 0u; *np = 0u;
+    if (!a->handle) return;
+    static indurtdb_point_t pts[512];
+    uint32_t n = 0u;
+    uint32_t maxp = a->readonly_max_points ? a->readonly_max_points : 512u;
+    if (maxp > 512u) maxp = 512u;
+    for (uint32_t id = 0; id < maxp && n < 512u; ++id) {
+        indurtdb_point_t pt;
+        if (indurtdb_h_read_point(a->handle, id, &pt) != 0) continue;
+        if (pt.name[0] == '\0') continue;
+        pts[n++] = pt;
+    }
+    rtdbd_digest_t d;
+    if (rtdbd_digest_compute(pts, n, &d)) {
+        *sh = d.struct_hash; *vd = d.value_digest; *np = d.n_points;
+    }
+}
+
+/* 登记 WAIT 等待上下文（回调内只登记、立即返回，不阻塞——fix P0-1）。 */
+static void sync_wait_register(rtdbd_vsoa_adapter_t *a, vsoa_cli_id_t id,
+                               uint32_t seq, uint16_t tun,
+                               const rtdbd_sync_wait_req_t *req)
+{
+    for (uint32_t k = 0; k < RTDBD_SYNC_WAIT_MAX; ++k) {
+        rtdbd_sync_wait_ctx_t *w = &a->wait_ctx[k];
+        if (!w->used) {
+            memset(w, 0, sizeof(*w));
+            w->used = true; w->cli_id = id; w->seq = seq; w->tun = tun;
+            w->min_epoch = req->min_epoch; w->required_acks = req->required_acks;
+            w->deadline_ns = sync_now_ns() +
+                (uint64_t)(req->timeout_ms ? req->timeout_ms : RTDBD_SYNC_WAIT_TIMEOUT_MS) * 1000000ull;
+            return;
+        }
+    }
+}
+
+/* 4 URL 统一分派：0=hello 1=snapshot 2=delta 3=wait。 */
+static void vsoa_sync_handle(rtdbd_vsoa_adapter_t *a, vsoa_server_t *server,
+                             vsoa_cli_id_t id, vsoa_header_t *hdr,
+                             const char *bare, const uint8_t *req, size_t req_len,
+                             int kind)
+{
+    (void)bare;
+    uint32_t seq = hdr ? ntohl(hdr->seqno) : 0u; /* 主机序（终验 P1） */
+    uint16_t tun = hdr ? ntohs(hdr->tunid) : 0u;
+    vsoa_payload_t out;
+    memset(&out, 0, sizeof(out));
+    rtdbd_session_t *s = NULL;
+    if (!sync_gate_allowed(a, server, id, &s)) {
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_DENIED), seq, tun, &out);
+        return;
+    }
+    size_t expect = (kind == 0) ? sizeof(rtdbd_sync_hello_req_t)
+                  : (kind == 1) ? sizeof(rtdbd_sync_snapshot_req_t)
+                  : (kind == 2) ? sizeof(rtdbd_sync_delta_req_t)
+                                : sizeof(rtdbd_sync_wait_req_t);
+    if (!req || req_len != expect) {
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_BAD_REQUEST), seq, tun, &out);
+        return;
+    }
+
+    if (kind == 0) { /* /sync/hello */
+        rtdbd_sync_hello_req_t rq;
+        memcpy(&rq, req, sizeof(rq));
+        rtdbd_vsoa_cli_entry_t *ce = cli_entry_for(a, id);
+        rtdbd_sync_peer_state_t *ps = ce ? &ce->sync_state : NULL;
+        if (!ps) return;
+        ps->epoch = rq.epoch; ps->struct_hash = rq.struct_hash;
+        ps->value_digest = rq.value_digest; ps->n_points = rq.n_points;
+        memcpy(ps->node_id, rq.node_id, sizeof(ps->node_id));
+        ps->valid = true;
+        rtdbd_sync_hello_resp_t rp;
+        memset(&rp, 0, sizeof(rp));
+        sync_local_digest(a, &rp.struct_hash, &rp.value_digest, &rp.n_points);
+        rp.epoch = rtdbd_epoch_current();
+        const char *local_id = sync_local_node_id(a, s);
+        {
+            size_t nid_len = strlen(local_id);
+            if (nid_len >= sizeof(rp.node_id)) nid_len = sizeof(rp.node_id) - 1u;
+            memcpy(rp.node_id, local_id, nid_len);
+            rp.node_id[nid_len] = '\0';
+        }
+        rp.accepted = 1u; /* S2 不选全源（S3） */
+        memcpy(a->resp, &rp, sizeof(rp));
+        out.data = a->resp; out.data_len = sizeof(rp);
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), seq, tun, &out);
+        return;
+    }
+    if (kind == 1) { /* /sync/snapshot：header→param、点位数组→data */
+        rtdbd_sync_snapshot_req_t rq;
+        memcpy(&rq, req, sizeof(rq));
+        uint32_t cap = rtdbd_sync_page_capacity(rq.page_size);
+        uint32_t n_all = 0u;
+        /* 计算总点数（枚举已注册点；total_pages 漂移留 S3 seqlock） */
+        {
+            rtdbd_digest_t dummy;
+            static indurtdb_point_t pts[512];
+            uint32_t n = 0u, maxp = a->readonly_max_points ? a->readonly_max_points : 512u;
+            if (maxp > 512u) maxp = 512u;
+            for (uint32_t pid = 0; pid < maxp && n < 512u; ++pid) {
+                indurtdb_point_t pt;
+                if (indurtdb_h_read_point(a->handle, pid, &pt) != 0) continue;
+                if (pt.name[0] == '\0') continue;
+                pts[n++] = pt;
+            }
+            (void)rtdbd_digest_compute(pts, n, &dummy);
+            n_all = n;
+        }
+        rtdbd_sync_snapshot_resp_t hp;
+        memset(&hp, 0, sizeof(hp));
+        hp.page_index = rq.page_index;
+        hp.total_pages = rtdbd_sync_page_count(n_all, cap);
+        uint32_t start = rq.page_index * cap;
+        uint32_t n = (start < n_all && cap > 0u) ? (n_all - start < cap ? n_all - start : cap) : 0u;
+        hp.n_points = n;
+        out.param = (char *)a->resp; out.param_len = sizeof(hp);
+        memcpy(a->resp, &hp, sizeof(hp));
+        if (n > 0u) {
+            static indurtdb_point_t pts[512];
+            uint32_t k = 0u, maxp = a->readonly_max_points ? a->readonly_max_points : 512u;
+            if (maxp > 512u) maxp = 512u;
+            for (uint32_t pid = 0; pid < maxp && k < 512u; ++pid) {
+                indurtdb_point_t pt;
+                if (indurtdb_h_read_point(a->handle, pid, &pt) != 0) continue;
+                if (pt.name[0] == '\0') continue;
+                if (pid < start) continue;
+                if (k >= n) break;
+                pts[k++] = pt;
+            }
+            out.data = (uint8_t *)pts; out.data_len = (size_t)n * sizeof(indurtdb_point_t);
+        }
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), seq, tun, &out);
+        return;
+    }
+    if (kind == 2) { /* /sync/delta：游标水位（不宣称真实增量） */
+        rtdbd_sync_delta_req_t rq;
+        memcpy(&rq, req, sizeof(rq));
+        static rtdbd_sync_delta_rec_t recs[64];
+        uint64_t applied = rq.from_offset;
+        bool more = false;
+        uint32_t maxp = a->readonly_max_points ? a->readonly_max_points : 512u;
+        uint32_t n = rtdbd_sync_delta_scan(a->handle, maxp, rq.from_offset, rq.max_records,
+                                           rtdbd_epoch_current(), sync_local_node_id(a, s),
+                                           0u, recs, 64u, &applied, &more);
+        rtdbd_sync_delta_resp_t rp;
+        memset(&rp, 0, sizeof(rp));
+        rp.applied_offset = applied; rp.n_records = n; rp.has_more = more ? 1u : 0u;
+        out.param = (char *)a->resp; out.param_len = sizeof(rp);
+        memcpy(a->resp, &rp, sizeof(rp));
+        if (n > 0u) { out.data = (uint8_t *)recs; out.data_len = (size_t)n * sizeof(recs[0]); }
+        (void)vsoa_server_cli_reply(server, id,
+            (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), seq, tun, &out);
+        return;
+    }
+    /* kind == 3: /sync/wait —— 只登记，不回包（pump 异步回写） */
+    rtdbd_sync_wait_req_t rq;
+    memcpy(&rq, req, sizeof(rq));
+    sync_wait_register(a, id, seq, tun, &rq);
+}
+
 static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
                          vsoa_header_t *hdr, vsoa_url_t *url, vsoa_payload_t *payload)
 {
@@ -644,6 +899,23 @@ static void vsoa_on_cmd(void *arg, vsoa_server_t *server, vsoa_cli_id_t id,
     }
     if (strcmp(bare, "/logs") == 0) {
         vsoa_readonly_handle(a, server, id, hdr, bare, req, req_len, HC_RO_LOG);
+        return;
+    }
+    /* S2：同步通道 4 专有 URL（不进 13 表，专有区分派；门禁在 handler 内）。 */
+    if (strcmp(bare, "/sync/hello") == 0) {
+        vsoa_sync_handle(a, server, id, hdr, bare, req, req_len, 0);
+        return;
+    }
+    if (strcmp(bare, "/sync/snapshot") == 0) {
+        vsoa_sync_handle(a, server, id, hdr, bare, req, req_len, 1);
+        return;
+    }
+    if (strcmp(bare, "/sync/delta") == 0) {
+        vsoa_sync_handle(a, server, id, hdr, bare, req, req_len, 2);
+        return;
+    }
+    if (strcmp(bare, "/sync/wait") == 0) {
+        vsoa_sync_handle(a, server, id, hdr, bare, req, req_len, 3);
         return;
     }
 
@@ -902,6 +1174,26 @@ rtdbd_vsoa_adapter_t *rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t *hand
             }
         }
     }
+    /* S2：4 个同步通道专有 URL listener（不进 13 表/opcode 表）。 */
+    {
+        static const char *const sync_urls[] = {
+            "/sync/hello", "/sync/snapshot", "/sync/delta", "/sync/wait"
+        };
+        for (size_t i = 0; i < sizeof(sync_urls) / sizeof(sync_urls[0]); ++i) {
+            char full[128];
+            int k = snprintf(full, sizeof(full), "%s%s", RTDBD_VSOA_URL_PREFIX, sync_urls[i]);
+            if (k <= 0 || (size_t)k >= sizeof(full)) {
+                vsoa_server_close(a->server); free(a); return NULL;
+            }
+            vsoa_url_t u;
+            memset(&u, 0, sizeof(u));
+            u.url = full;
+            u.url_len = strlen(full);
+            if (!vsoa_server_add_listener(a->server, &u, vsoa_on_cmd, a)) {
+                vsoa_server_close(a->server); free(a); return NULL;
+            }
+        }
+    }
     return a;
 }
 
@@ -1021,6 +1313,56 @@ void rtdbd_vsoa_adapter_set_readonly_sources(rtdbd_vsoa_adapter_t *a,
     if (!a) return;
     a->readonly_logbuf = (const irt_logbuf_t *)logbuf;
     a->readonly_max_points = max_points;
+}
+
+void rtdbd_vsoa_adapter_set_sync_node_id(rtdbd_vsoa_adapter_t *a, const char *node_id)
+{
+    if (!a || !node_id) return;
+    size_t n = strlen(node_id);
+    if (n >= sizeof(a->sync_node_id)) n = sizeof(a->sync_node_id) - 1u;
+    memcpy(a->sync_node_id, node_id, n);
+    a->sync_node_id[n] = '\0';
+}
+
+void rtdbd_vsoa_adapter_wait_pump(rtdbd_vsoa_adapter_t *a)
+{
+    if (!a) return;
+    uint64_t now = sync_now_ns();
+    for (uint32_t k = 0; k < RTDBD_SYNC_WAIT_MAX; ++k) {
+        rtdbd_sync_wait_ctx_t *w = &a->wait_ctx[k];
+        if (!w->used) continue;
+        bool expired = (now >= w->deadline_ns);
+        /* 收集当前所有有效 peer epoch（断链 cli_id 已清，终验 P1-1）。 */
+        uint64_t epochs[RTDBD_VSOA_MAX_CLI];
+        uint32_t n = 0u;
+        for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
+            if (a->cli[i].used && a->cli[i].sync_state.valid) {
+                epochs[n++] = a->cli[i].sync_state.epoch;
+            }
+        }
+        uint32_t acks = 0u;
+        bool ok = false;
+        rtdbd_sync_wait_eval(epochs, n, w->min_epoch, w->required_acks, &acks, &ok);
+        if (!expired && !ok) continue; /* 非阻塞：未到期且未满足 */
+        /* cli_id 仍有效才回写，防复用串台（终验 P1-1）。 */
+        bool live = false;
+        for (uint32_t i = 0; i < RTDBD_VSOA_MAX_CLI; ++i) {
+            if (a->cli[i].used && a->cli[i].id == w->cli_id) { live = true; break; }
+        }
+        if (live) {
+            rtdbd_sync_wait_resp_t rp;
+            memset(&rp, 0, sizeof(rp));
+            rp.acks = acks;
+            rp.ok = ok ? 1u : 0u; /* 超时不回滚本地写（D5） */
+            vsoa_payload_t out;
+            memset(&out, 0, sizeof(out));
+            memcpy(a->resp, &rp, sizeof(rp));
+            out.data = a->resp; out.data_len = sizeof(rp);
+            (void)vsoa_server_cli_reply(a->server, w->cli_id,
+                (uint8_t)rtdbd_st_to_vsoa_status(RTDBD_ST_OK), w->seq, w->tun, &out);
+        }
+        memset(w, 0, sizeof(*w));
+    }
 }
 
 void rtdbd_vsoa_adapter_set_allow_unauthenticated(rtdbd_vsoa_adapter_t *a, bool allow)

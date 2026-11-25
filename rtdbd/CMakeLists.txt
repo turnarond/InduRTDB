@@ -20,6 +20,9 @@ add_executable(rtdbd
     src/cluster/rtdbd_peers_file.c
     src/cluster/rtdbd_defer_actions.c
     src/cluster/rtdbd_sub_snapshot.c
+    src/cluster/rtdbd_epoch.c
+    src/cluster/rtdbd_digest.c
+    src/cluster/rtdbd_sync_logic.c
     src/session/rtdbd_session.c
     src/session/rtdbd_authz.c
     src/stats.c

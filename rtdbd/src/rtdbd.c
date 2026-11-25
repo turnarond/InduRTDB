@@ -2219,6 +2219,10 @@ int main(int argc, char** argv)
      * 以保持既有部署"运行时点位重启即丢"的语义不变。 */
     const char* delta_path = NULL;
     const char* peers_file_path = NULL;
+    const char* sync_node_id = NULL; /* S2：本机同步 node_id（未给取 service_id） */
+#ifndef INDURTDB_ENABLE_VSOA
+    (void)sync_node_id; /* OFF 构建无 VSOA 注入点，避免 unused-but-set */
+#endif
 
     static struct option long_opts[] = {
         {"socket",     required_argument, 0, 's'},
@@ -2237,6 +2241,7 @@ int main(int argc, char** argv)
         {"stats-file", required_argument, 0, 'F'},
         {"delta-file", required_argument, 0, 'D'},
         {"sync-self-addr", required_argument, 0, 1004},
+        {"sync-node-id",   required_argument, 0, 1009},
         {"peers-file", required_argument, 0, 1008},
 #ifdef INDURTDB_ENABLE_VSOA
         {"vsoa-port",      required_argument, 0, 1005},
@@ -2330,6 +2335,9 @@ int main(int argc, char** argv)
             break;
         case 1008:
             peers_file_path = optarg;
+            break;
+        case 1009:
+            sync_node_id = optarg;
             break;
         case 'S': supervise = true; break;
         case 'P': pidfile = optarg; break;
@@ -2662,6 +2670,8 @@ int main(int argc, char** argv)
         }
         /* h-C 前置：注入 4 只读 URL 所需 logbuf / max_points（未注入回 NOT_IMPLEMENTED）。 */
         rtdbd_vsoa_adapter_set_readonly_sources(g_vsoa, &g_logbuf, g_max_points);
+        /* S2：注入本机同步 node_id（未给时 hello 回退 service_id）。 */
+        if (sync_node_id) rtdbd_vsoa_adapter_set_sync_node_id(g_vsoa, sync_node_id);
         if (g_vsoa_token_file) {
             int ntok = load_vsoa_token_file(g_vsoa_token_file, g_vsoa);
             if (ntok < 0) {
@@ -2865,6 +2875,10 @@ int main(int argc, char** argv)
         }
 #endif
         drain_deferred_actions();
+#ifdef INDURTDB_ENABLE_VSOA
+        /* S2：WAIT 延迟表 pump——回调内只登记、此处非阻塞回写（终验 P0-1）。 */
+        if (g_vsoa) rtdbd_vsoa_adapter_wait_pump(g_vsoa);
+#endif
     }
 
 #ifdef INDURTDB_ENABLE_VSOA

@@ -80,6 +80,21 @@ if(TARGET test_c_digest)
         ${PROJECT_SOURCE_DIR}/rtdbd/src)
 endif()
 
+# S2：同步 POD（纯头）+ cluster 纯逻辑单测（GLOB 已生成 target）。
+if(TARGET test_c_sync_protocol)
+    target_include_directories(test_c_sync_protocol PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+if(TARGET test_c_sync_watermark)
+    target_sources(test_c_sync_watermark PRIVATE
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c)
+    target_include_directories(test_c_sync_watermark PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src)
+endif()
+
 # M1：双前端等价协议层单测直接编译 rtdbd/src/dispatch/rtdbd_dispatch.c
 # （纯叶子模块，仅依赖 libc + protocol.h，无 transport/VSOA 耦合）。
 if(TARGET test_c_dispatch)

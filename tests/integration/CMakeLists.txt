@@ -359,6 +359,9 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
@@ -495,6 +498,9 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
@@ -522,6 +528,40 @@ if(INDURTDB_ENABLE_VSOA)
         CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
     add_test(NAME test_vsoa_cluster COMMAND test_vsoa_cluster)
 
+    # ---- S2：同步通道两进程 loopback e2e（hello/snapshot/delta/wait + 门禁）----
+    add_executable(test_vsoa_sync test_vsoa_sync.cpp
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/vsoa/vsoa_adapter.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sub_snapshot.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peer_table.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/subtab.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/policy.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/rtdbd_conf.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/stats.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/logbuf.c)
+    target_include_directories(test_vsoa_sync PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/rtdbd/include
+        ${PROJECT_SOURCE_DIR}/rtdbd/src
+        ${VSOA_SDK_ROOT}/include ${VSOA_SDK_ROOT}/include/libvsoa)
+    target_link_libraries(test_vsoa_sync PRIVATE
+        GTest::gtest GTest::gtest_main indurtdb
+        "-l:libvsoa-server.so" "-l:libvsoa-client.so"
+        "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
+    target_link_directories(test_vsoa_sync PRIVATE ${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR})
+    target_link_options(test_vsoa_sync PRIVATE "LINKER:--disable-new-dtags")
+    set_target_properties(test_vsoa_sync PROPERTIES
+        BUILD_RPATH "${VSOA_SDK_ROOT}/${VSOA_LIB_SUBDIR}"
+        CXX_STANDARD 17 CXX_STANDARD_REQUIRED ON)
+    add_test(NAME test_vsoa_sync COMMAND test_vsoa_sync)
+
     # ---- v3.12 M3.3 切片5（IR5 = P9 部分闭环）：NOTIFY 端到端定向 ----
     # ctest 名固定 IR5_NotifyDirection（doc 13 §11.1 表 P9）。仅 NOTIFY 定向；
     # SNAPSHOT_DONE 生产定向按用户裁决 q1 移出本切片。仓库无 file(GLOB)，显式注册。
@@ -533,6 +573,9 @@ if(INDURTDB_ENABLE_VSOA)
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_global.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_peers_apply.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_defer_global.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_epoch.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c
+        ${PROJECT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_sync_logic.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/dispatch/rtdbd_dispatch.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_session.c
         ${PROJECT_SOURCE_DIR}/rtdbd/src/session/rtdbd_authz.c
