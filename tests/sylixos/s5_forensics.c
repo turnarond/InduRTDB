@@ -175,13 +175,16 @@ int main(int argc, char **argv)
     peer.c = make_client(port);
     if (!plc.c || !admin.c || !peer.c ||
         !hello(plc.c, &plc) || !hello(admin.c, &admin)) {
-        printf("[S5] dual-role hello FAIL\n");
+        printf("[S5] dual-role hello FAIL (plc=%d admin=%d peer=%d)\n",
+               plc.c ? 1 : 0, admin.c ? 1 : 0, peer.c ? 1 : 0);
         printf("S5_RESULT: FAIL\n");
         return 1;
     }
     printf("[S5] dual-role hello OK (mode=%s)\n", mode);
 
-    s5_capture_t cap;
+    /* 真机修正：VALUE_LEN=8192 后 s5_capture_t 约 540KB，栈上分配会溢出
+     * SylixOS 任务栈（S5b 首跑无输出即退出）。改静态存储（单进程单次执行）。 */
+    static s5_capture_t cap;
     s5_capture_init(&cap);
     strncpy(cap.mode, mode, sizeof(cap.mode) - 1u);
     strncpy(cap.node_id, argv[11], sizeof(cap.node_id) - 1u);
@@ -199,10 +202,13 @@ int main(int argc, char **argv)
 
     /* sync_admin /sync/peers/get body → peers 真值（4104B）。 */
     rpc_reply_t peers;
-    char psum[4096];
+    static char psum[4096];
     if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/get", NULL, 0u, &peers) &&
         peers.status == 0x80 && peers_summary(peers.body, peers.body_len, psum, sizeof(psum))) {
-        (void)s5_field_set_on_site(&cap, "peers", psum);
+        /* on-site 值须为合法 JSON 片段：字符串值必须带引号（裸串会破坏 JSON）。 */
+        static char psum_json[4200];
+        (void)snprintf(psum_json, sizeof(psum_json), "\"%s\"", psum);
+        (void)s5_field_set_on_site(&cap, "peers", psum_json);
         (void)s5_field_set_status(&cap, "admin_set_peers_ok", peers.status, S5_SRC_ON_SITE);
     }
 
@@ -276,7 +282,7 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    char buf[65536];
+    static char buf[65536];
     if (!s5_capture_validate(&cap) || !s5_capture_emit_json(&cap, buf, sizeof(buf))) {
         printf("[S5] capture validate/emit FAIL\n");
         printf("S5_RESULT: FAIL\n");

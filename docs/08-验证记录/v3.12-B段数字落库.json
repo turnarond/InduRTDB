@@ -2,14 +2,84 @@
   "schema": 1,
   "feature": "v3.12-集群同步与VSOA双栈前端",
   "status": "pending",
-  "note": "B 段实现/现场验收数字落库。7 项均为 pending，须 rtdbd 实现、6 节点编排与现场取证后逐项填 fields 并由独立复验置 measured；字段与 ctest 映射见 13 号 §11。2026-11-11 核实：fixture 列登记的 7 个 test_vsoa_*.cpp 均未创建（属实现期拟建路径，非既存文件），7 个 ctest_case 中仅 IR3_DeferredQueue、IR4_PeersRuntime 真实注册。当前空表是诚实留白，不得视为已完成、不得手填数字置 measured；处置依据与前置条件见 v3.12-M3-IR证据.md §14。",
+  "note": "B 段实现/现场验收数字落库。7 项均为 pending，须 rtdbd 实现、6 节点编排与现场取证后逐项填 fields 并由独立复验置 measured；字段与 ctest 映射见 13 号 §11。2026-11-11 核实：fixture 列登记的 7 个 test_vsoa_*.cpp 均未创建（属实现期拟建路径，非既存文件），7 个 ctest_case 中仅 IR3_DeferredQueue、IR4_PeersRuntime 真实注册。当前空表是诚实留白，不得视为已完成、不得手填数字置 measured；处置依据与前置条件见 v3.12-M3-IR证据.md §14。 2026-11-25 S5b：4板现场取证，P7/P8 部分字段已填 on-site 真值但字段不全，status 保持 pending；.226/.227 离线未取；P10/P11 保持 pending；不置 measured、不放行。",
   "items": [
-    {"id": "P3", "status": "pending", "ctest_case": "Gate_T3_WallClock", "fixture": "tests/integration/test_vsoa_snapshot.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P6", "status": "pending", "ctest_case": "IR3_DeferredQueue", "fixture": "tests/integration/test_vsoa_reconnect.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P7", "status": "pending", "ctest_case": "IR2_AuthDeny", "fixture": "tests/integration/test_vsoa_auth.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P8", "status": "pending", "ctest_case": "IR4_PeersRuntime", "fixture": "tests/integration/test_vsoa_peers.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P9", "status": "pending", "ctest_case": "IR5_NotifyDirection", "fixture": "tests/integration/test_vsoa_notify.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P10", "status": "pending", "ctest_case": "IR7_PartitionConverge", "fixture": "tests/integration/test_vsoa_partition.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""},
-    {"id": "P11", "status": "pending", "ctest_case": "IR6_RestartSemantics", "fixture": "tests/integration/test_vsoa_restart.cpp", "fields": {}, "evidence": "", "verified_by": "", "verified_at": ""}
+    {
+      "id": "P3",
+      "status": "pending",
+      "ctest_case": "Gate_T3_WallClock",
+      "fixture": "tests/integration/test_vsoa_snapshot.cpp",
+      "fields": {},
+      "evidence": "",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P6",
+      "status": "pending",
+      "ctest_case": "IR3_DeferredQueue",
+      "fixture": "tests/integration/test_vsoa_reconnect.cpp",
+      "fields": {},
+      "evidence": "",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P7",
+      "status": "pending",
+      "ctest_case": "IR2_AuthDeny",
+      "fixture": "tests/integration/test_vsoa_auth.cpp",
+      "fields": {
+        "deny_bad_token": 130,
+        "admin_set_peers_ok": 128
+      },
+      "evidence": "docs/08-验证记录/v3.12-S5b-核验报告.md",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P8",
+      "status": "pending",
+      "ctest_case": "IR4_PeersRuntime",
+      "fixture": "tests/integration/test_vsoa_peers.cpp",
+      "fields": {
+        "reject_self": 129,
+        "reject_invalid": 129,
+        "reject_over_limit": 129
+      },
+      "evidence": "docs/08-验证记录/v3.12-S5b-核验报告.md",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P9",
+      "status": "pending",
+      "ctest_case": "IR5_NotifyDirection",
+      "fixture": "tests/integration/test_vsoa_notify.cpp",
+      "fields": {},
+      "evidence": "",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P10",
+      "status": "pending",
+      "ctest_case": "IR7_PartitionConverge",
+      "fixture": "tests/integration/test_vsoa_partition.cpp",
+      "fields": {},
+      "evidence": "",
+      "verified_by": "",
+      "verified_at": ""
+    },
+    {
+      "id": "P11",
+      "status": "pending",
+      "ctest_case": "IR6_RestartSemantics",
+      "fixture": "tests/integration/test_vsoa_restart.cpp",
+      "fields": {},
+      "evidence": "",
+      "verified_by": "",
+      "verified_at": ""
+    }
   ]
 }

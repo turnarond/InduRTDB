@@ -26,8 +26,9 @@ def check_capture(obj):
     errs = []
     if not isinstance(obj, dict):
         return ["top-level must be object"]
-    if obj.get("mode") not in ("f2", "f3a", "f4"):
-        errs.append("mode must be f2|f3a|f4")
+    # S5b：F4 分两态（f4-before/f4-after，主机侧比对），兼容 S5 的 f4。
+    if obj.get("mode") not in ("f2", "f3a", "f4", "f4-before", "f4-after"):
+        errs.append("mode must be f2|f3a|f4|f4-before|f4-after")
     if not obj.get("node_id"):
         errs.append("node_id missing")
     fields = obj.get("fields")
