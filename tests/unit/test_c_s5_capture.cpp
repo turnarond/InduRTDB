@@ -104,3 +104,54 @@ TEST(S5Capture, FieldCountBounded)
     }
     EXPECT_FALSE(s5_field_set_u64(&c, "overflow", 1, S5_SRC_ON_SITE));
 }
+
+TEST(S5Capture, OversizeValueRejectedNotSilentlyTruncated)
+{
+    s5_capture_t c;
+    s5_capture_init(&c);
+    std::string huge(20000, 'x');
+    char buf[8192];
+    /* 超长值必须返回 false（报错），不得静默截断成假值。 */
+    EXPECT_FALSE(s5_field_set_on_site(&c, "peers_summary", huge.c_str()));
+    EXPECT_TRUE(s5_capture_emit_json(&c, buf, sizeof(buf)));
+    EXPECT_EQ(std::string(buf).find("xxxx"), std::string::npos);
+}
+
+TEST(S5Capture, StatusFieldOnSite)
+{
+    s5_capture_t c;
+    s5_capture_init(&c);
+    ASSERT_TRUE(s5_field_set_status(&c, "deny_bad_token", 0x83u, S5_SRC_ON_SITE));
+    char buf[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&c, buf, sizeof(buf)));
+    EXPECT_NE(std::string(buf).find("\"deny_bad_token\":{\"value\":131"), std::string::npos);
+}
+
+TEST(S5Capture, F4CompareSameDigestAndPeers)
+{
+    s5_capture_t before, after;
+    s5_capture_init(&before); s5_capture_init(&after);
+    (void)s5_field_set_on_site(&before, "digest", "\"fnv1a64-v1:aa:bb:3\"");
+    (void)s5_field_set_on_site(&after, "digest", "\"fnv1a64-v1:aa:bb:3\"");
+    (void)s5_field_set_on_site(&before, "peers", "\"p1,p2\"");
+    (void)s5_field_set_on_site(&after, "peers", "\"p1,p2\"");
+    char b1[8192], b2[8192], out[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&before, b1, sizeof(b1)));
+    ASSERT_TRUE(s5_capture_emit_json(&after, b2, sizeof(b2)));
+    ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
+    EXPECT_NE(std::string(out).find("\"digest_match\":true"), std::string::npos);
+    EXPECT_NE(std::string(out).find("\"peers_restored\":true"), std::string::npos);
+}
+
+TEST(S5Capture, F4CompareDifferentDigest)
+{
+    s5_capture_t before, after;
+    s5_capture_init(&before); s5_capture_init(&after);
+    (void)s5_field_set_on_site(&before, "digest", "\"fnv1a64-v1:aa:bb:3\"");
+    (void)s5_field_set_on_site(&after, "digest", "\"fnv1a64-v1:cc:dd:4\"");
+    char b1[8192], b2[8192], out[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&before, b1, sizeof(b1)));
+    ASSERT_TRUE(s5_capture_emit_json(&after, b2, sizeof(b2)));
+    ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
+    EXPECT_NE(std::string(out).find("\"digest_match\":false"), std::string::npos);
+}

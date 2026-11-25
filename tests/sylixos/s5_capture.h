@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define S5_CAPTURE_MAX_FIELDS 64u
-#define S5_CAPTURE_VALUE_LEN  128u
+#define S5_CAPTURE_VALUE_LEN  8192u  /* S5b：承载 4104B peers 摘要 + 余量 */
 #define S5_CAPTURE_REASON_LEN 160u
 
 typedef enum {
@@ -55,6 +55,11 @@ bool s5_capture_emit_json(const s5_capture_t *c, char *buf, size_t cap);
 /* 校验：unavailable 必须有 reason；P10 三字段/P11 machine_restart_pull_full 不得 on-site；
  * logic-only 不得冒用 P10 字段名；字段数/长度有界。 */
 bool s5_capture_validate(const s5_capture_t *c);
+/* S5b：RPC status 落值（on-site），如 deny_bad_token=0x83。 */
+bool s5_field_set_status(s5_capture_t *c, const char *key, uint8_t status, s5_source_t src);
+/* S5b：主机侧 F4 两态比对——输入两份 emit JSON，输出 {"digest_match":bool,"peers_restored":bool}。 */
+bool s5_f4_compare(const char *before_json, const char *after_json,
+                   char *out, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -14,7 +14,10 @@ import sys
 
 FORBIDDEN_ON_SITE = {
     "nodes_converged", "terminal_hash", "dict_max_snapshot_match",
-    "machine_restart_pull_full",
+    "machine_restart_pull_full", "deny_non_loopback", "join_triggers_full",
+    "rbe_gate_hits", "rbe_gate_misses", "snapshot_done_caps_only",
+    "subs_restored", "epoch_before", "epoch_after",
+    "partition_duration_s", "stale_epoch_rejected",
 }
 VALID_SRC = {"on-site", "logic-only", "unavailable"}
 
@@ -92,11 +95,21 @@ def self_test():
         "fields": {"stale_epoch_rejected": {"value": None,
                                             "_source": "unavailable", "reason": ""}},
     }
+    bad_non_loopback = {
+        "mode": "f2", "node_id": "x",
+        "fields": {"deny_non_loopback": {"value": 1, "_source": "on-site", "reason": ""}},
+    }
+    bad_f3a = {
+        "mode": "f3a", "node_id": "x",
+        "fields": {"partition_duration_s": {"value": 6, "_source": "on-site", "reason": ""}},
+    }
     checks = [
         ("good sample", check_capture(good), True),
         ("unavailable mapped on-site", check_capture(bad_unavailable_mapped), False),
         ("logic-only mapped to P10", check_capture(bad_logic_only_mapped), False),
         ("null without reason", check_capture(bad_null_no_reason), False),
+        ("deny_non_loopback mapped on-site", check_capture(bad_non_loopback), False),
+        ("F3a duration mapped on-site", check_capture(bad_f3a), False),
     ]
     ok = True
     for name, errs, want_pass in checks:

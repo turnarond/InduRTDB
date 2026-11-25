@@ -32,10 +32,11 @@ static s5_field_t *find_or_add(s5_capture_t *c, const char *key)
 static bool set_raw(s5_capture_t *c, const char *key, const char *value,
                     s5_source_t src, const char *reason)
 {
+    size_t vn = strlen(value);
+    if (vn >= S5_CAPTURE_VALUE_LEN) return false; /* S5b：超长报错，不静默截断成假值 */
+    if (reason && strlen(reason) >= S5_CAPTURE_REASON_LEN) return false;
     s5_field_t *f = find_or_add(c, key);
     if (!f) return false;
-    size_t vn = strlen(value);
-    if (vn >= sizeof(f->value)) vn = sizeof(f->value) - 1u;
     memcpy(f->value, value, vn);
     f->value[vn] = '\0';
     f->source = src;
@@ -116,7 +117,10 @@ static bool product_unavailable_field(const char *key)
 {
     static const char *const forbidden[] = {
         "nodes_converged", "terminal_hash", "dict_max_snapshot_match",
-        "machine_restart_pull_full"
+        "machine_restart_pull_full", "deny_non_loopback",
+        "join_triggers_full", "rbe_gate_hits", "rbe_gate_misses",
+        "snapshot_done_caps_only", "subs_restored", "epoch_before",
+        "epoch_after", "partition_duration_s", "stale_epoch_rejected"
     };
     for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); ++i) {
         if (strcmp(key, forbidden[i]) == 0) return true;
@@ -136,4 +140,47 @@ bool s5_capture_validate(const s5_capture_t *c)
         if (product_unavailable_field(f->key) && f->source != S5_SRC_UNAVAILABLE) return false;
     }
     return true;
+}
+
+bool s5_field_set_status(s5_capture_t *c, const char *key, uint8_t status, s5_source_t src)
+{
+    char buf[16];
+    (void)snprintf(buf, sizeof(buf), "%u", (unsigned)status);
+    return set_raw(c, key, buf, src, NULL);
+}
+
+/* 从 emit JSON 文本中取某字段的 value 串（简单查找，不引入 JSON 解析器）。 */
+static bool json_field_value(const char *json, const char *key, char *out, size_t cap)
+{
+    if (!json || !key || !out || cap == 0u) return false;
+    char pat[96];
+    (void)snprintf(pat, sizeof(pat), "\"%s\":{\"value\":", key);
+    const char *p = strstr(json, pat);
+    if (!p) return false;
+    p += strlen(pat);
+    size_t n = 0u;
+    if (*p == '"') { /* 字符串值：取到下一个 '"' */
+        ++p;
+        while (*p && *p != '"' && n + 1u < cap) out[n++] = *p++;
+    } else { /* 数字/null：取到 ',' 或 '}' */
+        while (*p && *p != ',' && *p != '}' && n + 1u < cap) out[n++] = *p++;
+    }
+    out[n] = '\0';
+    return n > 0u;
+}
+
+bool s5_f4_compare(const char *before_json, const char *after_json,
+                   char *out, size_t cap)
+{
+    char bd[1024], ad[1024], bp[1024], ap[1024];
+    bool d_ok = json_field_value(before_json, "digest", bd, sizeof(bd)) &&
+                json_field_value(after_json, "digest", ad, sizeof(ad)) &&
+                strcmp(bd, ad) == 0;
+    bool p_ok = json_field_value(before_json, "peers", bp, sizeof(bp)) &&
+                json_field_value(after_json, "peers", ap, sizeof(ap)) &&
+                strcmp(bp, ap) == 0;
+    int n = snprintf(out, cap,
+        "{\"digest_match\":%s,\"peers_restored\":%s}",
+        d_ok ? "true" : "false", p_ok ? "true" : "false");
+    return n > 0 && (size_t)n < cap;
 }
