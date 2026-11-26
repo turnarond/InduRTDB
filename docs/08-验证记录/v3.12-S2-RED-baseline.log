@@ -1,0 +1,55 @@
+[ 40%] Built target indurtdb
+[ 40%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/vsoa/vsoa_adapter.c.o
+[ 50%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_sub_snapshot.c.o
+[ 50%] Building CXX object tests/integration/CMakeFiles/test_vsoa_sync.dir/test_vsoa_sync.cpp.o
+[ 50%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_peer_table.c.o
+[ 50%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_peers_global.c.o
+[ 60%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_peers_apply.c.o
+[ 60%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_defer_global.c.o
+[ 60%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_epoch.c.o
+[ 70%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_digest.c.o
+[ 70%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/cluster/rtdbd_sync_logic.c.o
+[ 70%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/dispatch/rtdbd_dispatch.c.o
+[ 80%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/session/rtdbd_session.c.o
+[ 80%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/session/rtdbd_authz.c.o
+[ 80%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/subtab.c.o
+[ 90%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/policy.c.o
+[ 90%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/rtdbd_conf.c.o
+[ 90%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/stats.c.o
+[100%] Building C object tests/integration/CMakeFiles/test_vsoa_sync.dir/__/__/rtdbd/src/logbuf.c.o
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp: In function ‘void {anonymous}::run_sync_server(int, indurtdb_t*)’:
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:92:56: error: too few arguments to function ‘rtdbd_vsoa_adapter_t* rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t*)’
+   92 |     rtdbd_vsoa_adapter_t *a = rtdbd_vsoa_adapter_create();
+      |                               ~~~~~~~~~~~~~~~~~~~~~~~~~^~
+In file included from /home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:12:
+/home/yanchaodong/work/my_open_source/InduRTDB/rtdbd/src/vsoa/vsoa_adapter.h:49:23: note: declared here
+   49 | rtdbd_vsoa_adapter_t *rtdbd_vsoa_adapter_create(const rtdbd_vsoa_handler_t *handler);
+      |                       ^~~~~~~~~~~~~~~~~~~~~~~~~
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:95:5: error: ‘rtdbd_vsoa_adapter_set_dispatch_cfg’ was not declared in this scope; did you mean ‘rtdbd_vsoa_adapter_set_default_uid’?
+   95 |     rtdbd_vsoa_adapter_set_dispatch_cfg(a, &dc);
+      |     ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |     rtdbd_vsoa_adapter_set_default_uid
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:105:11: error: ‘rtdbd_peers_apply_set’ was not declared in this scope; did you mean ‘rtdbd_peers_resp_t’?
+  105 |     (void)rtdbd_peers_apply_set(peers, 1);
+      |           ^~~~~~~~~~~~~~~~~~~~~
+      |           rtdbd_peers_resp_t
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:111:38: error: invalid conversion from ‘sockaddr*’ to ‘uint16_t’ {aka ‘short unsigned int’} [-fpermissive]
+  111 |     if (!rtdbd_vsoa_adapter_start(a, (struct sockaddr *)&addr, sizeof(addr))) _exit(3);
+      |                                      ^~~~~~~~~~~~~~~~~~~~~~~~
+      |                                      |
+      |                                      sockaddr*
+/home/yanchaodong/work/my_open_source/InduRTDB/rtdbd/src/vsoa/vsoa_adapter.h:56:65: note:   initializing argument 2 of ‘bool rtdbd_vsoa_adapter_start(rtdbd_vsoa_adapter_t*, uint16_t, uint16_t*)’
+   56 | bool rtdbd_vsoa_adapter_start(rtdbd_vsoa_adapter_t *a, uint16_t port, uint16_t *bound_port);
+      |                                                        ~~~~~~~~~^~~~
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/integration/test_vsoa_sync.cpp:111:64: error: invalid conversion from ‘long unsigned int’ to ‘uint16_t*’ {aka ‘short unsigned int*’} [-fpermissive]
+  111 |     if (!rtdbd_vsoa_adapter_start(a, (struct sockaddr *)&addr, sizeof(addr))) _exit(3);
+      |                                                                ^~~~~~~~~~~~
+      |                                                                |
+      |                                                                long unsigned int
+/home/yanchaodong/work/my_open_source/InduRTDB/rtdbd/src/vsoa/vsoa_adapter.h:56:81: note:   initializing argument 3 of ‘bool rtdbd_vsoa_adapter_start(rtdbd_vsoa_adapter_t*, uint16_t, uint16_t*)’
+   56 | bool rtdbd_vsoa_adapter_start(rtdbd_vsoa_adapter_t *a, uint16_t port, uint16_t *bound_port);
+      |                                                                       ~~~~~~~~~~^~~~~~~~~~
+gmake[3]: *** [tests/integration/CMakeFiles/test_vsoa_sync.dir/build.make:76：tests/integration/CMakeFiles/test_vsoa_sync.dir/test_vsoa_sync.cpp.o] 错误 1
+gmake[2]: *** [CMakeFiles/Makefile2:2111：tests/integration/CMakeFiles/test_vsoa_sync.dir/all] 错误 2
+gmake[1]: *** [CMakeFiles/Makefile2:2118：tests/integration/CMakeFiles/test_vsoa_sync.dir/rule] 错误 2
+gmake: *** [Makefile:1050：test_vsoa_sync] 错误 2
