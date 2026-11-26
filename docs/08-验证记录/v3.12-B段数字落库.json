@@ -35,8 +35,8 @@
         "deny_peer_write": 130
       },
       "evidence": "docs/08-验证记录/v3.12-S5d-核验报告.md",
-      "verified_by": "",
-      "verified_at": ""
+      "verified_by": "docs/08-验证记录/v3.12-现场取证签名链.md",
+      "verified_at": "2026-11-26"
     },
     {
       "id": "P8",
@@ -51,8 +51,8 @@
         "old_table_unchanged": 1
       },
       "evidence": "docs/08-验证记录/v3.12-S5d-核验报告.md",
-      "verified_by": "",
-      "verified_at": ""
+      "verified_by": "docs/08-验证记录/v3.12-现场取证签名链.md",
+      "verified_at": "2026-11-26"
     },
     {
       "id": "P9",
