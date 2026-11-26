@@ -4,6 +4,28 @@ All notable changes to InduRTDB.
 
 ---
 
+## [3.12.0] — 2026-11-26「功能边界版（fence）」
+
+> **边界版**：以当前已实现功能为边界发布；**不是生产可用版**。发布门仍 FAIL 7（B 段 P3/P6/P9/P10/P11 pending），对外口径维持"未验证、不支持生产部署"。tag `v3.12.0-fence`（非 `v3.12.0`），不合 main。
+
+### Added
+- **S1–S4 同步语义地基**：进程级全局 epoch + 确定性 digest（FNV-1a-64）；`/sync/hello|snapshot|delta|wait` 四个专有 VSOA URL + delta 扫描游标水位 + WAIT 延迟动作异步回包；逻辑选源（归一化 `(epoch,node_id)`、有界去重、P10 字段隔离）；VSOA NOTIFY 延迟旁路环 + `/stats/notify` 只读 URL。
+- **S5/S5b/S5c/S5d 现场取证**：6 板 SylixOS ARM64 取证工具链（`s5_forensics` + `s5_capture` 纯函数 + 来源标注 JSON + 三模式 f2/f3a/f4）、body 捕获、四类 client、F4 主机侧两态比对、digest 现场重算、P7/P8 缺失字段补齐；6 板现场证据齐全（24+8+12 份 JSON 全核验）。
+- **生产发布阶段一门禁**：`release_gate.py` 的 `ir_snapshot` 改为现场 `ctest -N` + 结构化快照并集精确比对；9 个冻结名 ctest 注册。
+
+### Changed
+- README 权威表/交付说明 §1.2：集群/跨节点同步按 13 号 D1 移入本库边界（rtdbd 内自持、v3.12 主特性）；主备切换/选主不做；node-server 直连 SHM 写入不参与同步。
+
+### Not included / Known limits
+- **P3 完整 T3**（100k 点全量性能）、**P6 延迟动作队列**（生产计数出口）、**P9 推送定向**（RBE 生产计数）、**P10 分区收敛**（跨节点同步链/注入工具）、**P11 重启语义**（`machine_restart_pull_full` 产品语义不足）——均保持 pending/unavailable，不伪造。
+- `deny_non_loopback`、`join_triggers_full`、F3a 两字段、P10 全场：产品语义不足、不可得。
+- F4 digest 为**空表弱证据**（`weak:empty-set`），不宣称数据收敛。
+
+### Release state
+- VERSION 3.12.0；tag `v3.12.0-fence`；发布门 FAIL 7（未放行）；对外平台口径"未验证、不支持生产部署"；未合 main。签名链见 `docs/08-验证记录/v3.12-现场取证签名链.md`（用户本人自签实测项）。
+
+---
+
 ## [3.11.0] — 2026-10-22「单连接 1 万订阅与批量 I/O」
 
 协议主版本升到 **3**，共享内存段版本仍为 **3**，`indurtdb_point_t` 仍为 **128 B**，
