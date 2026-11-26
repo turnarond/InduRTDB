@@ -114,7 +114,7 @@ systemd 部署需配套 `RestartPreventExitStatus=2 4`。
 
 ## 版本
 
-**v3.11.0（开发中）** — 单连接 1 万订阅与批量 I/O：
+**v3.11.0（历史版本；当前边界版为 v3.12.0-fence）** — 单连接 1 万订阅与批量 I/O：
 
 - **协议 v3**：新增 `BATCH_READ=19`、`BATCH_WRITE=20`、`CAPS=21`、`SNAPSHOT_DONE=22`；
   `NO_MEM=5` 表示有界分配失败。旧主版本客户端仍可用 ≤1024 订阅与单点 GET/WRITE。
