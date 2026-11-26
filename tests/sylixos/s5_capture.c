@@ -169,18 +169,52 @@ static bool json_field_value(const char *json, const char *key, char *out, size_
     return n > 0u;
 }
 
+/* 取字段的 _source 串；不存在返回 false。S5c：比对前必须校验 on-site。 */
+static bool json_field_source(const char *json, const char *key, char *out, size_t cap)
+{
+    if (!json || !key || !out || cap == 0u) return false;
+    char pat[96];
+    (void)snprintf(pat, sizeof(pat), "\"%s\":{\"value\":", key);
+    const char *p = strstr(json, pat);
+    if (!p) return false;
+    p = strstr(p, "\"_source\":\"");
+    if (!p) return false;
+    p += strlen("\"_source\":\"");
+    size_t n = 0u;
+    while (*p && *p != '"' && n + 1u < cap) out[n++] = *p++;
+    out[n] = '\0';
+    return n > 0u;
+}
+
 bool s5_f4_compare(const char *before_json, const char *after_json,
                    char *out, size_t cap)
 {
     char bd[1024], ad[1024], bp[1024], ap[1024];
-    bool d_ok = json_field_value(before_json, "digest", bd, sizeof(bd)) &&
+    char bs[32], as[32];
+    /* S5c P0-1：双侧 value=null 会被 json_field_value 读成 "null" 而假等——
+     * 比对前强制校验两态 digest 均为 on-site 真值。 */
+    bool digest_sources_ok =
+        json_field_source(before_json, "digest", bs, sizeof(bs)) &&
+        json_field_source(after_json, "digest", as, sizeof(as)) &&
+        strcmp(bs, "on-site") == 0 && strcmp(as, "on-site") == 0;
+    bool d_ok = digest_sources_ok &&
+                json_field_value(before_json, "digest", bd, sizeof(bd)) &&
                 json_field_value(after_json, "digest", ad, sizeof(ad)) &&
                 strcmp(bd, ad) == 0;
     bool p_ok = json_field_value(before_json, "peers", bp, sizeof(bp)) &&
                 json_field_value(after_json, "peers", ap, sizeof(ap)) &&
                 strcmp(bp, ap) == 0;
+    /* S5c P0-2：空表 n_points=0 的 digest 恒等是重言式——产物级弱证据标记。 */
+    char nb[32] = {0}, na[32] = {0};
+    bool has_n = json_field_value(before_json, "digest_n_points", nb, sizeof(nb)) &&
+                 json_field_value(after_json, "digest_n_points", na, sizeof(na));
+    bool empty_set = has_n && strcmp(nb, "0") == 0 && strcmp(na, "0") == 0;
+    const char *strength = empty_set ? "weak:empty-set" : (d_ok ? "normal" : "none");
     int n = snprintf(out, cap,
-        "{\"digest_match\":%s,\"peers_restored\":%s}",
-        d_ok ? "true" : "false", p_ok ? "true" : "false");
+        "{\"digest_match\":%s,\"peers_restored\":%s,"
+        "\"digest_n_points_before\":%s,\"digest_n_points_after\":%s,"
+        "\"evidence_strength\":\"%s\"}",
+        d_ok ? "true" : "false", p_ok ? "true" : "false",
+        has_n ? nb : "null", has_n ? na : "null", strength);
     return n > 0 && (size_t)n < cap;
 }

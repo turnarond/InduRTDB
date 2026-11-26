@@ -155,3 +155,48 @@ TEST(S5Capture, F4CompareDifferentDigest)
     ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
     EXPECT_NE(std::string(out).find("\"digest_match\":false"), std::string::npos);
 }
+
+TEST(S5Capture, F4BothUnavailableDigestMustNotMatch)
+{
+    s5_capture_t before, after;
+    s5_capture_init(&before); s5_capture_init(&after);
+    (void)s5_field_set_unavailable(&before, "digest", "采集失败");
+    (void)s5_field_set_unavailable(&after, "digest", "采集失败");
+    char b1[8192], b2[8192], out[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&before, b1, sizeof(b1)));
+    ASSERT_TRUE(s5_capture_emit_json(&after, b2, sizeof(b2)));
+    ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
+    /* 双侧 value=null 不得因字符串相等而假 true（S5c P0-1）。 */
+    EXPECT_NE(std::string(out).find("\"digest_match\":false"), std::string::npos);
+}
+
+TEST(S5Capture, F4OneSideMissingDigestMustNotMatch)
+{
+    s5_capture_t before, after;
+    s5_capture_init(&before); s5_capture_init(&after);
+    (void)s5_field_set_on_site(&before, "digest", "\"fnv1a64-v1:aa:bb:3\"");
+    char b1[8192], b2[8192], out[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&before, b1, sizeof(b1)));
+    ASSERT_TRUE(s5_capture_emit_json(&after, b2, sizeof(b2)));
+    ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
+    EXPECT_NE(std::string(out).find("\"digest_match\":false"), std::string::npos);
+}
+
+TEST(S5Capture, F4EmptySetMarksWeakEvidence)
+{
+    const char *empty_hex = "\"fnv1a64-v1:0000000000000000:0000000000000000:0\"";
+    s5_capture_t before, after;
+    s5_capture_init(&before); s5_capture_init(&after);
+    (void)s5_field_set_on_site(&before, "digest", empty_hex);
+    (void)s5_field_set_on_site(&after, "digest", empty_hex);
+    (void)s5_field_set_u64(&before, "digest_n_points", 0u, S5_SRC_ON_SITE);
+    (void)s5_field_set_u64(&after, "digest_n_points", 0u, S5_SRC_ON_SITE);
+    char b1[8192], b2[8192], out[8192];
+    ASSERT_TRUE(s5_capture_emit_json(&before, b1, sizeof(b1)));
+    ASSERT_TRUE(s5_capture_emit_json(&after, b2, sizeof(b2)));
+    ASSERT_TRUE(s5_f4_compare(b1, b2, out, sizeof(out)));
+    EXPECT_NE(std::string(out).find("\"digest_match\":true"), std::string::npos);
+    EXPECT_NE(std::string(out).find("\"evidence_strength\":\"weak:empty-set\""), std::string::npos);
+    EXPECT_NE(std::string(out).find("\"digest_n_points_before\":0"), std::string::npos);
+    EXPECT_NE(std::string(out).find("\"digest_n_points_after\":0"), std::string::npos);
+}

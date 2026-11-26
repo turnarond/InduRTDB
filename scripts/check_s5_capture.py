@@ -50,6 +50,14 @@ def check_capture(obj):
                 errs.append(f"{key}: unavailable missing reason")
         if key in FORBIDDEN_ON_SITE and src != "unavailable":
             errs.append(f"{key}: must be unavailable (product semantics insufficient)")
+    # S5c：F4 态的 digest 与 digest_n_points 来源必须一致（防双侧 null 假绿/空表无机检）。
+    if obj.get("mode") in ("f4-before", "f4-after", "f4"):
+        dsrc = fields.get("digest", {}).get("_source") if isinstance(fields.get("digest"), dict) else None
+        nsrc = fields.get("digest_n_points", {}).get("_source") if isinstance(fields.get("digest_n_points"), dict) else None
+        if dsrc == "on-site" and nsrc != "on-site":
+            errs.append("digest on-site requires digest_n_points on-site")
+        if dsrc == "unavailable" and nsrc not in (None, "unavailable"):
+            errs.append("digest unavailable requires digest_n_points unavailable")
     return errs
 
 
@@ -104,6 +112,11 @@ def self_test():
         "mode": "f3a", "node_id": "x",
         "fields": {"partition_duration_s": {"value": 6, "_source": "on-site", "reason": ""}},
     }
+    bad_f4_digest_no_n = {
+        "mode": "f4-before", "node_id": "x",
+        "fields": {"digest": {"value": "\"fnv1a64-v1:aa:bb:3\"",
+                              "_source": "on-site", "reason": ""}},
+    }
     checks = [
         ("good sample", check_capture(good), True),
         ("unavailable mapped on-site", check_capture(bad_unavailable_mapped), False),
@@ -111,6 +124,7 @@ def self_test():
         ("null without reason", check_capture(bad_null_no_reason), False),
         ("deny_non_loopback mapped on-site", check_capture(bad_non_loopback), False),
         ("F3a duration mapped on-site", check_capture(bad_f3a), False),
+        ("F4 digest on-site without n_points", check_capture(bad_f4_digest_no_n), False),
     ]
     ok = True
     for name, errs, want_pass in checks:

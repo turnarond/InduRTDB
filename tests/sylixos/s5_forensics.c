@@ -20,7 +20,10 @@
 #include <rtdbd/protocol.h>
 #include "vsoa/vsoa_adapter.h"
 #include "rtdbd_notify_latency.h"
+#include "cluster/rtdbd_digest.h"
 #include "s5_capture.h"
+
+#define S5_DIGEST_MAX_POINTS 256u  /* 取证点集上限（超出则降级 unavailable） */
 
 #define RPC_TIMEOUT_SEC 3
 #define S5_BODY_CAP     4224u  /* >= rtdbd_peers_resp_t 4104B */
@@ -144,6 +147,69 @@ static bool peers_summary(const uint8_t *body, size_t len, char *out, size_t cap
         if (n <= 0 || (size_t)n >= cap - used) return false;
         used += (size_t)n;
     }
+    return true;
+}
+
+/* S5c：现场点集采集 + S1 digest 独立重算。
+ * 返回 true 且 out_hex/out_n 有效；失败一律 false（调用方写 unavailable）。 */
+static bool collect_digest(vsoa_client_t *plc, char *out_hex, size_t hex_cap, uint32_t *out_n)
+{
+    static indurtdb_point_t pts[S5_DIGEST_MAX_POINTS];
+    uint32_t n = 0u;
+    uint64_t offset = 0u;
+    bool done = false;
+
+    for (uint32_t page = 0u; page < 32u && !done; ++page) {
+        rtdbd_list_req_t lr;
+        memset(&lr, 0, sizeof(lr));
+        lr.max = 107u;              /* 满页（max=0 禁用：语义歧义） */
+        lr.offset = (uint32_t)offset;
+        lr.partition = RTDBD_PARTITION_ALL;
+        rpc_reply_t rr;
+        if (!call_rpc(plc, "/indurtdb/v1/point/list", &lr, sizeof(lr), &rr) ||
+            rr.status != 0x80 ||
+            rr.body_len % sizeof(rtdbd_point_info_t) != 0u) return false;
+        uint32_t cnt = (uint32_t)(rr.body_len / sizeof(rtdbd_point_info_t));
+        const rtdbd_point_info_t *infos = (const rtdbd_point_info_t *)rr.body;
+        if (cnt == 0u) { done = true; break; } /* 空表：合法（n_points=0、弱证据），非失败 */
+        for (uint32_t i = 0u; i < cnt; ++i) {
+            if (n >= S5_DIGEST_MAX_POINTS) return false; /* 超上限降级，防假值 */
+            rtdbd_get_req_t gr;
+            memset(&gr, 0, sizeof(gr));
+            gr.point_id = infos[i].point_id;
+            rpc_reply_t grr;
+            if (!call_rpc(plc, "/indurtdb/v1/point/get", &gr, sizeof(gr), &grr) ||
+                grr.status != 0x80 || grr.body_len < sizeof(rtdbd_get_resp_t)) return false;
+            rtdbd_get_resp_t g;
+            memcpy(&g, grr.body, sizeof(g));
+            if (g.type != infos[i].type || g.point_id != infos[i].point_id) return false; /* TOCTOU */
+            indurtdb_point_t *p = &pts[n++];
+            memset(p, 0, sizeof(*p));
+            memcpy(p->name, infos[i].name, sizeof(p->name));
+            p->partition = infos[i].partition;
+            p->access = infos[i].access;
+            p->type = g.type;
+            p->quality = g.quality;
+            if (g.type == RTDBD_TYPE_STRING) {
+                memcpy(p->value.str, g.value_str, sizeof(p->value.str));
+            } else {
+                /* 数值类型：把 64B 位模式写入 union 前 8 字节（S1 按 type 取有效字节）。 */
+                memcpy(&p->value, &g.value_bits, sizeof(g.value_bits));
+            }
+            p->timestamp_ns = g.timestamp_ns;
+            p->source_timestamp_ns = g.source_ts_ns; /* S5c P1-2：非 timestamp_ns */
+        }
+        /* S5c P0-3：offset 是起始 id；续扫 = 上页最后 point_id + 1。 */
+        offset = (uint64_t)infos[cnt - 1u].point_id + 1u;
+        if (cnt < 107u) done = true; /* 短页到底 */
+    }
+    if (!done) return false;
+
+    rtdbd_digest_t dig;
+    if (!rtdbd_digest_compute(n ? pts : NULL, n, &dig)) return false;
+    int k = snprintf(out_hex, hex_cap, "\"%s\"", dig.hex);
+    if (k <= 0 || (size_t)k >= hex_cap) return false;
+    *out_n = n;
     return true;
 }
 
@@ -275,7 +341,18 @@ int main(int argc, char **argv)
     } else if (strcmp(mode, "f3a") == 0) {
         /* 注入字段保持 unavailable（mark_unavailable_all 已标）。 */
     } else if (strcmp(mode, "f4-before") == 0 || strcmp(mode, "f4-after") == 0) {
-        /* 本态快照；主机侧 s5_f4_compare 比对 digest/peers（schema 字段名统一为 digest_match）。 */
+        /* S5c：现场点集 → S1 digest 独立重算；失败一律 unavailable+reason（不写假值）。 */
+        static char dig_hex[160];
+        uint32_t dig_n = 0u;
+        if (collect_digest(plc.c, dig_hex, sizeof(dig_hex), &dig_n)) {
+            (void)s5_field_set_on_site(&cap, "digest", dig_hex);
+            (void)s5_field_set_u64(&cap, "digest_n_points", (uint64_t)dig_n, S5_SRC_ON_SITE);
+        } else {
+            (void)s5_field_set_unavailable(&cap, "digest",
+                "现场点集采集失败（list/get/分页任一异常），不伪造摘要");
+            (void)s5_field_set_unavailable(&cap, "digest_n_points",
+                "随 digest 一起降级：点集采集失败");
+        }
     } else {
         printf("[S5] unknown mode: %s\n", mode);
         printf("S5_RESULT: FAIL\n");

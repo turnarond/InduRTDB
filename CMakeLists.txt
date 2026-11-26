@@ -188,7 +188,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "SylixOS" AND INDURTDB_IS_TOP_LEVEL AND INDURTDB_E
         "-l:libvsoa-client.so" "-l:libvsoa-server.so"
         "-l:libvsoa-parser.so" "-l:libvsoa-json.so")
     # S5：现场取证程序（双角色 client，复用 s5_capture 纯函数 TU）。
-    add_executable(s5_forensics tests/sylixos/s5_forensics.c tests/sylixos/s5_capture.c)
+    add_executable(s5_forensics tests/sylixos/s5_forensics.c tests/sylixos/s5_capture.c
+        ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/src/cluster/rtdbd_digest.c)
     target_include_directories(s5_forensics PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/include
         ${CMAKE_CURRENT_SOURCE_DIR}/rtdbd/src

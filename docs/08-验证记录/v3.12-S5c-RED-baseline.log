@@ -1,0 +1,32 @@
+[ 71%] Built target indurtdb
+[100%] Built target test_c_s5_capture
+Running main() from ./googletest/src/gtest_main.cc
+Note: Google Test filter = *F4BothUnavailable*:*F4OneSide*:*F4EmptySet*
+[==========] Running 3 tests from 1 test suite.
+[----------] Global test environment set-up.
+[----------] 3 tests from S5Capture
+[ RUN      ] S5Capture.F4BothUnavailableDigestMustNotMatch
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/unit/test_c_s5_capture.cpp:170: Failure
+Expected: (std::string(out).find("\"digest_match\":false")) != (std::string::npos), actual: 18446744073709551615 vs 18446744073709551615
+
+[  FAILED  ] S5Capture.F4BothUnavailableDigestMustNotMatch (1 ms)
+[ RUN      ] S5Capture.F4OneSideMissingDigestMustNotMatch
+[       OK ] S5Capture.F4OneSideMissingDigestMustNotMatch (0 ms)
+[ RUN      ] S5Capture.F4EmptySetMarksWeakEvidence
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/unit/test_c_s5_capture.cpp:199: Failure
+Expected: (std::string(out).find("\"evidence_strength\":\"weak:empty-set\"")) != (std::string::npos), actual: 18446744073709551615 vs 18446744073709551615
+
+/home/yanchaodong/work/my_open_source/InduRTDB/tests/unit/test_c_s5_capture.cpp:200: Failure
+Expected: (std::string(out).find("\"digest_n_points\":0")) != (std::string::npos), actual: 18446744073709551615 vs 18446744073709551615
+
+[  FAILED  ] S5Capture.F4EmptySetMarksWeakEvidence (0 ms)
+[----------] 3 tests from S5Capture (1 ms total)
+
+[----------] Global test environment tear-down
+[==========] 3 tests from 1 test suite ran. (1 ms total)
+[  PASSED  ] 1 test.
+[  FAILED  ] 2 tests, listed below:
+[  FAILED  ] S5Capture.F4BothUnavailableDigestMustNotMatch
+[  FAILED  ] S5Capture.F4EmptySetMarksWeakEvidence
+
+ 2 FAILED TESTS
