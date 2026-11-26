@@ -31,9 +31,10 @@
       "fixture": "tests/integration/test_vsoa_auth.cpp",
       "fields": {
         "deny_bad_token": 130,
-        "admin_set_peers_ok": 128
+        "admin_set_peers_ok": 128,
+        "deny_peer_write": 130
       },
-      "evidence": "docs/08-验证记录/v3.12-S5b-核验报告.md",
+      "evidence": "docs/08-验证记录/v3.12-S5d-核验报告.md",
       "verified_by": "",
       "verified_at": ""
     },
@@ -45,9 +46,11 @@
       "fields": {
         "reject_self": 129,
         "reject_invalid": 129,
-        "reject_over_limit": 129
+        "reject_over_limit": 129,
+        "set_peers_idempotent": 1,
+        "old_table_unchanged": 1
       },
-      "evidence": "docs/08-验证记录/v3.12-S5b-核验报告.md",
+      "evidence": "docs/08-验证记录/v3.12-S5d-核验报告.md",
       "verified_by": "",
       "verified_at": ""
     },

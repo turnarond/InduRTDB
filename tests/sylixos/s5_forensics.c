@@ -213,6 +213,15 @@ static bool collect_digest(vsoa_client_t *plc, char *out_hex, size_t hex_cap, ui
     return true;
 }
 
+/* S5d：读当前成员表并生成身份摘要（addr|node_id，不含 state）。 */
+static bool peers_digest(vsoa_client_t *admin, char *out, size_t cap)
+{
+    rpc_reply_t r;
+    if (!call_rpc(admin, "/indurtdb/v1/sync/peers/get", NULL, 0u, &r) ||
+        r.status != 0x80) return false;
+    return peers_summary(r.body, r.body_len, out, cap);
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 12) {
@@ -269,6 +278,9 @@ int main(int argc, char **argv)
     /* sync_admin /sync/peers/get body → peers 真值（4104B）。 */
     rpc_reply_t peers;
     static char psum[4096];
+    static rtdbd_peers_resp_t initial_peers; /* S5d：保存初始表，f2 尾恢复（非强制空表） */
+    static char initial_psum[4096];
+    static bool initial_ok = false;
     if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/get", NULL, 0u, &peers) &&
         peers.status == 0x80 && peers_summary(peers.body, peers.body_len, psum, sizeof(psum))) {
         /* on-site 值须为合法 JSON 片段：字符串值必须带引号（裸串会破坏 JSON）。 */
@@ -276,6 +288,11 @@ int main(int argc, char **argv)
         (void)snprintf(psum_json, sizeof(psum_json), "\"%s\"", psum);
         (void)s5_field_set_on_site(&cap, "peers", psum_json);
         (void)s5_field_set_status(&cap, "admin_set_peers_ok", peers.status, S5_SRC_ON_SITE);
+        if (peers.body_len >= sizeof(initial_peers)) {
+            memcpy(&initial_peers, peers.body, sizeof(initial_peers));
+            memcpy(initial_psum, psum, sizeof(initial_psum));
+            initial_ok = true;
+        }
     }
 
     if (strcmp(mode, "f2") == 0) {
@@ -300,43 +317,88 @@ int main(int argc, char **argv)
                 (void)s5_field_set_status(&cap, "deny_bad_token", rr.status, S5_SRC_ON_SITE);
             vsoa_client_close(bad.c);
         }
-        /* P8 reject_self：self_addr 必须与 rtdbd --sync-self-addr 同值（现场指令:20）。 */
-        rtdbd_peer_t selfp; memset(&selfp, 0, sizeof(selfp));
-        strncpy(selfp.addr, self_addr, sizeof(selfp.addr) - 1u);
-        strncpy(selfp.node_id, "self-probe", sizeof(selfp.node_id) - 1u);
-        rtdbd_peers_resp_t setreq; memset(&setreq, 0, sizeof(setreq));
-        setreq.count = 1u;
-        memcpy(&setreq.peers[0], &selfp, sizeof(selfp));
+        /* ===== S5d：预置 loopback peer（用户授权），采三字段后恢复初始表 ===== */
+        static rtdbd_peers_resp_t setA;
+        memset(&setA, 0, sizeof(setA));
+        setA.count = 1u;
+        (void)snprintf(setA.peers[0].addr, sizeof(setA.peers[0].addr), "127.0.0.1");
+        (void)snprintf(setA.peers[0].node_id, sizeof(setA.peers[0].node_id), "s5-loopback-peer");
         rpc_reply_t sr;
-        if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/set", &setreq, sizeof(setreq), &sr) &&
-            sr.status != 0x80)
-            (void)s5_field_set_status(&cap, "reject_self", sr.status, S5_SRC_ON_SITE);
-        /* P8 reject_invalid / reject_over_limit：构造非法地址 / 33 项。 */
+        bool preset_ok = call_rpc(admin.c, "/indurtdb/v1/sync/peers/set",
+                                  &setA, sizeof(setA), &sr) && sr.status == 0x80;
+        static char s1[4096], s2[4096], s2b[4096];
+        bool idem_ok = preset_ok && peers_digest(admin.c, s1, sizeof(s1));
+        if (idem_ok &&
+            call_rpc(admin.c, "/indurtdb/v1/sync/peers/set", &setA, sizeof(setA), &sr) &&
+            sr.status == 0x80 && peers_digest(admin.c, s2, sizeof(s2))) {
+            /* 幂等 = 成员身份集合相同（非 raw 4104B 字节级，state 会重置） */
+            (void)s5_field_set_u64(&cap, "set_peers_idempotent",
+                                   strcmp(s1, s2) == 0u ? 1u : 0u, S5_SRC_ON_SITE);
+        } else {
+            (void)s5_field_set_unavailable(&cap, "set_peers_idempotent",
+                "幂等序列失败（预置/二次set/摘要读取任一异常）");
+        }
+        /* P8 reject_self：self_addr 必须与 rtdbd --sync-self-addr 同值。 */
+        rtdbd_peer_t selfp; memset(&selfp, 0, sizeof(selfp));
+        (void)snprintf(selfp.addr, sizeof(selfp.addr), "%s", self_addr);
+        (void)snprintf(selfp.node_id, sizeof(selfp.node_id), "self-probe");
+        rtdbd_peers_resp_t selfreq; memset(&selfreq, 0, sizeof(selfreq));
+        selfreq.count = 1u;
+        memcpy(&selfreq.peers[0], &selfp, sizeof(selfp));
+        rpc_reply_t slfr;
+        if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/set", &selfreq, sizeof(selfreq), &slfr) &&
+            slfr.status != 0x80)
+            (void)s5_field_set_status(&cap, "reject_self", slfr.status, S5_SRC_ON_SITE);
+        /* P8 reject_invalid / reject_over_limit：构造非法地址 / 超限项。 */
         rtdbd_peers_resp_t inv; memset(&inv, 0, sizeof(inv));
-        inv.count = 1u; strcpy(inv.peers[0].addr, "not-an-ip");
-        strcpy(inv.peers[0].node_id, "bad");
+        inv.count = 1u; (void)snprintf(inv.peers[0].addr, sizeof(inv.peers[0].addr), "not-an-ip");
+        (void)snprintf(inv.peers[0].node_id, sizeof(inv.peers[0].node_id), "bad");
         rpc_reply_t ir;
         if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/set", &inv, sizeof(inv), &ir) &&
             ir.status != 0x80)
             (void)s5_field_set_status(&cap, "reject_invalid", ir.status, S5_SRC_ON_SITE);
         rtdbd_peers_resp_t over; memset(&over, 0, sizeof(over));
-        over.count = RTDBD_PEER_MAX + 1u; /* 字段是 uint32，超出上限 */
+        over.count = RTDBD_PEER_MAX + 1u;
         rpc_reply_t orp;
         if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/set", &over, sizeof(over), &orp) &&
             orp.status != 0x80)
             (void)s5_field_set_status(&cap, "reject_over_limit", orp.status, S5_SRC_ON_SITE);
-        /* 正向写 1 点（供 peer_notify_leak 负向窗；全授权）。 */
+        /* 旧表不变：三个拒绝负例后摘要 == S1（合法表 A 的摘要）。 */
+        if (idem_ok && peers_digest(admin.c, s2b, sizeof(s2b)))
+            (void)s5_field_set_u64(&cap, "old_table_unchanged",
+                                   strcmp(s1, s2b) == 0u ? 1u : 0u, S5_SRC_ON_SITE);
+        else
+            (void)s5_field_set_unavailable(&cap, "old_table_unchanged",
+                "旧表比对失败（负例序列/摘要读取异常）");
+        /* 正向写 1 点（供 deny_peer_write 对照）。 */
         rtdbd_write_req_t w; memset(&w, 0, sizeof(w));
         w.point_id = 5u; w.type = RTDBD_TYPE_INT32;
         int32_t v = 1234; memcpy(&w.value_bits, &v, sizeof(v));
         rpc_reply_t wr;
         if (call_rpc(plc.c, "/indurtdb/v1/point/write", &w, sizeof(w), &wr) && wr.status == 0x80)
             (void)s5_field_set_u64(&cap, "writes", 1u, S5_SRC_ON_SITE);
-        /* deny_peer_write：sync_peer 会话写应 DENIED（若成员表校验通过）。 */
-        if (hello(peer.c, &peer)) {
+        /* deny_peer_write：loopback 预置后 sync_peer hello 应成功、写应 DENIED。 */
+        if (preset_ok && hello(peer.c, &peer)) {
             rpc_reply_t pr;
             if (call_rpc(peer.c, "/indurtdb/v1/point/write", &w, sizeof(w), &pr) && pr.status != 0x80)
                 (void)s5_field_set_status(&cap, "deny_peer_write", pr.status, S5_SRC_ON_SITE);
+            else
+                (void)s5_field_set_unavailable(&cap, "deny_peer_write",
+                    "sync_peer 写未返回 DENIED（真值无可证）");
+        } else {
+            (void)s5_field_set_unavailable(&cap, "deny_peer_write",
+                "sync_peer hello 失败（token/service_id/成员表校验未过）");
+        }
+        /* 恢复初始表（非强制空表）+ get 回读摘要校验；取证窗口闭环。 */
+        if (initial_ok) {
+            rpc_reply_t rr;
+            if (call_rpc(admin.c, "/indurtdb/v1/sync/peers/set",
+                         &initial_peers, sizeof(initial_peers), &rr) && rr.status == 0x80) {
+                static char restored[4096];
+                if (peers_digest(admin.c, restored, sizeof(restored)))
+                    (void)s5_field_set_u64(&cap, "peers_restored_ok",
+                        strcmp(initial_psum, restored) == 0u ? 1u : 0u, S5_SRC_ON_SITE);
+            }
         }
     } else if (strcmp(mode, "f3a") == 0) {
         /* 注入字段保持 unavailable（mark_unavailable_all 已标）。 */
